@@ -208,11 +208,27 @@ Checked with ops-intake's own adapter and CLI in `assets/test_growth_signals.py`
 |---|---|---|
 | `growth/metrics.md` | the human decides | the plan |
 | `.skill-contract/growth/.gitignore` | no | `*`, written by the tool before any other write |
-| `.skill-contract/growth/plan.json` | no | every registration, with its frozen thresholds |
+| `.skill-contract/growth/plan.json` | no | every registration, with its frozen thresholds; after `watch`, an `auto` field too (see below) |
 | `.skill-contract/growth/data.jsonl` | no | every imported record, corrections included |
-| `.skill-contract/growth/log.jsonl` | no | an append-only log of register and import; the review cross-checks it against `plan.json` |
+| `.skill-contract/growth/log.jsonl` | no | an append-only log of register, import, watch and auto; the review cross-checks its register events against `plan.json` |
 | `.skill-contract/growth/.lock` | no | the lock file |
 
 The tool refuses a symlink for `plan.json`, `data.jsonl`, `log.jsonl` or `.lock` (`STOP:`,
 exit 2), before its first write, so a link cannot make it read or append outside
 `.skill-contract/growth/`. It opens these files with `O_NOFOLLOW` where the platform has it.
+
+## The watched export (`auto` field)
+
+`watch` adds one field to `plan.json`. `register` keeps it when it writes the file:
+
+```json
+"auto": {"export": "/abs/path/export.jsonl", "by": "Dana", "at": "<time>",
+         "last_sha256": "<64 hex, or null>", "reviewed_at": "<time>"}
+```
+
+- `export` is the absolute path of the file. `by` and `at` say who registered it and when.
+- `last_sha256` is the sha256 of the file's bytes at the last `auto` review. `watch` sets it
+  to null, so the next `auto` reviews the file.
+- `auto` reviews only when the file's sha256 differs from `last_sha256`. It records the new
+  value after the import and the review. A file with new times but the same bytes is skipped.
+- A malformed `auto` field makes `auto` stop (`STOP:`, exit 2).

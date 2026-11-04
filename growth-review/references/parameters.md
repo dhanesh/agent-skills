@@ -12,6 +12,8 @@ and exits 2.
 | `import FILE` | `FILE` is a path, or `-` for stdin | stores the JSON-lines records | `PROBLEM:` lines (at most 50, then `PROBLEM: and <k> more`), `IMPORT: added <a> corrected <c> unchanged <u> problems <p>`, `NEXT: review` | 0, 2, 3 (problem records or lock) |
 | `review` | none | judges each registered metric | `METRIC:`, `CORRECTED:`, `NOTE:`, `REVIEW:`, `NEXT:` | 0, 2, 3 (breach, stale, a corrected or unjudged latest period, a registration changed by hand, or lock) |
 | `signals` | `--source NAME` (an ops-intake source name, not `release`) | prints one intake-signals-jsonl line per breach | JSON lines on stdout only; `NOTE:`/`STOP:` and a final `SIGNALS: <k>` on stderr | 0, 2, 3 (a deleted registration the log remembers, or lock) |
+| `watch FILE` | `--by NAME` (required, not `agent:…` or a lookalike); needs a registered plan | records the absolute path of the export file for `auto`, and clears the recorded digest | `WATCH: <path> by <name> at <time>`, `NEXT:`; on a refusal `STOP:` | 0, 2, 3 (lock) |
+| `auto` | `--source NAME` (an ops-intake source name, not `release`) | when the watched file's sha256 differs from the one recorded at the last `auto`: imports it, reviews, records the new sha256; else nothing | JSON lines on stdout only, the same as `signals`; `SKIP: export unchanged`, or `PROBLEM:`, `IMPORT:`, `METRIC:`, `CORRECTED:`, `NOTE:`, `REVIEW:`, `SIGNALS: <k>`, `NEXT:` on stderr | 0 (skip, or reviewed with breaches as the only attention), 2 (no registered plan, no watched export, a missing or unreadable export, a bad source), 3 (problem records, stale, a corrected or unjudged latest period, a registration changed by hand, or lock) |
 
 Exit codes:
 - **0**: OK.

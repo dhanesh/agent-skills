@@ -13,13 +13,20 @@ Usage: growth.py [--root R] [--today YYYY-MM-DD] <command> ...
   import FILE|-                    add JSON-lines metric records to the git-ignored store
   review                           one METRIC: line per metric and a REVIEW: line
   signals --source NAME            one intake-signals-jsonl line per metric in BREACH
+  watch --by NAME FILE             register the export file that `auto` reviews
+  auto --source NAME               import, review and signal the watched export when its
+                                   content changed since the last `auto`; else
+                                   `SKIP: export unchanged`
 
 Exits: 0 ok; 2 refused input, a bad plan or a bad state file (nothing changed); 3
 attention: a BREACH, a STALE plan, a correction or an unjudged record for the judged period,
 or plan.json and log.jsonl that disagree (review), problem records (import, the other
 records still imported), or the growth lock held. `signals` exits 0 when it printed its
-lines, breaches included: review is the alarm. Machine lines: LINT:, PROBLEM:, NOTE:,
-REGISTERED:, IMPORT:, METRIC:, CORRECTED:, REVIEW:, SIGNALS:, STOP:, NEXT:. `signals` prints
+lines, breaches included: review is the alarm. `auto` writes like `signals` (JSON lines on
+stdout, every other line on stderr) and exits 0 for a skip or a review whose only attention
+is breaches it signalled, 2 for a refusal, and 3 for any other attention. Machine lines: LINT:, PROBLEM:, NOTE:,
+REGISTERED:, IMPORT:, METRIC:, CORRECTED:, REVIEW:, SIGNALS:, WATCH:, SKIP:, STOP:, NEXT:.
+`signals` prints
 only JSON lines on stdout; its notes and the final `SIGNALS: <k>` go to stderr, because
 stdout is piped into `intake import`.
 """
@@ -37,7 +44,7 @@ import time
 import unicodedata
 
 SKILL_NAME = "growth-review"
-VERSION = "0.1.3"
+VERSION = "0.2.0"
 # --today moves the clock that decides which period is complete and which record is from
 # the future, so it is honoured only when this variable is "1". Only the tests and the
 # eval set it.
@@ -614,21 +621,34 @@ def _check_registration(i, reg):
                          % i)
 
 
-def load_registrations(root):
+def load_state(root):
+    """plan.json as a dict ({} when it does not exist), its registrations checked."""
     path = os.path.join(_growth_dir(root), PLAN_STATE)
     try:
         text = _read_text(path)
         if text is None:
-            return []
+            return {}
         st = json.loads(text)
+        if not isinstance(st, dict):
+            raise ValueError("not an object")
         regs = st["registrations"]
         if not isinstance(regs, list):
             raise ValueError("registrations is not a list")
         for i, reg in enumerate(regs, 1):
             _check_registration(i, reg)
-        return regs
+        return st
     except (OSError, ValueError, KeyError, TypeError, RecursionError, ArithmeticError) as e:
         raise StateError("cannot read %s/%s: %s" % (GROWTH_DIR, PLAN_STATE, one_line(e)))
+
+
+def load_registrations(root):
+    return load_state(root).get("registrations", [])
+
+
+def _write_state(root, state):
+    """plan.json with every field it holds; `register` and `watch` each change only theirs."""
+    _write_atomic(root, GROWTH_DIR + "/" + PLAN_STATE,
+                  json.dumps(state, indent=1, sort_keys=True) + "\n")
 
 
 def logged_registrations(root):
@@ -901,7 +921,8 @@ def cmd_register(a):
     try:
         with run_lock(a.root):
             _check_state_files(a.root)
-            regs = load_registrations(a.root)
+            state = load_state(a.root)
+            regs = state.get("registrations", [])
             if not regs and a.reason is None:
                 logged = logged_registrations(a.root)
                 if logged or _data_exists(a.root):
@@ -929,9 +950,7 @@ def cmd_register(a):
             regs.append({"sha256": sha, "by": a.by.strip(), "at": at,
                          "reason": a.reason.strip() if a.reason else None,
                          "metrics": parsed["metrics"]})
-            _write_atomic(a.root, GROWTH_DIR + "/" + PLAN_STATE,
-                          json.dumps({"version": 1, "registrations": regs}, indent=1,
-                                     sort_keys=True) + "\n")
+            _write_state(a.root, dict(state, version=1, registrations=regs))
             _log(a.root, "register", sha256=sha, by=a.by.strip(), reason=a.reason,
                  metrics=sorted(parsed["metrics"]))
     except NotIgnored as e:
@@ -948,11 +967,11 @@ def cmd_register(a):
     return 0
 
 
-def _need_reg(root):
+def _need_reg(root, out=None):
     regs = load_registrations(root)
     if not regs:
         print("STOP: no registered plan; the human registers %s first with register --by "
-              "<their name>" % PLAN_PATH)
+              "<their name>" % PLAN_PATH, file=out or sys.stdout)
         return None
     return regs[-1]
 
@@ -970,40 +989,7 @@ def cmd_import(a):
     try:
         with run_lock(a.root):
             _check_state_files(a.root)
-            reg = _need_reg(a.root)
-            if reg is None:
-                return 2
-            latest, _ = latest_values(load_data(a.root))
-            now = _now()
-            new, problems, added, corrected, unchanged = [], [], 0, 0, 0
-            for n, line in enumerate(raw.splitlines(), 1):
-                if not line.strip():
-                    continue
-                try:
-                    rec = check_record(json.loads(line, parse_constant=_reject_constant),
-                                       reg["metrics"], a.today)
-                except (ValueError, ArithmeticError, RecursionError) as e:
-                    problems.append("line %d: %s" % (n, e if isinstance(e, ValueError)
-                                                     else "value must be a finite number"
-                                                     if isinstance(e, ArithmeticError)
-                                                     else "nested too deeply"))
-                    continue
-                k = (rec["metric"], rec["period"])
-                old = latest.get(k)
-                if old is not None and _same(old, rec):
-                    unchanged += 1
-                    continue
-                rec.update(imported_at=now, correction=old is not None)
-                if old is None:
-                    added += 1
-                else:
-                    corrected += 1
-                latest[k] = rec
-                new.append(rec)
-            if new:
-                _append(a.root, GROWTH_DIR + "/" + DATA_FILE, new)
-                _log(a.root, "import", added=added, corrected=corrected,
-                     unchanged=unchanged, problems=len(problems))
+            got = _import_locked(a.root, raw, a.today)
     except NotIgnored as e:
         return _not_ignored(e)
     except Locked:
@@ -1011,12 +997,62 @@ def cmd_import(a):
     except StateError as e:
         print("STOP: %s" % code(e))
         return 2
-    _print_problems(problems[:50])
+    if isinstance(got, int):
+        return got
+    return _print_import(got)
+
+
+def _import_locked(root, raw, today, out=None):
+    """Store the records in raw; the caller holds the lock. (added, corrected, unchanged,
+    problems), or 2 after a STOP: line when no plan is registered."""
+    reg = _need_reg(root, out)
+    if reg is None:
+        return 2
+    latest, _ = latest_values(load_data(root))
+    now = _now()
+    new, problems, added, corrected, unchanged = [], [], 0, 0, 0
+    for n, line in enumerate(raw.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            rec = check_record(json.loads(line, parse_constant=_reject_constant),
+                               reg["metrics"], today)
+        except (ValueError, ArithmeticError, RecursionError) as e:
+            problems.append("line %d: %s" % (n, e if isinstance(e, ValueError)
+                                             else "value must be a finite number"
+                                             if isinstance(e, ArithmeticError)
+                                             else "nested too deeply"))
+            continue
+        k = (rec["metric"], rec["period"])
+        old = latest.get(k)
+        if old is not None and _same(old, rec):
+            unchanged += 1
+            continue
+        rec.update(imported_at=now, correction=old is not None)
+        if old is None:
+            added += 1
+        else:
+            corrected += 1
+        latest[k] = rec
+        new.append(rec)
+    if new:
+        _append(root, GROWTH_DIR + "/" + DATA_FILE, new)
+        _log(root, "import", added=added, corrected=corrected,
+             unchanged=unchanged, problems=len(problems))
+    return added, corrected, unchanged, problems
+
+
+def _print_import(got, out=None, next_line=True):
+    out = out or sys.stdout
+    added, corrected, unchanged, problems = got
+    for p in problems[:50]:
+        print("PROBLEM: %s" % p, file=out)
     if len(problems) > 50:
-        print("PROBLEM: and %d more" % (len(problems) - 50))
+        print("PROBLEM: and %d more" % (len(problems) - 50), file=out)
     print("IMPORT: added %d corrected %d unchanged %d problems %d"
-          % (added, corrected, unchanged, len(problems)))
-    print("NEXT: review")
+          % (added, corrected, unchanged, len(problems)), file=out)
+    if next_line:
+        print("NEXT: review", file=out)
     return 3 if problems else 0
 
 
@@ -1043,15 +1079,7 @@ def _load_for_review(root, out):
     """(reg, records, stale notes, integrity notes) under the lock, or an exit code."""
     try:
         with run_lock(root):
-            regs = load_registrations(root)
-            broken = integrity_notes(regs, logged_registrations(root))
-            if not regs:
-                for note in broken:
-                    print("NOTE: %s" % note, file=out)
-                print("STOP: no registered plan; the human registers %s first with register "
-                      "--by <their name>" % PLAN_PATH, file=out)
-                return 3 if broken else 2
-            return regs[-1], load_data(root), stale_notes(root, regs[-1]), broken
+            return _load_for_review_locked(root, out)
     except NotIgnored as e:
         return _not_ignored(e, out)
     except Locked:
@@ -1059,6 +1087,19 @@ def _load_for_review(root, out):
     except StateError as e:
         print("STOP: %s" % code(e), file=out)
         return 2
+
+
+def _load_for_review_locked(root, out):
+    """_load_for_review() for a caller that holds the lock."""
+    regs = load_registrations(root)
+    broken = integrity_notes(regs, logged_registrations(root))
+    if not regs:
+        for note in broken:
+            print("NOTE: %s" % note, file=out)
+        print("STOP: no registered plan; the human registers %s first with register "
+              "--by <their name>" % PLAN_PATH, file=out)
+        return 3 if broken else 2
+    return regs[-1], load_data(root), stale_notes(root, regs[-1]), broken
 
 
 def _registered_note(reg):
@@ -1072,8 +1113,16 @@ def cmd_review(a):
     got = _load_for_review(a.root, sys.stdout)
     if isinstance(got, int):
         return got
+    breaches, other = _print_review(got, a.today, sys.stdout)
+    return 3 if breaches or other else 0
+
+
+def _print_review(got, today, out, next_signals=True):
+    """The review lines for (reg, records, stale, broken) on out. Returns (the BREACH count,
+    True when anything else needs the human: STALE, a corrected or unjudged latest period,
+    or a registration changed by hand)."""
     reg, records, stale, broken = got
-    rows = evaluate(reg, records, a.today)
+    rows = evaluate(reg, records, today)
     flag = " +stale" if stale else ""
     counts = {s: 0 for s in STATUSES}
     unjudged = []
@@ -1081,48 +1130,65 @@ def cmd_review(a):
         counts[r["status"]] += 1
         v = _fmt(r["record"]["value"]) if r["record"] else "-"
         print("METRIC: %s %s%s value=%s period=%s" % (r["name"], r["status"], flag, v,
-                                                     r["period"]))
+                                                     r["period"]), file=out)
         if r["record"] is not None and r["status"] == "NO_DATA":
             unjudged.append(r)
     judged = {r["name"]: r["period"] for r in rows}
     judged_corrected = []
     for name, period, old, new, now in corrections(reg, records):
-        print(corrected_line(name, period, old, new, now))
+        print(corrected_line(name, period, old, new, now), file=out)
         if judged.get(name) == period:
             judged_corrected.append(name)
     for note in stale:
-        print("NOTE: stale %s" % note)
+        print("NOTE: stale %s" % note, file=out)
     for r in unjudged:
         print("NOTE: %s %s has a value, but n=%s is below min_n %d, so the review cannot "
               "judge it" % (r["name"], r["period"], _n_text(r["record"].get("n")),
-                            r["metric"]["min_n"]))
+                            r["metric"]["min_n"]), file=out)
     for note in broken:
-        print("NOTE: %s" % note)
-    print(_registered_note(reg))
+        print("NOTE: %s" % note, file=out)
+    print(_registered_note(reg), file=out)
     print("REVIEW: ok=%d warn=%d breach=%d no_data=%d stale=%s"
           % (counts["OK"], counts["WARN"], counts["BREACH"], counts["NO_DATA"],
-             "yes" if stale else "no"))
-    if counts["BREACH"]:
+             "yes" if stale else "no"), file=out)
+    if counts["BREACH"] and next_signals:
         print("NEXT: signals --source <intake source> | intake import --format "
-              "intake-signals-jsonl --source <intake source>")
+              "intake-signals-jsonl --source <intake source>", file=out)
     if stale:
         print("NEXT: show the human the NOTE: stale lines; the review used the thresholds "
-              "registered on %s, and only the human registers again" % reg["at"])
+              "registered on %s, and only the human registers again" % reg["at"], file=out)
     if judged_corrected or unjudged:
         print("NEXT: show the human the CORRECTED: and NOTE: lines; a corrected or unjudged "
-              "latest period can hide a breach, so the human checks the export")
+              "latest period can hide a breach, so the human checks the export", file=out)
     if broken:
         print("NEXT: show the human the NOTE: lines; the registration record was changed by "
-              "hand, and only the human registers again")
-    attention = counts["BREACH"] or stale or judged_corrected or unjudged or broken
-    return 3 if attention else 0
+              "hand, and only the human registers again", file=out)
+    other = bool(stale or judged_corrected or unjudged or broken)
+    return counts["BREACH"], other
+
+
+def _source_ok(source, err):
+    if not SOURCE_RE.match(source or "") or source == "release":
+        print("STOP: --source must be an ops-intake source name (1 to 50 letters, digits, _, "
+              ". or -, starting with a letter or digit; not release)", file=err)
+        return False
+    return True
+
+
+def _print_signals(source, reg, records, today):
+    """One intake-signals-jsonl line per metric in BREACH, on stdout. Returns the count."""
+    k = 0
+    for r in evaluate(reg, records, today):
+        if r["status"] == "BREACH":
+            print(json.dumps(signal_line(source, r), sort_keys=True))
+            k += 1
+    sys.stdout.flush()
+    return k
 
 
 def cmd_signals(a):
     err = sys.stderr
-    if not SOURCE_RE.match(a.source or "") or a.source == "release":
-        print("STOP: --source must be an ops-intake source name (1 to 50 letters, digits, _, "
-              ". or -, starting with a letter or digit; not release)", file=err)
+    if not _source_ok(a.source, err):
         return 2
     got = _load_for_review(a.root, err)
     if isinstance(got, int):
@@ -1133,13 +1199,140 @@ def cmd_signals(a):
               file=err)
     for note in broken:
         print("NOTE: %s" % note, file=err)
-    k = 0
-    for r in evaluate(reg, records, a.today):
-        if r["status"] == "BREACH":
-            print(json.dumps(signal_line(a.source, r), sort_keys=True))
-            k += 1
-    sys.stdout.flush()
+    k = _print_signals(a.source, reg, records, a.today)
     print("SIGNALS: %d" % k, file=err)
+    return 0
+
+
+# -- Unattended review of a watched export ----------------------------------------
+# plan.json holds the watched export under the key "auto": the file's absolute path, who
+# registered it and when, and the sha256 of its content at the last `auto` review.
+AUTO_KEY = "auto"
+SHA_RE = re.compile(r"^[0-9a-f]{64}\Z")
+
+
+def _watched(state):
+    """The checked "auto" entry of plan.json, or None when no export is registered."""
+    w = state.get(AUTO_KEY)
+    if w is None:
+        return None
+    if not (isinstance(w, dict) and isinstance(w.get("export"), str)
+            and os.path.isabs(w["export"]) and isinstance(w.get("by"), str)
+            and isinstance(w.get("at"), str)
+            and (w.get("last_sha256") is None
+                 or (isinstance(w["last_sha256"], str) and SHA_RE.match(w["last_sha256"])))):
+        raise StateError("%s/%s: the %s entry is malformed" % (GROWTH_DIR, PLAN_STATE,
+                                                              AUTO_KEY))
+    return w
+
+
+def _read_export(path):
+    """(bytes, None) for a plain readable export file, else (None, why)."""
+    if not os.path.lexists(path):
+        return None, "the export file %s is missing" % code(path)
+    if not os.path.isfile(path):
+        return None, "the export %s is not a plain file" % code(path)
+    try:
+        with open(path, "rb") as f:
+            return f.read(), None
+    except OSError as e:
+        return None, "cannot read the export %s: %s" % (code(path), code(e))
+
+
+def cmd_watch(a):
+    if not _name_ok(a.by):
+        print("STOP: --by needs the name of the human who chose the export file")
+        return 2
+    if _is_agent(a.by):
+        print("STOP: an agent: name cannot choose the export file; the human sets up the "
+              "export the unattended review reads")
+        return 2
+    path = os.path.abspath(a.file)
+    _, why = _read_export(path)
+    if why:
+        print("STOP: %s" % why)
+        return 2
+    try:
+        with run_lock(a.root):
+            _check_state_files(a.root)
+            state = load_state(a.root)
+            if not state.get("registrations"):
+                _need_reg(a.root)
+                return 2
+            at = _now()
+            state[AUTO_KEY] = {"export": path, "by": a.by.strip(), "at": at,
+                               "last_sha256": None}
+            _write_state(a.root, state)
+            _log(a.root, "watch", export=path, by=a.by.strip())
+    except NotIgnored as e:
+        return _not_ignored(e)
+    except Locked:
+        return _locked()
+    except StateError as e:
+        print("STOP: %s" % code(e))
+        return 2
+    print("WATCH: %s by %s at %s" % (code(path), code(a.by.strip()), at))
+    print("NEXT: auto --source <intake source> | intake import --format intake-signals-jsonl "
+          "--source <intake source>")
+    return 0
+
+
+def cmd_auto(a):
+    """Review the watched export when its content changed since the last `auto` review.
+    stdout carries only the signal lines, as `signals` prints them, so the same pipe into
+    `intake import` takes them; every other line goes to stderr."""
+    err = sys.stderr
+    if not _source_ok(a.source, err):
+        return 2
+    try:
+        with run_lock(a.root):
+            _check_state_files(a.root)
+            state = load_state(a.root)
+            if _need_reg(a.root, err) is None:
+                return 2
+            w = _watched(state)
+            if w is None:
+                print("STOP: no export file is registered for the unattended review; the "
+                      "human registers it with watch --by <their name> <file>", file=err)
+                return 2
+            data, why = _read_export(w["export"])
+            if why:
+                print("STOP: %s" % why, file=err)
+                print("NEXT: the human checks the export set up for watch", file=err)
+                return 2
+            digest = hashlib.sha256(data).hexdigest()
+            if w.get("last_sha256") == digest:
+                print("SKIP: export unchanged", file=err)
+                return 0
+            try:
+                raw = data.decode("utf-8")
+            except ValueError:
+                print("STOP: the export %s is not UTF-8 text" % code(w["export"]), file=err)
+                return 2
+            imported = _import_locked(a.root, raw, a.today, err)
+            if isinstance(imported, int):
+                return imported
+            got = _load_for_review_locked(a.root, err)
+            if isinstance(got, int):
+                return got
+            state[AUTO_KEY] = dict(w, last_sha256=digest, reviewed_at=_now())
+            _write_state(a.root, state)
+            _log(a.root, "auto", sha256=digest)
+    except NotIgnored as e:
+        return _not_ignored(e, err)
+    except Locked:
+        return _locked(err)
+    except StateError as e:
+        print("STOP: %s" % code(e), file=err)
+        return 2
+    problems = _print_import(imported, err, next_line=False)
+    breaches, other = _print_review(got, a.today, err, next_signals=False)
+    reg, records, _, _ = got
+    k = _print_signals(a.source, reg, records, a.today)
+    print("SIGNALS: %d" % k, file=err)
+    if problems or other:
+        print("NEXT: show the human the PROBLEM:, NOTE: and CORRECTED: lines above", file=err)
+        return 3
     return 0
 
 
@@ -1162,6 +1355,8 @@ def main(argv=None):
     s = sub.add_parser("import"); s.add_argument("file")
     sub.add_parser("review")
     s = sub.add_parser("signals"); s.add_argument("--source", required=True)
+    s = sub.add_parser("watch"); s.add_argument("--by", required=True); s.add_argument("file")
+    s = sub.add_parser("auto"); s.add_argument("--source", required=True)
     try:
         a = p.parse_args(argv)
     except SystemExit as e:
@@ -1178,7 +1373,8 @@ def main(argv=None):
     else:
         a.today = _utc_today()
     return {"lint": cmd_lint, "register": cmd_register, "import": cmd_import,
-            "review": cmd_review, "signals": cmd_signals}[a.cmd](a)
+            "review": cmd_review, "signals": cmd_signals, "watch": cmd_watch,
+            "auto": cmd_auto}[a.cmd](a)
 
 
 if __name__ == "__main__":
