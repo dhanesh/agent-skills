@@ -195,6 +195,91 @@ for a release `deploy_staging` and a `push_tag` that CI cannot turn into a deplo
 floors live in the checker rather than in the grant: an unattended run goes as far as an open
 pull request or a staging deploy, and a human merges and deploys to production.
 
+**The pipeline grant (`pipeline-grant/v1`).** A pipeline grant is an envelope of kind
+`https://github.com/dhanesh/agent-skills/skill-contract/pipeline-grant/v1`. It is a standing
+grant: the human accepts it once, and the pipeline then derives one `autonomy-grant/v1` per plan
+from it (`write_grant.py --under-pipeline`), only inside its limits. A pipeline grant covers no
+action by itself. `check-grant` reads only `autonomy-grant/v1` envelopes, so it never selects a
+pipeline grant, and a caller MUST NOT act on a pipeline grant directly.
+
+Its subjects pin exactly two files: the pick policy that the owner registered and the committed
+command allowlist (`.factory/check-commands.txt`). Its payload carries these fields, all
+required unless marked optional:
+
+| Field | Type | Description |
+|---|---|---|
+| `scope` | object | `repo` and `branch_pattern`, with the same shape and rules as in `autonomy-grant/v1`. |
+| `gate_policy` | object | Action class → `auto`, `grant` or `ask`, with the same classes and floors as in `autonomy-grant/v1`. A class absent from it is `ask`. `auto` is allowed only on `read_only` and `local_reversible`. Any gate other than `ask` on `merge`, `deploy`, `spend`, `external_message` or `delete` makes the grant invalid. |
+| `caps` | object | Exactly the three keys `max_plans_per_day`, `max_open_runs` and `max_dispatches_per_day`. Each is an integer ≥ 1 (a boolean is not an integer). A missing key, an extra key or any other value makes the grant invalid. |
+| `pick_policy` | object | Exactly `{"path": "<relative path>", "sha256": "<64 lowercase hex>"}`: the pick-policy digest. `path` MUST name one of the grant's subjects, and `sha256` MUST equal that subject's digest. |
+| `allowlist` | object | Exactly `{"path": "<relative path>", "sha256": "<64 lowercase hex>"}`: the allowlist digest. The same rules as `pick_policy` apply. `path` is normally `.factory/check-commands.txt`. |
+| `budget` | object | The per-plan ceiling, with the same keys as the `autonomy-grant/v1` `budget`. A derived grant's budget MUST NOT exceed any cap given here. |
+| `stop_on` | list | As in `autonomy-grant/v1`. A derived grant carries every entry. |
+| `expires_at` | string | RFC 3339 UTC. It MUST NOT be more than 7 days after `generatedAtTime`. |
+| `revoked` | boolean | `false` on a grant; `true` only on a revocation. |
+| `reentry` | object, optional | As in `autonomy-grant/v1`. A derived grant MAY copy it. |
+
+The caps mean:
+
+- `max_plans_per_day`: the most per-plan grants that the pipeline derives in one UTC calendar day.
+- `max_open_runs`: the most runs that may be open at one time under this grant. A run is open
+  from its derived grant until its run-result envelope exists.
+- `max_dispatches_per_day`: the most agent dispatches, summed over all runs under this grant, in
+  one UTC calendar day.
+
+The pipeline counts against the caps from its local, append-only log. When a cap is reached, the
+pipeline stops and derives no new grant and starts no new dispatch until the count falls below the
+cap. A cap is a stop, not a warning.
+
+These rules apply to a pipeline grant as they apply to an autonomy grant:
+
+- It MUST carry exactly one `grant-accepted` assertion whose `assertedBy` names a human. A
+  pipeline grant attributed to a skill is invalid.
+- It is never signed. A payload carrying `require_signature` is invalid.
+- It MUST NOT live more than 7 days. A receiver MUST treat a pipeline grant whose `expires_at` is
+  past, or more than 7 days after now, as not covering anything.
+- It is one user's acceptance and MUST NOT be committed. A receiver MUST treat a tracked pipeline
+  grant as not covering anything.
+- A receiver MUST treat a revoked, superseded or stale pipeline grant as not covering anything.
+  It is stale when the pick policy or the allowlist no longer matches its digest, so a change to
+  either file stops the pipeline until the owner accepts a new grant.
+
+**A grant derived from a pipeline grant.** A derived grant is an ordinary `autonomy-grant/v1`
+with one more optional payload field, `derived_from`: exactly `{"id": "<pipeline grant id>",
+"sha256": "<sha256 of the pipeline grant file>"}`. Its `grant-accepted` assertion names the same
+human as the pipeline grant's assertion. A derived grant is valid only when all of these are true:
+
+- Its pipeline grant, found by `derived_from.id`, exists, matches `derived_from.sha256` and covers
+  something (it is valid, not revoked, not superseded, not expired, not stale and not tracked).
+- Its `branch_pattern` matches only branches that the pipeline grant's `branch_pattern` matches.
+  The simplest form copies the pipeline grant's pattern.
+- Its `gate_policy` gives no class a gate more permissive than the pipeline grant gives it
+  (`ask` < `grant` < `auto`).
+- Its `expires_at` is not later than the pipeline grant's `expires_at`.
+- Every cap in its `budget` is at most the same cap in the pipeline grant's `budget`.
+
+When any of these is false, `check-grant` treats the derived grant as not covering anything and
+answers ASK with reason `pipeline`. `write_grant.py --under-pipeline` MUST refuse to write a
+derived grant that breaks one of these rules, or that would exceed `max_plans_per_day` or
+`max_open_runs`. A plan whose check commands do not all match the allowlist gets no derived grant;
+it waits for the owner's read.
+
+**The kill switch.** `revoke-grant` with no id revokes every live grant of both kinds: each
+pipeline grant and each autonomy grant, derived or not. Revoking a pipeline grant also stops every
+grant derived from it, because a derived grant covers nothing while its pipeline grant is revoked.
+`revoke-grant --id <id>` on a pipeline grant revokes that pipeline grant, and with it every grant
+derived from it.
+
+**`check-pipeline-grant`.** `contract_check.py check-pipeline-grant` judges the newest pipeline
+grant that no revision supersedes, or the one named by `--id`. It runs, in order: envelope
+validity (commandments 3–6), human attribution (skipped for a revoked revision), the payload
+shape (`scope`, `gate_policy` floors, `caps`, `pick_policy`, `allowlist`, `budget`), then not
+revoked, not superseded, not expired, not living past the 7-day floor, subjects not stale, and
+the grant file not tracked by git. An `ASK` names the first failing check as its reason
+(`revoked`, `superseded`, `expired`, `lifetime`, `stale` or `tracked`). It prints
+`PIPELINE-GRANT: VALID id=… expires_at=…` on success. It exits 0 `VALID`, 3 `ASK` or `NONE`
+(no pipeline grant exists), 2 `INVALID`, and 1 on a usage error. A caller proceeds only on exit 0.
+
 **The run result.** A run result is an envelope of kind
 `https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1`. `factory-conductor`
 produces it when a run ends (`conductor.py finish`), whether a stop rule ended the run or not.
