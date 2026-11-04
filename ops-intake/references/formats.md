@@ -19,7 +19,7 @@ only as one-line code spans.
 | `gh-issues-json` | `gh issue list --repo OWNER/REPO --state all --limit 100 --json number,title,body,labels,state,createdAt,updatedAt,url` | any configured name | an item per issue |
 | `gh-runs-json` | `gh run list --branch <default> --json databaseId,workflowName,headBranch,headSha,event,status,conclusion,createdAt,updatedAt,url,attempt` | any configured name | failing runs, held until their jobs come in |
 | `gh-run-jobs-json` | `gh run view <run id> --json jobs`, imported with `--run <run id>` | any configured name | an item per failing job |
-| `git-rev-list` | `git rev-list <release commit>`, imported with `--commit <release commit>` | none (no `--source`) | the release history, for loop closing |
+| `git-rev-list` | `git rev-list <release commit>` (with subjects: see below), imported with `--commit <release commit>` | none (no `--source`) | the release history, for loop closing |
 | `intake-signals-jsonl` | your own transform, one signal per line | any configured name | an item per line, `trust: low` (flag `+low-trust`) |
 | `feedback-jsonl` | your transform of an inbox, review or form export, one message per line | any configured name | an item per topic, kind `feedback`, `trust: low` (flag `+low-trust`) |
 
@@ -93,6 +93,15 @@ There is no `jira-mcp`, `jira-acli` or `linear-mcp` format. The owner decided on
 
 - One 40-hex sha per line, as `git rev-list` prints them (newest first). The first line must
   be the `--commit` value. If it is not, nothing is stored.
+- A line can also hold the commit subject after the sha and one space or tab. Sync's `NEXT:`
+  line asks for this form: `git rev-list <commit> --no-commit-header --format=%H%x20%s`. Git
+  before 2.33 has no `--no-commit-header`; its `commit <sha>` header lines are skipped.
+- Intake keeps no subject text. When a subject ends with `(#<n>)`, as a GitHub squash merge
+  writes it (`Add X (#42)`), intake stores n in the history's `prs` list. A run-result whose
+  `pr.number` is n then resolves its item on that verified release. The match is exact: `(#4)`
+  and `(#142)` do not match PR 42, and a number before the end of the subject does not count.
+- The run-result field is optional: `"pr": {"number": 42}`, or null. Any other value is a
+  `PROBLEM:` and sync skips that envelope.
 - Empty output means the commit is not in this clone. Sync then prints, once,
   `NEXT: git fetch, then re-import: …` and the item waits at `needs-resolve`.
 - At most 20000 shas are kept per commit. Histories no planned item needs are dropped.
