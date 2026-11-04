@@ -153,10 +153,26 @@ bytes match the snapshot. Every git call of the tick runs with `core.fsmonitor=f
 `core.hooksPath=/dev/null`, no replace objects, no system config and no `GIT_*` variable
 from the caller, and every tool gets the same switches through `GIT_CONFIG_COUNT`.
 
+**A poisoned tick.** When a planner changed the repository, the git config or hooks, or
+spec-first-planning's files (any `planner-changed-*` reason), or when a
+spec-first-planning file differs from the baseline the tick took before any planner ran,
+the tick prints `STOP: planner-tamper <the-repo|git|tools>` and trusts nothing for the
+rest of the tick. It runs no further spec-first-planning tool (no cap count, no plan
+check, no derive grant), moves every plan of the tick (the ready ones too) and every
+derived grant to the digest list as waiting for the owner's read, prints
+`STAGE: <name> skipped planner-tamper=<what>` for autopick, plan, derive grant and build,
+still runs release stage and digest (they run no spec-first-planning code), and exits 4.
+Before every run of a spec-first-planning tool, the tick checks every file of that skill
+against that baseline. Every Python tool the tick starts runs as `python -I -B`, so no
+`usercustomize.py`, `.pth` file or `PYTHON*` variable is loaded.
+
 These guards are tripwires, not a sandbox: the planner runs as the owner and can reach
 whatever the owner can. Give it restricted tools (for Claude Code, an `--allowedTools`
 list that lets it edit files and read the repository, and no shell), and keep its
-permission prompts on; the checker refuses a permission-bypass flag in any form.
+permission prompts on; the checker refuses a permission-bypass flag in any form. The
+snapshot skips `.skill-contract/runs/`, so a planner that forges or deletes run
+directories can lower the dispatch count. The owner's own git hooks and fsmonitor are off
+for every tool the tick runs, the sweep commands included.
 
 Anything else prints `PLAN: waiting <spec> reason=<reason>` and hands nothing on. The
 reasons include `planner-exit=<n>`, `planner-timeout`, `planner-changed-the-repo`,
@@ -208,6 +224,9 @@ removed (decision D9 of the factory spec: a run installs no timer).
 
 1. **Run one tick.** Run `python3 "$SKILL_DIR/assets/pipeline.py" --root <repo> tick`. Lines
    that start with two spaces and `<stage>|` are the stage tool's own output. When the tick
+   prints `STOP: planner-tamper <what>` and exits 4, a planner changed what the tick relies
+   on: report every waiting plan, tell the owner to inspect the `  plan| changed:` paths
+   before the next tick, and do not derive or build anything by hand. When the tick
    prints `STOP: no-grant reason=<reason>` and exits 2, no stage ran: report the reason
    (`none`, `revoked`, `expired`, `stale`, `tracked` and so on), and tell the owner that a
    new pipeline grant is theirs to accept (`write_grant.py --pipeline` in

@@ -85,7 +85,7 @@ try:
         b = json.load(f)
 except OSError:
     if REAL and key in REAL[1]:
-        os.execv(sys.executable, [sys.executable, REAL[0]] + sys.argv[1:])
+        os.execv(sys.executable, [sys.executable, "-I", "-B", REAL[0]] + sys.argv[1:])
     b = {"stdout": "", "stderr": "", "exit": 0}
 time.sleep(b.get("sleep", 0))
 for rel, text in sorted((b.get("write") or {}).items()):

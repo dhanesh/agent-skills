@@ -108,9 +108,12 @@ directory beside this skill, <root>/.agents/skills, <root>/.claude/skills,
 ~/.agents/skills, ~/.claude/skills. `--skills-dir` (repeatable) or $FACTORY_PIPELINE_SKILLS
 (os.pathsep-separated) replaces that list, so a test can point at stub skills only.
 
-The tick runs every tool with sys.executable, an argv list and no shell. Stdlib only,
-Python 3.10+, POSIX. Exits: 0 every stage ran; 2 usage error, a state directory that is not
-git-ignored, or no live pipeline grant; 3 another tick holds the pipeline lock.
+The tick runs every tool with sys.executable -I -B (see LAUNCH), an argv list and no
+shell. Stdlib only, Python 3.10+, POSIX. Exits: 0 every stage ran; 2 usage error, a state
+directory that is not git-ignored, or no live pipeline grant; 3 another tick holds the
+pipeline lock; 4 a planner tamper poisoned the tick (`STOP: planner-tamper <what>`: no
+further spec-first-planning tool runs, no grant is derived, no build starts, every plan
+of the tick waits; see poison()).
 
 `schedule install --every MINUTES` (R16) installs one OS timer that runs `pipeline tick` for
 this repo every MINUTES. It checks 15 <= MINUTES <= 1440 (a whole number) before it does
@@ -165,6 +168,9 @@ CAPS = ("max_plans_per_day", "max_open_runs", "max_dispatches_per_day")
 STAGE_CAPS = {"autopick": CAPS, "plan": CAPS, "derive-grant": CAPS,
               "build": ("max_dispatches_per_day",)}
 GATED = tuple(STAGE_CAPS)
+# R17: after a planner tamper, every stage that would run spec-first-planning code or
+# start work is skipped. release-stage and digest run no spec-first-planning code.
+TAMPER_SKIP = ("autopick", "plan", "derive-grant", "build")
 CAP_STOPS = "cap-stops.jsonl"
 RUNS_DIR = ".skill-contract/runs"   # factory-conductor's run directories
 RUN_ID = re.compile(r"^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\Z")  # conductor's RUN_ID_RE
@@ -240,6 +246,8 @@ class Tick:
         self.waiting = []   # (kind, what, next command) for the digest (R21)
         self.stops = []     # the caps that stopped this tick, in order (R15)
         self.gate = None    # run_tick sets it: gate(stage) -> cap name or None (R15)
+        self.baseline = None  # spec-first-planning's files before any planner ran (R17)
+        self.tampered = None  # what a planner changed: the tick trusts nothing after it
 
 
 # ── finding the sibling skills ──────────────────────────────────────────────────────────
@@ -366,15 +374,17 @@ def worse(a, b):
     return a if SEVERITY.get(a, 3) >= SEVERITY.get(b, 3) else b
 
 
+# Every Python tool the tick starts runs isolated: `python -I -B` loads no PYTHONPATH,
+# no PYTHON* variable and no user site-packages (where a planner could plant a
+# usercustomize.py or a .pth file), and writes no bytecode. -I also drops the script's
+# directory from sys.path, so this launcher puts back only the tool's own directory
+# (ops-intake's intake.py imports its siblings from there) and runs the tool as __main__.
+LAUNCH = ("import os, runpy, sys; t = sys.argv[1]; sys.argv = sys.argv[1:]; "
+          "sys.path.insert(0, os.path.dirname(t)); runpy.run_path(t, run_name='__main__')")
+
+
 def py(tool, *args):
-    return [sys.executable, tool] + list(args)
-
-
-def py_isolated(tool, *args):
-    """python -I: no PYTHONPATH, no user site-packages (where a planner could plant a
-    usercustomize.py), no script directory on sys.path. spec-first-planning's tools put
-    their own directory on sys.path themselves."""
-    return [sys.executable, "-I", tool] + list(args)
+    return [sys.executable, "-I", "-B", "-c", LAUNCH, tool] + list(args)
 
 
 # ── the stages ──────────────────────────────────────────────────────────────────────────
@@ -474,6 +484,13 @@ def stage_plan(tick):
                                  % reason))
             print("PLAN: waiting %s reason=%s" % (what, reason))
         sys.stdout.flush()
+        if tick.tampered:
+            for rest in tick.picked[i + 1:]:
+                tick.waiting.append(("plan-read", shown(rest), "waiting for owner's read: "
+                                     "reason=planner-tamper-%s" % tick.tampered))
+            return "refused", join("ready=0 waiting=%d" % (waiting + len(tick.picked[i + 1:])
+                                                          + ready),
+                                   "tamper=%s" % tick.tampered)
     word = "ok" if waiting == 0 else "attention"
     return word, join("ready=%d waiting=%d" % (ready, waiting),
                       "cap=%s" % capped if capped else "")
@@ -705,14 +722,48 @@ def changed_reason(before, after):
     return "planner-changed-%s" % first
 
 
-def tool_unchanged(before, tools, name):
-    """True when the tool file still has the sha256 the pre-planner snapshot recorded."""
-    sk = skill_dir_of(tools[name])
-    key = "tools:%s/%s" % (sk, os.path.relpath(tools[name], sk).replace(os.sep, "/"))
+def tool_digest(tick):
+    """{key: digest} of every file of the spec-first-planning skill the tick runs, or None
+    when that skill is not installed."""
+    tool = find_tool(tick.roots, PLANNING)
+    if tool is None:
+        return None
+    out = {}
     try:
-        return key in before and _sha(tools[name]) == before[key]
-    except OSError:
+        _walk(out, [0, 0], "tools", skill_dir_of(tool))
+    except TooLarge:
+        out["tools"] = "too-large"
+    return out
+
+
+def tools_trusted(tick):
+    """False once the tick is poisoned, or when spec-first-planning's files differ from the
+    baseline taken before any planner ran in this tick (which poisons the tick). Called
+    before every run of a spec-first-planning tool after the baseline."""
+    if tick.tampered:
         return False
+    if tool_digest(tick) != tick.baseline:
+        poison(tick, "tools")
+        return False
+    return True
+
+
+def poison(tick, what):
+    """A planner changed something the tick relies on: trust nothing for the rest of the
+    tick. Print `STOP: planner-tamper <what>`, and move every plan and every grant of this
+    tick to the digest list, so nothing is derived or built."""
+    if tick.tampered:
+        return
+    tick.tampered = what
+    print("STOP: planner-tamper %s: no grant is derived and no build starts in this tick; "
+          "the owner reads what changed" % what)
+    sys.stdout.flush()
+    why = "waiting for owner's read: reason=planner-tamper-%s" % what
+    for plan in tick.plans:
+        tick.waiting.append(("plan-read", plan, why))
+    for plan, grant in tick.grants:
+        tick.waiting.append(("plan-read", grant, why))
+    tick.plans, tick.grants = [], []
 
 
 def request_of(tick, env):
@@ -792,7 +843,9 @@ def plan_one(tick, env, tools, allow):
     # written.
     if not ignored(tick, spec):
         return None, spec, "spec-not-ignored"
-    word, code, out = run_tool(tick, "plan", py_isolated(tools[kind], env_path),
+    if not tools_trusted(tick):
+        return None, spec, "planner-tamper"
+    word, code, out = run_tool(tick, "plan", py(tools[kind], env_path),
                                echo_stdout=False)
     if code != 0:
         return None, spec, "request-refused"
@@ -825,26 +878,29 @@ def plan_one(tick, env, tools, allow):
         after = None
     changed = changed_reason(before, after)
     if changed:
+        poison(tick, changed[len("planner-changed-"):])
         return None, spec, changed
     if os.path.islink(spec_path) or not os.path.isfile(spec_path):
         return None, spec, "spec-replaced"
     if allowlist_rel(tick) != allow:
         return None, spec, "allowlist-changed"
-    if not tool_unchanged(before, tools, "lint"):
-        return None, spec, "planner-changed-tools"
-    word, code, _ = run_tool(tick, "plan", py_isolated(tools["lint"], "--unattended", spec))
+    if not tools_trusted(tick):
+        return None, spec, "planner-tamper"
+    word, code, _ = run_tool(tick, "plan", py(tools["lint"], "--unattended", spec))
     if code != 0:
         return None, spec, "lint-failed"
-    if not tool_unchanged(before, tools, "tasks"):
-        return None, spec, "planner-changed-tools"
-    word, code, _ = run_tool(tick, "plan", py_isolated(tools["tasks"], spec,
+    if not tools_trusted(tick):
+        return None, spec, "planner-tamper"
+    word, code, _ = run_tool(tick, "plan", py(tools["tasks"], spec,
                                                        "--allowlist", allow))
     if code != 0:
         return None, spec, {3: "allowlist-unlisted", 2: "allowlist-error"}.get(
             code, "allowlist-failed")
+    if not tools_trusted(tick):
+        return None, spec, "planner-tamper"
     # The absolute spec path: spec_to_tasks.py pins it relative to --envelope's root, and
     # a cwd that the OS reports through a symlink (macOS /var) would not match that root.
-    word, code, out = run_tool(tick, "plan", py_isolated(tools["tasks"], spec_path,
+    word, code, out = run_tool(tick, "plan", py(tools["tasks"], spec_path,
                                                          "--envelope", tick.root),
                                echo_stdout=False)
     plan = None
@@ -873,11 +929,15 @@ def stage_derive_grant(tick):
         # before each later one, since the plan just derived may have reached a cap.
         if i and tick.gate is not None:
             capped = tick.gate("derive-grant")
+            if tick.tampered:
+                return "refused", "tamper=%s" % tick.tampered
             if capped:
                 for rest in tick.plans[i:]:
                     tick.waiting.append(("cap", rest, "wait for %s to fall below its cap"
                                          % capped))
                 break
+        if not tools_trusted(tick):  # poison() moved every plan and grant to waiting
+            return "refused", "tamper=%s" % tick.tampered
         word, code, out = run_tool(tick, "derive-grant",
                                    py(tool, "--under-pipeline", grant, "--root", tick.root,
                                       "--plan", plan))
@@ -1008,6 +1068,8 @@ def count_caps(tick):
     tool = find_tool(tick.roots, "spec-first-planning")
     if tool is None:
         raise Uncounted("write_grant", "unavailable")
+    if tick.baseline is not None and not tools_trusted(tick):
+        raise Uncounted("write_grant", "planner-tamper")
     word, code, out = run_tool(tick, "caps", py(tool, "--pipeline-caps", tick.grant,
                                                 "--root", tick.root), echo_stdout=False)
     if code != 0:
@@ -1237,6 +1299,9 @@ def run_tick(a):
     tick.grant = gid
     print("TICK: grant %s expires_at %s" % (gid, tick.grant_expires))
     load_grant_payload(tick)  # R17: the owner's planner and the pinned allowlist
+    # R17: spec-first-planning's files before any planner runs. Every later run of one of
+    # its tools (caps, plan, derive-grant) first checks that nothing changed since.
+    tick.baseline = tool_digest(tick)
     # R15: a cap checks before each stage that starts a new plan or run (STAGE_CAPS), and
     # derive-grant asks again between plans through tick.gate (R18's build will ask before
     # each conductor run after the first). A stopped stage is skipped; the stages that only
@@ -1244,6 +1309,11 @@ def run_tick(a):
     tick.gate = lambda stage: cap_gate(tick, stage)
     ran = 0
     for name, fn in STAGES:
+        if tick.tampered and name in TAMPER_SKIP:
+            print("STAGE: %s skipped planner-tamper=%s" % (name, tick.tampered))
+            sys.stdout.flush()
+            ran += 1
+            continue
         if name in STAGE_CAPS:
             hit = blocked_by(tick, name)
             if hit is None and (name != "build" or tick.grants):
@@ -1266,8 +1336,9 @@ def run_tick(a):
         sys.stdout.flush()
         ran += 1
     print("TICK: done %s" % join("stages=%d" % ran,
-                                 "cap=%s" % ",".join(tick.stops) if tick.stops else ""))
-    return 0
+                                 "cap=%s" % ",".join(tick.stops) if tick.stops else "",
+                                 "tamper=%s" % tick.tampered if tick.tampered else ""))
+    return 4 if tick.tampered else 0
 
 
 # ── the schedule (R16) ──────────────────────────────────────────────────────────────────

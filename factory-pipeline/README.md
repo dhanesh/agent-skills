@@ -42,8 +42,12 @@ What runs today:
   tick uses only the exit codes of these tools. It ignores what the planner says. A
   snapshot before and after the planner makes the plan wait when the planner changed any
   other file, the git config or hooks, or the spec-first-planning tools. Every git call of
-  the tick is hardened against hooks and fsmonitor. These guards are tripwires, not a
-  sandbox: give the planner restricted tools. With no planner in the grant, the stage
+  the tick is hardened against hooks and fsmonitor, the owner's own hooks included (also
+  for sweep commands). A tamper poisons the tick: it prints `STOP: planner-tamper`, derives
+  no grant, starts no build, puts every plan of the tick on the digest list and exits 4.
+  Every Python tool runs as `python -I -B`. These guards are tripwires, not a sandbox:
+  give the planner restricted tools. The snapshot skips `.skill-contract/runs/`, so a
+  planner that forges or deletes run directories can lower the dispatch count. With no planner in the grant, the stage
   says `unavailable no-planner`.
 - `derive-grant` runs spec-first-planning `write_grant.py --under-pipeline` for each plan
   that the plan stage hands on.

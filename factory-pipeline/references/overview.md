@@ -125,10 +125,33 @@ core.fsmonitor=false -c core.hooksPath=/dev/null -c core.commitGraph=false`, wit
 tick runs gets the same three settings through `GIT_CONFIG_COUNT`. So a hook or an
 fsmonitor command that the planner plants never runs in a tick.
 
+### A poisoned tick
+
+A `planner-changed-*` reason poisons the tick. So does a spec-first-planning file that
+differs from the baseline. The tick takes that baseline after the grant check, before
+any planner runs, and checks it again before every run of a spec-first-planning tool:
+the cap counter, each plan check and each derivation. Then the tick:
+
+- prints `STOP: planner-tamper <the-repo|git|tools>`;
+- runs no further spec-first-planning tool;
+- moves every plan of this tick, the ready ones too, and every derived grant to the
+  digest list, with the reason `planner-tamper-<what>`;
+- prints `STAGE: <name> skipped planner-tamper=<what>` for autopick, plan, derive grant
+  and build;
+- still runs release stage and digest, because they run no spec-first-planning code;
+- ends `TICK: done stages=9 tamper=<what>` and exits 4.
+
+Every Python tool that the tick starts runs as `python -I -B`. Python then loads no
+`usercustomize.py`, no `.pth` file and no `PYTHON*` variable, and writes no bytecode. A
+small launcher puts back only the tool's own directory on `sys.path`.
+
 These guards are tripwires, not a sandbox. The planner runs as the owner, so it can reach
 anything the owner can reach. Run it with restricted tools: let it edit files and read
 the repository, and give it no shell. Keep its permission prompts on. The checker refuses
-a permission-bypass flag in any form (`--flag=value` and any letter case too).
+a permission-bypass flag in any form (`--flag=value` and any letter case too). The
+snapshot skips `.skill-contract/runs/`, so a planner that forges or deletes run
+directories can lower the dispatch count. The owner's own git hooks and fsmonitor are off
+for every tool that the tick runs, the sweep commands included.
 
 When all steps pass, the stage prints `PLAN: ready <plan> spec=<spec>` and hands the plan
 to derive grant. Derive grant checks the plan again with the real `write_grant.py
@@ -270,7 +293,8 @@ them is called.
 
 A result that is not `ok` does not stop the tick. The tick goes on to the next stage, and
 exits 0 when every stage ran. Exit 2 is a usage error (for example a `--root` that is not
-a directory), `STOP: state-dir` or `STOP: no-grant`. Exit 3 is `STOP: locked`. The
+a directory), `STOP: state-dir` or `STOP: no-grant`. Exit 3 is `STOP: locked`. Exit 4 is
+`STOP: planner-tamper`. The
 schedule's exits are in its section.
 
 ## How the tick finds a skill

@@ -259,7 +259,15 @@ class TestDeriveGrantSeam(Fixture):
     """derive-grant is wired for the plans R17 will hand on; drive it directly."""
 
     def make_tick(self, grant="pg-1"):
-        return P.Tick(self.repo, [self.skills], grant=grant, timeout=60)
+        t = P.Tick(self.repo, [self.skills], grant=grant, timeout=60)
+        t.baseline = P.tool_digest(t)  # run_tick takes it before any stage (R17)
+        return t
+
+    def test_no_baseline_is_a_tamper_never_a_trust(self):
+        t = P.Tick(self.repo, [self.skills], grant="pg-1", timeout=60)
+        t.plans = ["plans/a.json"]
+        self.assertEqual(P.stage_derive_grant(t), ("refused", "tamper=tools"))
+        self.assertEqual(K.calls(self.skills), [])
 
     def test_calls_write_grant_under_pipeline_per_plan(self):
         t = self.make_tick()

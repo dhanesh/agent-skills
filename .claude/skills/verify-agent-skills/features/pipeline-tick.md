@@ -90,7 +90,9 @@ Shipped:
   the git config, refs, hooks and info; the spec-first-planning tool files) makes the
   plan wait with `planner-changed-the-repo`, `planner-changed-git` or
   `planner-changed-tools`. Every git call of the tick runs with fsmonitor and hooks off.
-  These are tripwires, not a sandbox.
+  Any such change poisons the tick: `STOP: planner-tamper <what>`, no grant derived, no
+  build, every plan of the tick waits, exit 4. Every Python tool runs as `python -I -B`.
+  These are tripwires, not a sandbox; the snapshot skips `.skill-contract/runs/`.
 
 - The schedule (R16): `schedule install --every <minutes>` with 15 to 1440 installs one
   timer through factory-conductor's `reentry_timer.py` (imported from where that skill is

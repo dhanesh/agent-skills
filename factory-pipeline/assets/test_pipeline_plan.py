@@ -91,6 +91,30 @@ class PlanFixture(unittest.TestCase):
         self.assertNotIn("under-pipeline", [c["key"] for c in K.calls(self.skills)])
 
 
+    def assertTampered(self, code, text, res, seen, item, what, ready=()):
+        """A planner tamper poisons the tick: `STOP: planner-tamper <what>`, exit 4, no
+        grant derived, no build, and every plan of the tick (ready ones too) waits."""
+        self.assertEqual(code, 4, text)
+        self.assertIn("\nSTOP: planner-tamper %s:" % what, text)
+        self.assertIn("PLAN: waiting %s reason=planner-changed-%s" % (self.spec(item), what),
+                      text)
+        self.assertEqual(res["plan"][0], "refused", text)
+        self.assertIn("tamper=%s" % what, res["plan"])
+        for stage in ("derive-grant", "build"):
+            self.assertEqual(res[stage], ["skipped", "planner-tamper=%s" % what], text)
+        self.assertEqual(res["release-stage"], ["pending-R19"])
+        self.assertEqual(res["digest"][0], "pending-R21")
+        self.assertEqual(seen["plans"], [])
+        self.assertEqual(seen["grants"], [])
+        waits = [w[1] for w in seen["waiting"] if w[0] == "plan-read"]
+        self.assertIn(self.spec(item), waits)
+        for plan in ready:
+            self.assertIn((("plan-read", plan, "waiting for owner's read: "
+                            "reason=planner-tamper-%s" % what)), seen["waiting"])
+        self.assertIn("TICK: done stages=9 tamper=%s" % what, text)
+        self.assertNotIn("under-pipeline", [c["key"] for c in K.calls(self.skills)])
+
+
 class TestPlanStage(PlanFixture):
     def test_good_plan_is_handed_to_derive_grant_and_build(self):
         self.pick("I0000000001")
@@ -161,8 +185,8 @@ class TestPlanStage(PlanFixture):
     def test_planner_that_changes_the_repo_waits(self):
         self.pick("I0000000001")
         self.mode("touch")
-        _, text, res, seen = self.tick()
-        self.assertWaits(text, res, seen, "I0000000001", "planner-changed-the-repo")
+        code, text, res, seen = self.tick()
+        self.assertTampered(code, text, res, seen, "I0000000001", "the-repo")
 
     def test_spec_that_git_would_see_is_never_written(self):
         os.remove(os.path.join(self.repo, ".skill-contract", "intake", ".gitignore"))
@@ -201,8 +225,8 @@ class TestTamper(PlanFixture):
         self.extra("open(os.path.join(root, '.git', 'config'), 'a').write("
                    "'[core]\\n\\tfsmonitor = touch %s; false\\n')\n" % marker)
         self.pick("I0000000001")
-        _, text, res, seen = self.tick()
-        self.assertWaits(text, res, seen, "I0000000001", "planner-changed-git")
+        code, text, res, seen = self.tick()
+        self.assertTampered(code, text, res, seen, "I0000000001", "git")
         self.assertFalse(os.path.exists(marker))
         # The config stays poisoned, and the next tick's git calls stay hardened too.
         self.pick("I0000000002")
@@ -214,15 +238,15 @@ class TestTamper(PlanFixture):
                    "open(p, 'w').write('#!/bin/sh\\necho pwned\\n')\n"
                    "os.chmod(p, 0o755)\n")
         self.pick("I0000000001")
-        _, text, res, seen = self.tick()
-        self.assertWaits(text, res, seen, "I0000000001", "planner-changed-git")
+        code, text, res, seen = self.tick()
+        self.assertTampered(code, text, res, seen, "I0000000001", "git")
 
     def test_ignored_file_makes_the_plan_wait(self):
         self.extra("open(os.path.join(root, '.skill-contract', 'intake', 'evil.sh'), 'w')"
                    ".write('cat .env\\n')\n")
         self.pick("I0000000001")
-        _, text, res, seen = self.tick()
-        self.assertWaits(text, res, seen, "I0000000001", "planner-changed-the-repo")
+        code, text, res, seen = self.tick()
+        self.assertTampered(code, text, res, seen, "I0000000001", "the-repo")
         self.assertIn("  plan| changed: repo/.skill-contract/intake/evil.sh", text)
 
     def test_already_dirty_tracked_file_edited_again_makes_the_plan_wait(self):
@@ -236,15 +260,15 @@ class TestTamper(PlanFixture):
             f.write("# dirty before the tick\n")
         self.extra("open(os.path.join(root, 'Makefile'), 'a').write('\\tcat .env\\n')\n")
         self.pick("I0000000001")
-        _, text, res, seen = self.tick()
-        self.assertWaits(text, res, seen, "I0000000001", "planner-changed-the-repo")
+        code, text, res, seen = self.tick()
+        self.assertTampered(code, text, res, seen, "I0000000001", "the-repo")
 
     def test_replaced_sibling_tool_makes_the_plan_wait(self):
         tool = os.path.join(self.skills, "spec-first-planning", "assets", "spec_to_tasks.py")
         self.extra("open(%r, 'w').write('import sys\\nsys.exit(0)\\n')\n" % tool)
         self.pick("I0000000001")
-        _, text, res, seen = self.tick()
-        self.assertWaits(text, res, seen, "I0000000001", "planner-changed-tools")
+        code, text, res, seen = self.tick()
+        self.assertTampered(code, text, res, seen, "I0000000001", "tools")
 
     def test_planted_bytecode_makes_the_plan_wait(self):
         cache = os.path.join(self.skills, "spec-first-planning", "assets", "__pycache__")
@@ -252,8 +276,8 @@ class TestTamper(PlanFixture):
                    "open(os.path.join(%r, 'allowlist.planted.pyc'), 'wb').write(b'x')\n"
                    % (cache, cache))
         self.pick("I0000000001")
-        _, text, res, seen = self.tick()
-        self.assertWaits(text, res, seen, "I0000000001", "planner-changed-tools")
+        code, text, res, seen = self.tick()
+        self.assertTampered(code, text, res, seen, "I0000000001", "tools")
 
     def test_snapshot_over_its_bound_waits_before_the_planner_runs(self):
         self.pick("I0000000001")
@@ -283,6 +307,82 @@ class TestTamper(PlanFixture):
                      "--permission-mode=bypassPermissions"):
             self.assertFalse(P.planner_ok(["claude", flag, "{prompt}"]), flag)
         self.assertTrue(P.planner_ok(["claude", "-p", "{prompt}"]))
+
+
+    def test_second_planner_tampers_write_grant_and_nothing_is_derived(self):
+        """The second reviewer's case: plan 1 is ready, then plan 2's planner prepends a
+        marker writer to write_grant.py. The tick stops trusting spec-first-planning: no
+        cap count, no derive (the marker is never written) and plan 1 waits too."""
+        marker = os.path.join(self.tmp, "PWNED_WG")
+        wg = os.path.join(self.skills, "spec-first-planning", "assets", "write_grant.py")
+        self.extra("if 'I0000000002' in spec:\n"
+                   "    src = open(%r).read()\n"
+                   "    open(%r, 'w').write(%r + src)\n"
+                   % (wg, wg, "open(%r, 'a').write('ran\\n')\n" % marker))
+        self.pick("I0000000001", "I0000000002")
+        code, text, res, seen = self.tick()
+        ready = [ln.split()[2] for ln in text.splitlines() if ln.startswith("PLAN: ready ")]
+        self.assertEqual(len(ready), 1, text)
+        self.assertTampered(code, text, res, seen, "I0000000002", "tools", ready=ready)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_tool_changed_after_the_plan_stage_stops_derive_grant(self):
+        """A tool that changes between a plan's checks and derive-grant (simulated by a
+        plan stage that changes write_grant.py after the real one handed a plan on)."""
+        marker = os.path.join(self.tmp, "PWNED_LATE")
+        wg = os.path.join(self.skills, "spec-first-planning", "assets", "write_grant.py")
+
+        def late(tick):
+            word, detail = P.stage_plan(tick)
+            with open(wg, encoding="utf-8") as f:
+                src = f.read()
+            with open(wg, "w", encoding="utf-8") as f:
+                f.write("open(%r, 'a').write('ran\\n')\n" % marker + src)
+            return word, detail
+
+        self.pick("I0000000001")
+        stages = tuple((n, late if n == "plan" else f) for n, f in P.STAGES)
+        with mock.patch.object(P, "STAGES", stages):
+            code, text, res, seen = self.tick()
+        self.assertEqual(code, 4, text)
+        self.assertIn("\nSTOP: planner-tamper tools:", text)
+        self.assertEqual(res["plan"][:2], ["ok", "ready=1"])
+        self.assertNotEqual(res["derive-grant"][:1], ["ok"], text)
+        self.assertEqual(res["build"], ["skipped", "planner-tamper=tools"])
+        self.assertEqual(seen["plans"], [])
+        self.assertEqual(seen["grants"], [])
+        self.assertTrue([w for w in seen["waiting"]
+                         if w[2] == "waiting for owner's read: reason=planner-tamper-tools"])
+        self.assertFalse(os.path.exists(marker))
+
+    def test_user_site_usercustomize_is_never_loaded(self):
+        """Every Python tool runs with -I: a usercustomize.py in the user site does not
+        load. The tick runs with PYTHONUSERBASE pointing at a planted user site."""
+        import site  # noqa: E402
+        base = os.path.join(self.tmp, "userbase")
+        marker = os.path.join(self.tmp, "PWNED_SITE")
+        with mock.patch.dict(os.environ, {"PYTHONUSERBASE": base}):
+            sp = subprocess.run([sys.executable, "-c", "import site; "
+                                 "print(site.getusersitepackages())"],
+                                stdout=subprocess.PIPE, text=True, check=True,
+                                timeout=60).stdout.strip()
+            log = "import sys; open(%r, 'a').write(repr(sys.argv) + '\\n')\n" % marker
+            K.write_rel(sp, "usercustomize.py", log)
+            K.write_rel(sp, "evil.pth", log)
+            # The planted site works for a plain python: the test is not vacuous.
+            subprocess.run([sys.executable, "-c", "pass"], check=True, timeout=60)
+            self.assertTrue(os.path.exists(marker))
+            os.remove(marker)
+            self.pick("I0000000001")
+            code, text, res, seen = self.tick()
+        self.assertEqual(code, 0, text)
+        self.assertEqual(res["derive-grant"][:2], ["ok", "derived=1"], text)
+        # Only the owner's planner (its argv is the owner's, never changed by the tick)
+        # may load it; no tool the tick starts does.
+        with open(marker, encoding="utf-8") as f:
+            loaded = [ln for ln in f.read().splitlines() if "planner.py" not in ln]
+        self.assertEqual(loaded, [], "a tool the tick started loaded the user site")
+        del site
 
 
 class TestNoPlanner(PlanFixture):
