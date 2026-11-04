@@ -3,6 +3,7 @@ registers .intake/pick-policy.json, runs after the registration, and refuses aga
 any edit to the file until the owner registers again. Format filter (R8, S3): a low-trust
 item never matches unless the policy names the format it was imported from."""
 import json, os, sys, unittest
+from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import intake as IN
 from intake_testkit import repo, run, no_io
@@ -48,8 +49,9 @@ class PolicyTests(unittest.TestCase):
         self.assertRegex(out, r"\AREGISTERED: [0-9a-f]{64} by `Dhanesh` at ")
         rc, out = self.cmd("autopick")
         self.assertEqual(rc, 0, out)
-        self.assertIn("AUTOPICK: matched 2 picked 0", out)
+        self.assertIn("AUTOPICK: matched 2 picked 1", out)  # max_picks_per_day is 1
         self.assertEqual(sum(l.startswith("MATCH: ") for l in out.splitlines()), 2)
+        before = self.queue_bytes()
         # 3. After an edit: refuse until the owner registers again.
         self.write_policy(dict(POLICY, min_rank=1000))
         rc, out = self.cmd("autopick")
@@ -63,7 +65,7 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         rc, out = self.cmd("autopick")
         self.assertEqual((rc, out.splitlines()[-1]), (0, "AUTOPICK: matched 0 picked 0"))
-        # autopick changes no queue state in this version.
+        # A refused autopick, and one with no match, change no queue state.
         self.assertEqual(self.queue_bytes(), before)
 
     def test_reregister_without_change_is_a_no_op(self):
@@ -138,11 +140,18 @@ class FormatTests(unittest.TestCase):
             return json.load(f)
 
     def matches(self, pol):
+        """The MATCH: ids of one autopick. The queue is put back afterwards, so the picks
+        that autopick makes do not change what the next call matches."""
         with open(os.path.join(self.root, IN.POLICY_PATH), "w", encoding="utf-8") as f:
             json.dump(pol, f)
+        qpath = os.path.join(self.root, IN.INTAKE_DIR, IN.QUEUE_FILE)
+        with open(qpath, "rb") as f:
+            saved = f.read()
         with no_io():
             self.assertEqual(run(self.root, "register-policy", "--by", "Dhanesh")[0], 0)
             rc, out = run(self.root, "autopick")
+        with open(qpath, "wb") as f:
+            f.write(saved)
         self.assertEqual(rc, 0, out)
         return {l.split()[1] for l in out.splitlines() if l.startswith("MATCH: ")}
 
@@ -185,6 +194,94 @@ class FormatTests(unittest.TestCase):
               "formats": ["feedback-jsonl", "intake-signals-jsonl"]}
         self.assertFalse(IN.policy_matches(it, dict(self.ALL, formats=["feedback-jsonl"])))
         self.assertTrue(IN.policy_matches(it, self.ALL))
+
+
+class AutopickTests(unittest.TestCase):
+    """R10: autopick picks at most max_picks_per_day items per UTC day, highest rank first,
+    writes one intake-item/v1 envelope per pick and logs `by: policy:<sha256>`."""
+    POL = {"kinds": ["issue"], "min_rank": 0, "formats": [], "max_picks_per_day": 2}
+    DAY = "2026-11-04T09:00:00Z"
+
+    def setUp(self):
+        self.root = repo(config=CONFIG)
+        q = IN.Queue.load(self.root)
+        self.ranks = {}
+        for n, r in enumerate([150, 400, 250, 250, 100]):  # a tie at 250 on the cap
+            it = q.add("jira", "R-%d" % n, "item %d" % n)
+            it["rank"] = r
+            self.ranks[it["id"]] = r
+        q.save()
+        with open(os.path.join(self.root, IN.POLICY_PATH), "w", encoding="utf-8") as f:
+            json.dump(self.POL, f)
+        rc, out = self.cmd("register-policy", "--by", "Dhanesh")
+        self.assertEqual(rc, 0, out)
+        self.sha = out.split()[1]
+
+    def cmd(self, *argv, now=None):
+        with mock.patch.object(IN, "_now", return_value=now or self.DAY), no_io():
+            return run(self.root, *argv)
+
+    def queue(self):
+        with open(os.path.join(self.root, IN.INTAKE_DIR, IN.QUEUE_FILE), encoding="utf-8") as f:
+            return json.load(f)["items"]
+
+    def picks_logged(self):
+        with open(os.path.join(self.root, IN.INTAKE_DIR, IN.LOG_FILE), encoding="utf-8") as f:
+            return [r for r in map(json.loads, f) if r["event"] == "pick"]
+
+    def envelopes(self):
+        d = os.path.join(self.root, IN.INTAKE_DIR, "envelopes")
+        return sorted(os.listdir(d)) if os.path.isdir(d) else []
+
+    def test_picks_the_daily_maximum_highest_rank_first(self):
+        rc, out = self.cmd("autopick")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("AUTOPICK: matched 5 picked 2", out)
+        top = sorted(self.ranks, key=lambda i: (-self.ranks[i], i))[:2]
+        self.assertEqual([self.ranks[i] for i in top], [400, 250])
+        items = self.queue()
+        self.assertEqual(sorted(i for i, it in items.items() if it["state"] == "picked"), sorted(top))
+        # One valid intake-item/v1 envelope per pick, named on a NEXT: line like `pick`.
+        envs = self.envelopes()
+        self.assertEqual(len(envs), 2)
+        nexts = [l for l in out.splitlines() if l.startswith("NEXT: ")]
+        self.assertEqual(nexts, ["NEXT: run spec-first-planning with %s" % items[i]["envelope"]
+                                 for i in top])
+        for i in top:
+            with open(os.path.join(self.root, *items[i]["envelope"].split("/"))) as f:
+                st = json.load(f)
+            self.assertEqual(st["predicateType"], IN.INTAKE_ITEM_KIND)
+            self.assertEqual(st["predicate"]["payload"]["item_id"], i)
+            self.assertEqual(IN.CC.check_statement(st), [])
+        # Each log line names the registered policy.
+        logged = self.picks_logged()
+        self.assertEqual([r["id"] for r in logged], top)
+        for r in logged:
+            self.assertTrue(r["by"].startswith("policy:"), r)
+            self.assertEqual(r["by"], "policy:" + self.sha)
+        for i in top:
+            self.assertEqual(items[i]["state_by"], "policy:" + self.sha)
+
+    def test_second_run_same_day_picks_none(self):
+        self.assertEqual(self.cmd("autopick")[0], 0)
+        rc, out = self.cmd("autopick", now="2026-11-04T23:59:59Z")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("DAILY: 2026-11-04 picked 2 of 2", out)
+        self.assertEqual(out.splitlines()[-1], "AUTOPICK: matched 3 picked 0")
+        self.assertEqual(len(self.envelopes()), 2)
+        self.assertEqual(len(self.picks_logged()), 2)
+        # The next UTC day has a fresh maximum.
+        rc, out = self.cmd("autopick", now="2026-11-05T00:00:00Z")
+        self.assertEqual(out.splitlines()[-1], "AUTOPICK: matched 3 picked 2")
+        self.assertEqual(len(self.envelopes()), 4)
+
+    def test_hand_pick_keeps_its_by_and_does_not_use_the_maximum(self):
+        some = sorted(self.ranks)[0]
+        rc, out = self.cmd("pick", some, "--by", "Dhanesh")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.picks_logged()[0]["by"], "Dhanesh")
+        rc, out = self.cmd("autopick")
+        self.assertEqual(out.splitlines()[-1], "AUTOPICK: matched 4 picked 2")
 
 
 if __name__ == "__main__":

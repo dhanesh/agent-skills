@@ -121,6 +121,11 @@ only when its source sees it again after the dismissal.
 
 ## Changes
 
+- **0.5.0.** `intake autopick` picks. It picks the matching items highest rank first (ties
+  by id), up to the policy's `max_picks_per_day` per UTC day, counted across runs. Each pick
+  writes the same intake-item envelope as `pick` and prints its `NEXT:` line. The intake log
+  records each pick with `by: policy:<sha256>`. A hand `pick` keeps its own name and does not
+  count toward the daily maximum.
 - **0.4.0.** `intake sweep`. A source in the config can list `sweep` entries: a format and an
   argv list. `intake sweep` runs each one with no shell and imports its output, the same way
   as `intake import`. A failed command prints a `PROBLEM:` line, and the others still run.
