@@ -270,6 +270,7 @@ gate-skill: clean
 		printf 'UNIT %s: %s assertion(s) passed\n' "$$t" "$$(printf '%s\n' "$$out" | grep -cE '^PASS')"; \
 	done
 	@sh $(GATES)/run-eval.sh "$(SKILL)"
+	@printf '\nGATE_RESULT: PASS\n'
 
 # Remove build artifacts that pollute scan-leaks (e.g. __pycache__/*.pyc).
 clean:
