@@ -11,7 +11,11 @@ Usage:
 
 For each row of `| Stage | Skills | Status |`:
   - the status is exactly one of the five rubric values;
-  - a row whose status is not `covered` has the text "Limits:" in its Skills cell.
+  - a row whose status is not `covered` has the text "Limits:" in its Skills cell;
+  - the text after "Limits:" is a list of items separated by `;`, and each item
+    starts with exactly one tag, `[decision]`, `[trust]` or `[open]`, followed
+    by text, with no second tag in the item;
+  - a row whose items are all `[decision]` has the status `covered`.
 
 The check fails closed: no heading, no rubric or no table is a failure, not a pass.
 
@@ -32,6 +36,7 @@ STATUSES = (
     "out of scope, by design",
 )
 LIMITS = "Limits:"
+TAGS = ("[decision]", "[trust]", "[open]")
 
 
 def cells(line):
@@ -75,6 +80,39 @@ def find_rows(lines):
     return rows, None
 
 
+def limit_tags(text):
+    """Return (tags, bad items) for the text after "Limits:".
+
+    tags holds the one tag of each well-formed item. A bad item is one with no
+    leading tag, no text after its tag, or more than one tag.
+    """
+    tags, bad = [], []
+    for item in (part.strip() for part in text.split(";")):
+        lead = next((t for t in TAGS if item.startswith(t)), None)
+        rest = item[len(lead):].strip() if lead else ""
+        if lead is None or not rest or any(t in rest for t in TAGS):
+            bad.append(item)
+        else:
+            tags.append(lead)
+    return tags, bad
+
+
+def check_limits(stage, lineno, status, skills):
+    """Return the fails for the tagged items after "Limits:" in one row."""
+    tags, bad = limit_tags(skills.split(LIMITS, 1)[1])
+    fails = [
+        "%s (line %d): limit item %r does not start with exactly one of %s"
+        % (stage, lineno, item, ", ".join(TAGS))
+        for item in bad
+    ]
+    if not bad and tags and all(t == "[decision]" for t in tags) and status != "covered":
+        fails.append(
+            "%s (line %d): every limit is [decision], so the status must be "
+            "'covered', not %r" % (stage, lineno, status)
+        )
+    return fails
+
+
 def check(lines):
     """Return (fails, row count). A fail is a printable reason."""
     rows, err = find_rows(lines)
@@ -94,11 +132,14 @@ def check(lines):
                 % (stage, lineno, status)
             )
             continue
-        if status != "covered" and LIMITS not in skills:
-            fails.append(
-                "%s (line %d): status %r has no %r text in its Skills cell"
-                % (stage, lineno, status, LIMITS)
-            )
+        if LIMITS not in skills:
+            if status != "covered":
+                fails.append(
+                    "%s (line %d): status %r has no %r text in its Skills cell"
+                    % (stage, lineno, status, LIMITS)
+                )
+            continue
+        fails.extend(check_limits(stage, lineno, status, skills))
     return fails, len(rows)
 
 
