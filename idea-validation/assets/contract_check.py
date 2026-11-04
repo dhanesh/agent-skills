@@ -13,6 +13,7 @@ byte-identical into their assets/ (`make contract-vendor`).
                                          [--subject PATH] [--worktree PATH]
                                          [--json]                              C10
     contract_check.py revoke-grant [--id ID] --root DIR                        C10
+    contract_check.py check-pipeline-grant --root DIR [--id ID] [--json]       C10
 
 Exit 0 pass, 2 a commandment is violated, 1 usage or internal error. The last
 line is always CONTRACT_RESULT: PASS or CONTRACT_RESULT: FAIL (C<n>, ...).
@@ -22,6 +23,10 @@ A caller proceeds only on exit 0. --subject selects the newest live grant that p
 path. revoke-grant with no id revokes every live grant (the kill switch) and prints one
 REVOKED: <id> line each; with --id (or a positional ID) it revokes that grant and prints
 REVOKED: <path>. It exits 0, or 1 when there is nothing to revoke.
+
+check-pipeline-grant judges the newest live pipeline-grant/v1 (or the one named by --id).
+It exits 0 VALID, 3 ASK or NONE, 2 INVALID, 1 usage; its last line is PIPELINE-GRANT: ...
+A pipeline grant covers no action by itself: a caller acts only on a grant derived from it.
 """
 import sys
 
@@ -62,6 +67,13 @@ SKILL_DIR_RE = re.compile(r"^\{skill_dir:(?P<name>[a-z0-9]+(?:-[a-z0-9]+)*)\}")
 PLACEHOLDER_RE = re.compile(r"\{[^{}]*\}")
 BARE_PYTHON_RE = re.compile(r"^(?:python[0-9.]*|py)(?:\.exe)?$", re.IGNORECASE)
 GRANT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1"
+PIPELINE_GRANT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/pipeline-grant/v1"
+# pipeline-grant/v1 caps: exactly these keys, each an integer >= 1 (SPEC, "The pipeline grant").
+PIPELINE_CAPS = ("max_plans_per_day", "max_open_runs", "max_dispatches_per_day")
+# The per-plan budget keys factory-conductor knows (SPEC, `budget`); `enforce` is the opt-in list.
+BUDGET_CAPS = ("wall_clock_min", "max_dispatches", "max_repairs_per_task", "max_parallel",
+               "max_tokens", "max_usd")
+ENFORCE_METRICS = {"tokens": "max_tokens", "usd": "max_usd"}
 # A8 as amended for release-conductor: deploy_staging and push_tag are grantable (at most
 # `grant`); production `deploy` stays ask-only, and a tag push whose CI may run on tags is
 # `deploy`, never `push_tag` (check_grant answers ASK ci-tag).
@@ -877,10 +889,15 @@ def grant_violations(st):
                   and accepted[0]["assertedBy"]["human"].strip()
                   and (accepted[0].get("result") or {}).get("outcome") == "passed"):
             out.append("grant-accepted must be asserted by a human with outcome passed")
-    policy = p.get("gate_policy")
+    out.extend(_gate_policy_problems(p.get("gate_policy")))
+    return out
+
+
+def _gate_policy_problems(policy):
+    """The gate-policy floors, shared by autonomy-grant/v1 and pipeline-grant/v1."""
     if not isinstance(policy, dict):
-        out.append("payload.gate_policy must be an object")
-        policy = {}
+        return ["payload.gate_policy must be an object"]
+    out = []
     for cls, gate in policy.items():
         if cls not in ACTION_CLASSES:
             out.append("gate_policy names unknown action class %r" % cls)
@@ -893,7 +910,7 @@ def grant_violations(st):
     return out
 
 
-def _grant_envelopes(root, strict=True):
+def _grant_envelopes(root, strict=True, kind=GRANT_KIND):
     """[(path, statement)] for grant envelopes under root.
 
     strict=True keeps only statements that pass check_statement (candidates
@@ -908,7 +925,7 @@ def _grant_envelopes(root, strict=True):
         if not f.endswith(".json"):
             continue
         st, err = load_envelope(os.path.join(d, f))
-        if err or not isinstance(st, dict) or st.get("predicateType") != GRANT_KIND \
+        if err or not isinstance(st, dict) or st.get("predicateType") != kind \
                 or not isinstance(st.get("predicate"), dict):
             continue
         if strict and (check_statement(st) or st["predicate"].get("id") + ".json" != f):
@@ -917,9 +934,10 @@ def _grant_envelopes(root, strict=True):
     return out
 
 
-def is_superseded(root, grant_id):
-    """True when any grant envelope under root names grant_id in wasRevisionOf."""
-    return any(_revision_of(st) == grant_id for _, st in _grant_envelopes(root, strict=False))
+def is_superseded(root, grant_id, kind=GRANT_KIND):
+    """True when any grant envelope of `kind` under root names grant_id in wasRevisionOf."""
+    return any(_revision_of(st) == grant_id
+               for _, st in _grant_envelopes(root, strict=False, kind=kind))
 
 
 def _revision_of(st):
@@ -927,7 +945,7 @@ def _revision_of(st):
     return rev if isinstance(rev, str) else None
 
 
-def _chain_root(root, st):
+def _chain_root(root, st, kind=GRANT_KIND):
     """(generatedAtTime, id) of the original grant of st's revision chain.
 
     Walks wasRevisionOf back from st, resolving each parent only as <envelope dir>/<id>.json
@@ -944,7 +962,7 @@ def _chain_root(root, st):
             break
         seen.add(parent)
         pst, err = load_envelope(os.path.join(d, parent + ".json"))
-        if err or not isinstance(pst, dict) or pst.get("predicateType") != GRANT_KIND \
+        if err or not isinstance(pst, dict) or pst.get("predicateType") != kind \
                 or not isinstance(pst.get("predicate"), dict) \
                 or pst["predicate"].get("id") != parent \
                 or not TIME_RE.match(str(pst["predicate"].get("generatedAtTime", ""))):
@@ -953,7 +971,7 @@ def _chain_root(root, st):
     return node["predicate"]["generatedAtTime"], node["predicate"]["id"]
 
 
-def _live_heads(root):
+def _live_heads(root, kind=GRANT_KIND):
     """[(rank, path, statement)] for every valid-shaped grant that no revision supersedes.
 
     A head ranks by its chain's ORIGINAL grant, not by itself: a revocation is a new head
@@ -966,14 +984,14 @@ def _live_heads(root):
         newer head; the random ids only break ties between chains that are equally new.
     Times are RFC 3339 UTC strings of one fixed shape (TIME_RE), so they compare as text.
     Supersession reads every grant-kind file (strict=False), so it fails closed too."""
-    everything = _grant_envelopes(root, strict=False)
+    everything = _grant_envelopes(root, strict=False, kind=kind)
     revised = {_revision_of(st) for _, st in everything}
     heads = []
-    for p, st in _grant_envelopes(root):
+    for p, st in _grant_envelopes(root, kind=kind):
         pred = st["predicate"]
         if pred["id"] in revised:
             continue
-        root_time, root_id = _chain_root(root, st)
+        root_time, root_id = _chain_root(root, st, kind)
         revoked = bool((pred.get("payload") or {}).get("revoked"))  # truthy: fail closed
         heads.append(((root_time, revoked, pred["generatedAtTime"], root_id, pred["id"]),
                       p, st))
@@ -1494,6 +1512,192 @@ def revoke_grant(root, grant_id=None, now=None):
     return write_envelope(root, rev)
 
 
+# ── Commandment 10: the pipeline grant (pipeline-grant/v1) ──────────────────
+def _is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _is_number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _budget_problems(budget):
+    """The per-plan budget: the autonomy-grant/v1 budget keys, each cap a number >= 0, and
+    `enforce` a list of distinct metrics whose caps the same budget sets."""
+    if not isinstance(budget, dict):
+        return ["payload.budget must be an object"]
+    out = []
+    for k, v in budget.items():
+        if k == "enforce":
+            continue
+        if k not in BUDGET_CAPS:
+            out.append("payload.budget names unknown key %r" % k)
+        elif not _is_number(v) or v < 0:
+            out.append("payload.budget.%s must be a number >= 0" % k)
+    if "enforce" in budget:
+        enf = budget["enforce"]
+        if not (isinstance(enf, list) and enf and all(m in ENFORCE_METRICS for m in enf)
+                and len(set(enf)) == len(enf)):
+            out.append("payload.budget.enforce must be a list of distinct metrics from"
+                       " tokens, usd")
+        else:
+            out.extend("payload.budget.enforce names %s but the budget sets no %s"
+                       % (m, ENFORCE_METRICS[m]) for m in enf if ENFORCE_METRICS[m] not in budget)
+    return out
+
+
+def _digest_problems(p, field, subjects):
+    """pick_policy or allowlist: exactly {path, sha256}, bound to one of the subjects."""
+    d = p.get(field)
+    if not (isinstance(d, dict) and set(d) == {"path", "sha256"} and safe_path(d.get("path"))
+            and isinstance(d.get("sha256"), str) and SHA256_RE.match(d["sha256"])):
+        return ["payload.%s must be exactly {path: <relative path>, sha256: <64 lowercase hex>}"
+                % field]
+    pinned = {_subject_key(s["name"]): (s.get("digest") or {}).get("sha256") for s in subjects
+              if isinstance(s, dict) and isinstance(s.get("name"), str)}
+    key = _subject_key(d["path"])
+    if key not in pinned:
+        return ["payload.%s.path %r must name one of the grant's subjects" % (field, d["path"])]
+    if pinned[key] != d["sha256"]:
+        return ["payload.%s.sha256 must equal the digest of subject %r" % (field, d["path"])]
+    return []
+
+
+def pipeline_grant_violations(st):
+    """pipeline-grant/v1 problems (after check_statement passed). [] = valid.
+
+    Order follows SPEC: human attribution (skipped for a revoked revision), then the
+    payload's shape (scope, gate_policy floors, caps, pick_policy, allowlist, budget) and
+    the 7-day floor against generatedAtTime."""
+    if not isinstance(st, dict) or st.get("predicateType") != PIPELINE_GRANT_KIND:
+        return ["predicateType must be %s" % PIPELINE_GRANT_KIND]
+    out = []
+    pred = st["predicate"]
+    p = pred.get("payload") or {}
+    if p.get("revoked") is not True:
+        accepted = [a for a in pred.get("assertions") or [] if a.get("test") == "grant-accepted"]
+        if len(accepted) != 1:
+            out.append("a pipeline grant needs exactly one grant-accepted assertion, asserted"
+                       " by a human")
+        elif not (isinstance(accepted[0].get("assertedBy"), dict)
+                  and isinstance(accepted[0]["assertedBy"].get("human"), str)
+                  and accepted[0]["assertedBy"]["human"].strip()
+                  and (accepted[0].get("result") or {}).get("outcome") == "passed"):
+            out.append("grant-accepted must be asserted by a human with outcome passed")
+    scope = p.get("scope")
+    if not (isinstance(scope, dict) and isinstance(scope.get("repo"), str)
+            and _branch_patterns(scope.get("branch_pattern"))):
+        out.append("payload.scope must be {repo, branch_pattern}: branch_pattern a non-empty"
+                   " glob or a non-empty list of non-empty globs")
+    out.extend(_gate_policy_problems(p.get("gate_policy")))
+    caps = p.get("caps")
+    if not (isinstance(caps, dict) and set(caps) == set(PIPELINE_CAPS)
+            and all(_is_int(caps[k]) and caps[k] >= 1 for k in PIPELINE_CAPS)):
+        out.append("payload.caps must be exactly {%s}, each an integer >= 1"
+                   % ", ".join(PIPELINE_CAPS))
+    subjects = st.get("subject") if isinstance(st.get("subject"), list) else []
+    names = {_subject_key(s["name"]) for s in subjects
+             if isinstance(s, dict) and isinstance(s.get("name"), str)}
+    if len(subjects) != 2 or len(names) != 2:
+        out.append("a pipeline grant must pin exactly 2 distinct subjects: the pick policy and"
+                   " the command allowlist")
+    out.extend(_digest_problems(p, "pick_policy", subjects))
+    out.extend(_digest_problems(p, "allowlist", subjects))
+    pick, allow = p.get("pick_policy"), p.get("allowlist")
+    if isinstance(pick, dict) and isinstance(allow, dict) \
+            and isinstance(pick.get("path"), str) and isinstance(allow.get("path"), str) \
+            and _subject_key(pick["path"]) == _subject_key(allow["path"]):
+        out.append("payload.pick_policy and payload.allowlist must name different subjects")
+    out.extend(_budget_problems(p.get("budget")))
+    stop_on = p.get("stop_on")
+    if not (isinstance(stop_on, list) and all(isinstance(x, str) and x for x in stop_on)):
+        out.append("payload.stop_on must be a list of non-empty strings")
+    if "require_signature" in p:
+        out.append("payload.require_signature is not a grant field: grants are never signed (A8)")
+    if "reentry" in p:
+        out.extend("payload.reentry: " + v for v in reentry_problems(p["reentry"]))
+    try:
+        expires = _parse_time(p.get("expires_at") if TIME_RE.match(str(p.get("expires_at", "")))
+                              else "")
+    except ValueError:
+        expires = None
+        out.append("payload.expires_at must be RFC 3339 UTC (YYYY-MM-DDThh:mm:ssZ)")
+    try:
+        generated = _parse_time(pred.get("generatedAtTime"))
+    except (TypeError, ValueError):
+        generated = None
+        out.append("generatedAtTime must be a real date")
+    if expires and generated and expires - generated > MAX_GRANT_LIFETIME:
+        out.append("a pipeline grant may live at most 7 days (expires_at - generatedAtTime)")
+    if not isinstance(p.get("revoked"), bool):
+        out.append("payload.revoked must be a boolean")
+    return out
+
+
+def latest_pipeline_grant(root):
+    """The path of the newest pipeline grant that no revision supersedes (ranked as
+    _live_heads ranks autonomy grants), or None."""
+    return _newest(_live_heads(root, PIPELINE_GRANT_KIND))
+
+
+def check_pipeline_grant(root, grant_id=None, now=None):
+    """Judge the newest live pipeline grant, or the one named by grant_id. First failing
+    check wins: envelope validity (C3-C6), then pipeline_grant_violations (INVALID), then
+    revoked, superseded, expired, lifetime, stale and tracked (ASK).
+
+    Returns {status: VALID|ASK|INVALID|NONE, id, reason, path, expires_at, violations}.
+    A pipeline grant covers no action by itself; a caller proceeds only on VALID, and then
+    only to derive a per-plan autonomy grant inside its limits."""
+    rep = {"status": "NONE", "id": None, "reason": None, "path": None, "expires_at": None,
+           "violations": []}
+    if grant_id is None:
+        path = latest_pipeline_grant(root)
+    else:
+        path = os.path.join(envelope_dir(root), grant_id + ".json")
+        if not os.path.isfile(path):
+            path = None
+    if path is None:
+        rep["reason"] = "no-grant"
+        return rep
+    rep["path"] = path
+    st, err = load_envelope(path)
+    viol = ["C%d: %s" % v for v in (err or check_statement(st))]
+    if not viol:
+        viol = ["C10: %s" % v for v in pipeline_grant_violations(st)]
+    if not viol and grant_id is not None and st["predicate"]["id"] != grant_id:
+        viol = ["C4: %s.json holds envelope %s, not %s" % (grant_id, st["predicate"]["id"],
+                                                           grant_id)]
+    if viol:
+        rep.update(status="INVALID", reason="invalid", violations=viol)
+        return rep
+    pred, p = st["predicate"], st["predicate"]["payload"]
+    rep.update(id=pred["id"], expires_at=p["expires_at"])
+
+    def ask(reason):
+        rep.update(status="ASK", reason=reason)
+        return rep
+
+    if p["revoked"]:
+        return ask("revoked")
+    if is_superseded(root, pred["id"], PIPELINE_GRANT_KIND):
+        return ask("superseded")
+    now = now or utc_now()
+    expires = _parse_time(p["expires_at"])
+    if now >= expires:
+        return ask("expired")
+    if expires > now + MAX_GRANT_LIFETIME:
+        return ask("lifetime")
+    if stale_names(root, st["subject"]):
+        return ask("stale")  # the pick policy or the allowlist changed: the owner re-accepts
+    if in_git_work_tree(root) and grant_is_tracked(root, path) is not False:
+        return ask("tracked")  # committed, staged, or git cannot say: fail closed
+    rep["status"] = "VALID"
+    return rep
+
+
+PIPELINE_GRANT_EXIT = {"VALID": 0, "ASK": 3, "NONE": 3, "INVALID": 2}
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 def finish(violations, lines=()):
     for ln in lines:
@@ -1538,6 +1742,11 @@ def build_parser():
     p.add_argument("id", nargs="?", help="same as --id")
     p.add_argument("--id", dest="id_opt", metavar="ID")
     p.add_argument("--root", required=True)
+    p = sub.add_parser("check-pipeline-grant",
+                       help="commandment 10: is the newest pipeline grant (or --id) valid")
+    p.add_argument("--root", required=True)
+    p.add_argument("--id", dest="id_opt", metavar="ID")
+    p.add_argument("--json", action="store_true")
     return ap
 
 
@@ -1603,6 +1812,24 @@ def main(argv=None):
             return 3
         print("GRANT: ASK id=%s reason=%s" % (rep["id"], rep["reason"]))
         return 3
+    if a.cmd == "check-pipeline-grant":
+        if a.id_opt is not None and not ID_RE.match(a.id_opt):
+            print("usage: --id must be an envelope id", file=sys.stderr)
+            return 1
+        rep = check_pipeline_grant(a.root, grant_id=a.id_opt)
+        if a.json:
+            print(json.dumps(rep, sort_keys=True))
+        for v in rep["violations"]:
+            print("FAIL: %s" % v)
+        if rep["status"] == "VALID":
+            print("PIPELINE-GRANT: VALID id=%s expires_at=%s" % (rep["id"], rep["expires_at"]))
+        elif rep["status"] == "INVALID":
+            print("PIPELINE-GRANT: INVALID %s" % (rep["path"],))
+        elif rep["status"] == "NONE":
+            print("PIPELINE-GRANT: NONE")
+        else:
+            print("PIPELINE-GRANT: ASK id=%s reason=%s" % (rep["id"], rep["reason"]))
+        return PIPELINE_GRANT_EXIT[rep["status"]]
     if a.cmd == "revoke-grant":
         if a.id is not None and a.id_opt is not None and a.id != a.id_opt:
             print("usage: give one grant id, not two", file=sys.stderr)
