@@ -12,6 +12,16 @@ it prints `STOP: no-grant reason=<reason>` (none, revoked, superseded, expired, 
 stale, tracked, invalid, checker-unavailable, checker-error or not-an-envelope), runs no
 stage and exits 2. The derive-grant stage uses only the grant id that this check returned.
 
+Before that check, the tick takes the pipeline lock (R14): a non-blocking exclusive flock on
+<root>/.skill-contract/pipeline/.lock. That directory holds a `*` .gitignore, and the tick
+proves it is git-ignored before it writes the lock file. When another tick holds the lock,
+the tick prints `STOP: locked: ...`, runs no check and no stage, changes nothing and exits
+3. The tick holds the lock until it exits, through every stage and every tool call. The
+kernel drops a flock when its holder dies, so a killed tick never blocks the next one. The
+lock file descriptor is not inherited by the tools the tick runs. ops-intake's own run lock
+is a different file, so the two never wait on each other. A state directory that cannot be
+shown to be git-ignored is a refusal: `STOP: state-dir reason=...`, exit 2.
+
 The tick runs nine stages in this order and prints one `STAGE: <name> <result>` line
 per stage, optionally followed by a detail such as `exit=3` or `picked=2`:
 
@@ -42,10 +52,13 @@ directory beside this skill, <root>/.agents/skills, <root>/.claude/skills,
 (os.pathsep-separated) replaces that list, so a test can point at stub skills only.
 
 The tick runs every tool with sys.executable, an argv list and no shell. Stdlib only,
-Python 3.10+, POSIX. Exits: 0 every stage ran; 2 usage error or no live pipeline grant.
+Python 3.10+, POSIX. Exits: 0 every stage ran; 2 usage error, a state directory that is not
+git-ignored, or no live pipeline grant; 3 another tick holds the pipeline lock.
 """
 import argparse
+import contextlib
 import datetime
+import fcntl
 import json
 import os
 import re
@@ -63,6 +76,9 @@ REASON = re.compile(r"^[a-z]+(?:-[a-z]+)*\Z")
 # The pipeline-grant check: spec-first-planning ships the reference checker, byte-identical.
 CHECKER = ("spec-first-planning", "assets/contract_check.py")
 CHECK_TIMEOUT = 120  # seconds; the checker reads local files and asks git
+# The pipeline lock (R14): one tick at a time per repository. Not ops-intake's lock file.
+PIPELINE_DIR = ".skill-contract/pipeline"
+LOCK_FILE = ".lock"
 
 # skill directory -> its tool, relative to the skill directory
 TOOLS = {
@@ -276,6 +292,80 @@ STAGES = (
 )
 
 
+# ── the pipeline lock (R14) ─────────────────────────────────────────────────────────────
+
+class Refused(Exception):
+    """The state directory cannot be shown to be git-ignored: exit 2."""
+
+
+class Locked(Exception):
+    """Another tick holds the pipeline lock: exit 3."""
+
+
+def _pipeline_dir(root):
+    return os.path.join(root, *PIPELINE_DIR.split("/"))
+
+
+def _gitignore_ok(path):
+    """True when the file is a regular file holding `*` and no `!` line."""
+    try:
+        if os.path.islink(path) or not os.path.isfile(path):
+            return False
+        with open(path, encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f.read().splitlines()]
+        return "*" in lines and not any(ln.startswith("!") for ln in lines)
+    except (OSError, ValueError):
+        return False
+
+
+def ensure_dir(root):
+    """Make .skill-contract/pipeline/ and prove it is git-ignored before the lock file is
+    written (incident-watch's pattern). Raises Refused when that cannot be shown."""
+    top = os.path.join(root, ".skill-contract")
+    d = _pipeline_dir(root)
+    if os.path.islink(top) or os.path.islink(d):
+        raise Refused("symlink")
+    gi = os.path.join(d, ".gitignore")
+    if os.path.isdir(d) and _gitignore_ok(gi):
+        return d
+    if os.path.islink(gi) or (os.path.lexists(gi) and not os.path.isfile(gi)):
+        raise Refused("gitignore-not-a-file")
+    if os.path.isfile(gi):
+        with open(gi, encoding="utf-8") as f:
+            if any(ln.strip().startswith("!") for ln in f.read().splitlines()):
+                raise Refused("gitignore-unignores")
+    try:
+        os.makedirs(d, exist_ok=True)
+        with open(gi, "w", encoding="utf-8") as f:
+            f.write("# written by factory-pipeline: tick state is local, never committed\n*\n")
+    except OSError:
+        raise Refused("cannot-write")
+    if not _gitignore_ok(gi):
+        raise Refused("cannot-verify")
+    return d
+
+
+@contextlib.contextmanager
+def tick_lock(root):
+    """Hold a non-blocking exclusive flock on <root>/.skill-contract/pipeline/.lock for the
+    whole tick. Raises Refused (state dir not git-ignored) or Locked (another tick holds
+    it). The descriptor is close-on-exec, so no tool the tick runs keeps the lock alive."""
+    d = ensure_dir(root)
+    try:
+        fd = os.open(os.path.join(d, LOCK_FILE),
+                     os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError:
+        raise Refused("lock-file")
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Locked()
+        yield
+    finally:
+        os.close(fd)
+
+
 # ── the pipeline-grant check (R13) ──────────────────────────────────────────────────────
 
 def grant_id_of(root, ref):
@@ -350,10 +440,24 @@ def join(*parts):
 # ── the command ─────────────────────────────────────────────────────────────────────────
 
 def cmd_tick(a):
-    tick = Tick(a.root, skill_roots(a.root, overrides=a.skills_dir),
-                growth_source=a.growth_source)
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     print("TICK: start %s root %s" % (now, a.root))
+    # R14: one tick at a time. The lock comes first and is held until the tick returns.
+    try:
+        with tick_lock(a.root):
+            return run_tick(a)
+    except Refused as e:
+        print("STOP: state-dir reason=%s dir=%s" % (e, PIPELINE_DIR))
+        return 2
+    except Locked:
+        print("STOP: locked: another pipeline tick holds %s/%s" % (PIPELINE_DIR, LOCK_FILE))
+        return 3
+
+
+def run_tick(a):
+    """The tick body. cmd_tick() calls it only while it holds the pipeline lock."""
+    tick = Tick(a.root, skill_roots(a.root, overrides=a.skills_dir),
+                growth_source=a.growth_source)
     # R13: no stage runs (nothing is swept, picked or planned) without a live pipeline grant.
     gid, reason = check_grant(tick, a.grant)
     if gid is None:
@@ -361,8 +465,7 @@ def cmd_tick(a):
         return 2
     tick.grant = gid
     print("TICK: grant %s expires_at %s" % (gid, tick.grant_expires))
-    # R14 (the lock) and R15 (caps) stop the tick here or between stages; until they ship,
-    # every stage runs.
+    # R15 (caps) stops the tick here or between stages; until it ships, every stage runs.
     ran = 0
     for name, fn in STAGES:
         try:

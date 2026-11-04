@@ -2,11 +2,14 @@
 
 - id: pipeline-tick
 - proven: no
-- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant
+- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock
 
 ## What it is
 
-**Status: partly built.** `pipeline tick` ships (R12). Before any stage, it checks the
+**Status: partly built.** `pipeline tick` ships (R12). First it takes the repo's pipeline
+lock, a non-blocking flock on `.skill-contract/pipeline/.lock` in a git-ignored directory
+(R14). A tick that finds the lock held prints `STOP: locked: ...`, changes nothing and
+exits 3. Before any stage, it checks the
 standing pipeline grant with spec-first-planning's `contract_check.py check-pipeline-grant`
 (R13). With no live grant it runs no stage, prints `STOP: no-grant reason=<reason>` and
 exits 2. It runs the factory stages in this
@@ -36,10 +39,13 @@ Shipped:
 - The grant check (R13): with no live pipeline grant (none, revoked by id or by the kill
   switch, expired, stale, tracked or invalid), exit 2, `STOP: no-grant reason=<reason>`,
   no `STAGE:` line and no stage tool call.
+- The one-tick lock (R14): a tick started while another process holds the lock exits 3,
+  prints `STOP: locked: another pipeline tick holds .skill-contract/pipeline/.lock`, runs
+  no grant check and no stage, and leaves the queue unchanged. The lock is held for the
+  whole tick and is released when its holder exits or is killed.
 
 Planned (not yet shipped):
 
-- A second tick while one holds the lock: exit 3, `locked`, and the queue is unchanged (R14).
 - A cap is reached: `STOP: cap <name>` (for example `STOP: cap max_plans_per_day`), and
   no new plan or run starts after it (R15).
 - `pipeline schedule install`: installs a timer with factory-conductor's timer module at
@@ -94,13 +100,42 @@ python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-revok
 - `revoke-grant` (the kill switch) prints one `REVOKED: <id>` line and exits 0.
 - `pt-revoked`: exit 2, `STOP: no-grant reason=revoked`, and no `STAGE:` line.
 
-The R14 to R21 recipes join this section as each ships.
+The lock (R14). Write a fresh grant and a queue file, hold the lock with the testkit, run
+a tick while it is held, then run one after the holder exits:
+
+```sh
+python3 factory-pipeline/assets/pipeline_testkit.py grant "$PT/repo"
+mkdir -p "$PT/repo/.skill-contract/intake"
+printf '{"items": [{"id": 1, "state": "new"}]}\n' > "$PT/repo/.skill-contract/intake/queue.json"
+shasum -a 256 "$PT/repo/.skill-contract/intake/queue.json" > "$WT/.verify-run/$INSTANCE/pt-queue-before.txt"
+: > "$PT/skills/calls.jsonl"
+python3 factory-pipeline/assets/pipeline_testkit.py hold "$PT/repo" 20 &
+sleep 2
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-locked -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$PT/repo" --skills-dir "$PT/skills" tick
+shasum -a 256 "$PT/repo/.skill-contract/intake/queue.json" > "$WT/.verify-run/$INSTANCE/pt-queue-after.txt"
+cp "$PT/skills/calls.jsonl" "$WT/.verify-run/$INSTANCE/pt-locked-calls.jsonl"
+wait
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-unlocked -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$PT/repo" --skills-dir "$PT/skills" tick
+```
+
+- `hold` prints `HELD: <repo>/.skill-contract/pipeline/.lock`.
+- `pt-locked`: exit 3. The output holds
+  `STOP: locked: another pipeline tick holds .skill-contract/pipeline/.lock`, no
+  `TICK: grant` line and no `STAGE:` line.
+- `pt-queue-before.txt` and `pt-queue-after.txt` hold the same hash, and
+  `pt-locked-calls.jsonl` is empty (no stage tool ran).
+- `pt-unlocked`: exit 0 and `TICK: done stages=9` (the holder exited, so the lock is free).
+
+The R15 to R21 recipes join this section as each ships.
 
 ## Proof
 
-The `pt-no-grant`, `pt-tick`, `pt-missing` and `pt-revoked` captures (their `STOP:` and
-`STAGE:` lines and exit codes) and `pt-calls.jsonl`. After the planned parts ship: the
-`STOP: cap` and `locked` refusals, the schedule install results, and the content of `.skill-contract/pipeline/digest.md`.
+The `pt-no-grant`, `pt-tick`, `pt-missing`, `pt-revoked`, `pt-locked` and `pt-unlocked`
+captures (their `STOP:` and `STAGE:` lines and exit codes), `pt-calls.jsonl`,
+`pt-locked-calls.jsonl`, and the two queue hashes. After the planned parts ship: the
+`STOP: cap` refusal, the schedule install results, and the content of `.skill-contract/pipeline/digest.md`.
 
 ## Gotchas
 
@@ -110,6 +145,8 @@ The `pt-no-grant`, `pt-tick`, `pt-missing` and `pt-revoked` captures (their `STO
   factory-pipeline comes before the project and user roots). In an empty repo they refuse
   with exit 2 (no intake config, no growth plan), so the stages say `refused`.
 - `pending-R<n>` is the honest result of a stage that is not built. It is not `ok`.
+- The lock file stays on disk after a tick. That is correct: only a held `flock` blocks a
+  tick, and the kernel drops it when the holder dies. Do not delete the file to "unlock".
 - `proven: no` stays until the recipe is driven with SHA-bound evidence.
 - The planned schedule installer only codes the timer. A run installs no timer and starts
   no service.

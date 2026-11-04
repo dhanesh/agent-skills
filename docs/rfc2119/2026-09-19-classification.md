@@ -486,13 +486,13 @@ New skill (growth-review 0.1.0, roadmap step 6D part 1, 2026-10-12), written wit
 
 ## factory-pipeline (3 candidates · 3 MUST · 0 SHOULD · 0 MAY · 0 plain · 0 departures)
 
-factory-pipeline 0.1.0 (autonomous-factory run 2, task T12, R12, 2026-11-04): `pipeline tick` ships, and five of its nine stages report `pending-R<n>`. The skeleton's one rule (do not claim a `pipeline` command) is gone with the skeleton. Jev did not judge these rows; each level follows the rule it carries and names what enforces it.
+factory-pipeline 0.1.0 (autonomous-factory run 2, task T12, R12, 2026-11-04): `pipeline tick` ships, and five of its nine stages report `pending-R<n>`. The skeleton's one rule (do not claim a `pipeline` command) is gone with the skeleton. Task T14 (R14, 2026-11-04): the tick takes a one-tick lock before the grant check and exits 3 with `STOP: locked` while another tick holds it; no keyword sentence changed, only the line numbers below. Jev did not judge these rows; each level follows the rule it carries and names what enforces it.
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
-| c1 | 43 | **Locating this skill's helpers (do this first).** The steps below run bundled … | not judged (new in 0.1.0) | MUST | the shared `$SKILL_DIR` preamble, same block and level as every other adopter; asset-paths.sh lints the SKILL.md half |
-| c2 | 104 | You MUST NOT report a stage as done when its line says `pending-R<n>`, `unavailable`, … | not judged (new in 0.1.0) | MUST | autonomous-factory spec B4 (a status never claims more than is true) and the R12 brief ("an honest result word, never a fake ok"); the tick prints the true word and the eval rejects a fake `ok`, but only the rule keeps the agent's report honest |
-| c3 | 108 | You MUST NOT merge a pull request, accept a release grant, or write or register the pick … | not judged (new in 0.1.0) | MUST | autonomous-factory spec B1 (no change removes a human gate) and S3 (the owner registers the pick policy); `merge` is never grantable (skill-contract A8) and `register-policy` refuses an `agent:` name, but a shell agent can type a human's name, so the rule carries the rest; same rule as ops-intake's pick-policy row |
+| c1 | 46 | **Locating this skill's helpers (do this first).** The steps below run bundled … | not judged (new in 0.1.0) | MUST | the shared `$SKILL_DIR` preamble, same block and level as every other adopter; asset-paths.sh lints the SKILL.md half |
+| c2 | 122 | You MUST NOT report a stage as done when its line says `pending-R<n>`, `unavailable`, … | not judged (new in 0.1.0) | MUST | autonomous-factory spec B4 (a status never claims more than is true) and the R12 brief ("an honest result word, never a fake ok"); the tick prints the true word and the eval rejects a fake `ok`, but only the rule keeps the agent's report honest |
+| c3 | 126 | You MUST NOT merge a pull request, accept a release grant, or write or register the pick … | not judged (new in 0.1.0) | MUST | autonomous-factory spec B1 (no change removes a human gate) and S3 (the owner registers the pick policy); `merge` is never grantable (skill-contract A8) and `register-policy` refuses an `agent:` name, but a shell agent can type a human's name, so the rule carries the rest; same rule as ops-intake's pick-policy row |
 
 ## incident-watch (3 candidates · 3 MUST · 0 SHOULD · 0 MAY · 0 plain · 0 departures)
 

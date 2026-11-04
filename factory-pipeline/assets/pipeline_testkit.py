@@ -7,8 +7,9 @@ Each stub tool:
   - appends {"skill", "key", "argv", "stdin"} as one JSON line to <dir>/calls.jsonl;
   - prints the stdout and stderr, and exits with the code, that
     <dir>/behave/<skill>.<key>.json holds (key: the command, such as `sweep`, `auto`,
-    `import`, `autopick` or `under-pipeline`).
-behave(dir, skill, key, stdout=..., stderr=..., exit=...) changes one answer, and
+    `import`, `autopick` or `under-pipeline`), after it sleeps that file's `sleep`
+    seconds (default 0).
+behave(dir, skill, key, stdout=..., stderr=..., exit=..., sleep=...) changes one answer, and
 calls(dir) reads the log back. The stubs change nothing else.
 
 The stub spec-first-planning also gets a copy of the real `assets/contract_check.py` of the
@@ -18,21 +19,28 @@ repo with that skill's own writer (`write_grant.build_pipeline_grant`, the code 
 `write_grant.py --pipeline`), after it writes a pick policy and a command allowlist for the
 grant to pin. `now` moves the grant's clock back, so a test can write an expired grant.
 
+hold(repo, seconds) takes the tick's own pipeline lock (R14) in this process, prints
+`HELD: <lock path>`, sleeps, then exits, and the kernel drops the lock with it. A tick
+started meanwhile sees the lock held.
+
 CLI: python3 pipeline_testkit.py stubs <dir>   (prints STUBS: <dir>)
      python3 pipeline_testkit.py grant <repo>  (prints GRANT: <path>)
+     python3 pipeline_testkit.py hold <repo> <seconds>  (prints HELD: <path>, then sleeps)
 """
 import datetime
 import json
 import os
+import fcntl
 import shutil
 import sys
+import time
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLANNING_ASSETS = os.path.join(os.path.dirname(SKILL_DIR), "spec-first-planning", "assets")
 CHECKER = os.path.join(PLANNING_ASSETS, "contract_check.py")
 
 STUB = r'''#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, time
 SKILL = %(skill)r
 HOME = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 args = sys.argv[1:]
@@ -47,6 +55,7 @@ try:
         b = json.load(f)
 except OSError:
     b = {"stdout": "", "stderr": "", "exit": 0}
+time.sleep(b.get("sleep", 0))
 sys.stdout.write(b.get("stdout", ""))
 sys.stderr.write(b.get("stderr", ""))
 sys.exit(b.get("exit", 0))
@@ -76,11 +85,11 @@ DEFAULTS = {
 }
 
 
-def behave(d, skill, key, stdout="", stderr="", exit=0):
+def behave(d, skill, key, stdout="", stderr="", exit=0, sleep=0):
     os.makedirs(os.path.join(d, "behave"), exist_ok=True)
     with open(os.path.join(d, "behave", "%s.%s.json" % (skill, key)), "w",
               encoding="utf-8") as f:
-        json.dump({"stdout": stdout, "stderr": stderr, "exit": exit}, f)
+        json.dump({"stdout": stdout, "stderr": stderr, "exit": exit, "sleep": sleep}, f)
 
 
 def stubs(d, skills=None):
@@ -134,6 +143,18 @@ def pipeline_grant(repo, now=None, days=3, accepted_by="Owner"):
     return contract_check.write_envelope(repo, st)
 
 
+def hold(repo, seconds):
+    """Hold the pipeline lock of repo for `seconds`, the way a running tick holds it."""
+    import pipeline  # noqa: E402  (same directory)
+    d = pipeline.ensure_dir(repo)
+    path = os.path.join(d, pipeline.LOCK_FILE)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    print("HELD: %s" % path, flush=True)
+    time.sleep(seconds)
+    os.close(fd)
+
+
 def calls(d):
     try:
         with open(os.path.join(d, "calls.jsonl"), encoding="utf-8") as f:
@@ -143,10 +164,13 @@ def calls(d):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3 or sys.argv[1] not in ("stubs", "grant"):
-        print("usage: pipeline_testkit.py stubs <dir> | grant <repo>")
+    if not ((len(sys.argv) == 3 and sys.argv[1] in ("stubs", "grant"))
+            or (len(sys.argv) == 4 and sys.argv[1] == "hold")):
+        print("usage: pipeline_testkit.py stubs <dir> | grant <repo> | hold <repo> <seconds>")
         sys.exit(2)
-    if sys.argv[1] == "stubs":
+    if sys.argv[1] == "hold":
+        hold(os.path.abspath(sys.argv[2]), float(sys.argv[3]))
+    elif sys.argv[1] == "stubs":
         print("STUBS: %s" % stubs(os.path.abspath(sys.argv[2])))
     else:
         print("GRANT: %s" % pipeline_grant(os.path.abspath(sys.argv[2])))
