@@ -244,7 +244,8 @@ Write it with `intake init --answers <file>`. It is committed. It holds only dat
   is refused. So are `command`, `base_url` and `*_env` inside a section.
 - A source name is 1 to 50 letters, digits, `_`, `.` or `-`, and starts with a letter or digit.
   The name goes into `NEXT:` lines that you run in a shell, so other characters are refused.
-- Each source has exactly `enabled` (true or false) and `formats` (a non-empty list).
+- Each source has `enabled` (true or false) and `formats` (a non-empty list), and can have
+  `sweep` (see below). No other key is allowed.
 - The name `release` is only for `release-envelope` and `release-status`, and those two
   formats are only allowed there.
 - `git-rev-list` is auxiliary. No source can list it.
@@ -252,6 +253,20 @@ Write it with `intake init --answers <file>`. It is committed. It holds only dat
 - `github.repo` looks like `owner/name`. `jira.jql`, `linear.team` and `linear.filter` are
   short strings. You use them when you run the CLI or MCP tool; intake does not.
 - `weights` maps configured source names to numbers. The default is 1.
+- A source can also have `sweep`: a list of 1 to 10 entries. Each entry has exactly `format`
+  and `argv`. `format` is one of the source's formats. It cannot be `release-envelope` or
+  `gh-run-jobs-json`. `argv` is a list of 1 to 64 strings with no control characters, and the
+  first string is not a flag. `intake sweep` runs each `argv` with no shell, in the repo root,
+  with no stdin, for at most 300 seconds. It imports what the command prints as that format.
+  The owner writes these entries. Item content never adds one.
+
+  ```json
+  "github": {"enabled": true, "formats": ["gh-issues-json"],
+             "sweep": [{"format": "gh-issues-json",
+                        "argv": ["gh", "issue", "list", "--repo", "owner/name", "--state", "all",
+                                 "--limit", "100", "--json",
+                                 "number,title,body,labels,state,createdAt,updatedAt,url"]}]}
+  ```
 
 ## Pick policy: `.intake/pick-policy.json`
 
@@ -321,6 +336,7 @@ drops it flags `plan-superseded`.
 | `status` | `SYNC: <n> items … regressed=<r>` |
 | `register-policy --by NAME [--reason TEXT]` | `REGISTERED: <sha256> by <name> at <time>`, or `REGISTERED: <sha256> (no change since the last registration)`; logs a `register-policy` event; `STOP: policy: …` (exit 2) for a missing or invalid policy or an `agent` name |
 | `autopick` | `POLICY: <sha256> by <name> at <time>`, one `MATCH: <id> <flag> <rank> <title>` per item inside the policy, then `AUTOPICK: matched <n> picked 0`; `STOP: policy-unregistered` or `STOP: policy-changed` (exit 2) when the file has no registration that matches it |
+| `sweep` | for each sweep entry of an enabled source, in source-name order: the `IMPORT:` and `PROBLEM:` lines of its import, or `PROBLEM: sweep <source> <format>: <reason>` when the command cannot start, times out, exits non-zero or its import is refused; then `SWEEP: <n> commands ok <k> failed <f>`. Exit 3 when a command failed or an import had problems. `STOP:` (exit 2) when no enabled source has a sweep entry |
 | `formats` | `FORMAT:` lines (needs no config) |
 
 The flag is `<state>`, plus `+regressed`, plus for `picked` and `planned` items one of

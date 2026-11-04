@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """ops-intake: a pure local importer for the ops signal queue.
 
-Intake MUST NOT open a network connection or run a subprocess. It only reads files the
-agent hands it and writes its own queue. Stdlib only, Python 3.10+, POSIX.
+Intake MUST NOT open a network connection or run a subprocess, except `intake sweep`,
+which runs the argv lists of the committed config through intake_sweep.py, with no shell.
+It only reads files the agent hands it and writes its own queue. Stdlib only, Python 3.10+,
+POSIX.
 
 Exits: 0 ok; 3 import or envelope problems, or a human is needed; 2 invalid config,
 unknown format or refused input. Machine lines: IMPORT:, SYNC:, ITEM:, NEXT:, STOP:,
-PROBLEM:, REGISTERED:, POLICY:, MATCH:, AUTOPICK:.
+PROBLEM:, REGISTERED:, POLICY:, MATCH:, AUTOPICK:, SWEEP:.
 """
 import argparse
 import contextlib
@@ -25,7 +27,7 @@ import adapters
 import contract_check as CC  # the vendored skill-contract checker, same dir
 
 SKILL_NAME = "ops-intake"
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 _KIND_BASE = "https://github.com/dhanesh/agent-skills/skill-contract/"
 INTAKE_ITEM_KIND = _KIND_BASE + "intake-item/v1"
 PLAN_KIND = _KIND_BASE + "task-plan/v1"
@@ -198,6 +200,46 @@ def _check_section(name, sec, problems):
             problems.append("%s.%s must be a list of short strings" % (name, k))
 
 
+# -- Sweep entries (R9, decision D8: an added config field) ---------------------------
+# A sweep entry names one command, as an argv list, and the format of what it prints. The
+# owner commits it in the config; item content never names a command. The command runs
+# with no shell, so no argument is parsed as shell syntax.
+SWEEP_MAX_ENTRIES = 10
+SWEEP_MAX_ARGS = 64
+SWEEP_ARG_LIMIT = 1000
+# Formats a sweep cannot produce: sync reads release envelopes itself, a jobs import needs
+# --run from a NEXT line, and git-rev-list belongs to no source.
+SWEEP_REFUSED_FORMATS = ("release-envelope", "gh-run-jobs-json", "git-rev-list")
+
+
+def _sweep_arg_ok(v):
+    return (isinstance(v, str) and 0 < len(v) <= SWEEP_ARG_LIMIT
+            and not any(ord(c) < 32 or ord(c) == 127 for c in v))
+
+
+def _check_sweep(name, sweep, fmts, problems):
+    where = "source %s: sweep" % code(name)
+    if not isinstance(sweep, list) or not 0 < len(sweep) <= SWEEP_MAX_ENTRIES:
+        problems.append("%s must be a list of 1-%d entries" % (where, SWEEP_MAX_ENTRIES))
+        return
+    for i, e in enumerate(sweep, 1):
+        w = "%s entry %d" % (where, i)
+        if not isinstance(e, dict) or set(e) != {"format", "argv"}:
+            problems.append("%s must be an object with exactly format and argv" % w)
+            continue
+        fmt, argv = e["format"], e["argv"]
+        if fmt in SWEEP_REFUSED_FORMATS:
+            problems.append("%s: format %s cannot be swept" % (w, code(fmt)))
+        elif fmt not in fmts:
+            problems.append("%s: format %s is not in the source's formats" % (w, code(fmt)))
+        if not (isinstance(argv, list) and 0 < len(argv) <= SWEEP_MAX_ARGS
+                and all(_sweep_arg_ok(x) for x in argv)):
+            problems.append("%s: argv must be a list of 1-%d strings with no control "
+                            "characters" % (w, SWEEP_MAX_ARGS))
+        elif argv[0].startswith("-"):
+            problems.append("%s: argv must start with a program, not a flag" % w)
+
+
 def config_problems(cfg):
     problems = []
     if not isinstance(cfg, dict):
@@ -218,7 +260,7 @@ def config_problems(cfg):
             problems.append("source %s must be an object" % code(name))
             continue
         for k in src:
-            if k not in ("enabled", "formats"):
+            if k not in ("enabled", "formats", "sweep"):
                 problems.append("source %s: unknown key %s" % (code(name), code(k)))
         if not isinstance(src.get("enabled"), bool):
             problems.append("source %s: enabled must be true or false" % code(name))
@@ -236,6 +278,8 @@ def config_problems(cfg):
                 problems.append("source %s: %s is reserved for the release formats, and "
                                 "those formats are allowed only there"
                                 % (code(name), code(RELEASE_SOURCE)))
+        if "sweep" in src:
+            _check_sweep(name, src["sweep"], fmts, problems)
     ci_formats = any(isinstance(s, dict) and isinstance(s.get("formats"), list)
                      and ("gh-runs-json" in s["formats"] or "gh-run-jobs-json" in s["formats"])
                      for s in sources.values())
@@ -1224,7 +1268,9 @@ def cmd_import(a):
     if fmt == "gh-run-jobs-json" and a.run is None:
         print("STOP: gh-run-jobs-json needs --run <run id>")
         return 2
-    raw = _read_input(a.file)
+    raw = getattr(a, "raw", None)  # sweep hands the command's output in (R9)
+    if raw is None:
+        raw = _read_input(a.file)
     if raw is None:
         return 2
     now = _now()
@@ -1736,6 +1782,39 @@ def cmd_pick(a):
     return 0
 
 
+def cmd_sweep(a):
+    """Run each enabled source's sweep commands from the committed config and import what
+    each prints, through cmd_import, so items get the same parsing, trust labels and
+    formats as `intake import`. A failing command is a PROBLEM: line and the others still
+    run. Only this command runs a subprocess, and only through intake_sweep (R9)."""
+    cfg = _need_config(a.root)
+    if cfg is None:
+        return 2
+    jobs = [(name, e["format"], e["argv"]) for name, src in sorted(cfg["sources"].items())
+            if src["enabled"] for e in src.get("sweep", [])]
+    if not jobs:
+        print("STOP: no enabled source has a sweep entry in %s" % CONFIG_PATH)
+        return 2
+    import intake_sweep  # loaded here only, so no other command can reach a subprocess
+    failed, problems = 0, 0
+    for name, fmt, argv in jobs:
+        out, err = intake_sweep.run_source(argv, a.root)
+        if err is not None:
+            failed += 1
+            print("PROBLEM: sweep %s %s: %s" % (name, fmt, one_line(err)))
+            continue
+        ia = argparse.Namespace(root=a.root, format=fmt, source=name, run=None, commit=None,
+                                file=None, raw=out)
+        rc = cmd_import(ia)
+        if rc == 2:
+            failed += 1
+            print("PROBLEM: sweep %s %s: the import refused the output" % (name, fmt))
+        elif rc != 0:
+            problems += 1
+    print("SWEEP: %d commands ok %d failed %d" % (len(jobs), len(jobs) - failed, failed))
+    return 3 if failed or problems else 0
+
+
 def cmd_formats(a):
     for f in FORMATS:
         note = "" if f in adapters.ADAPTERS else "(not yet built) "
@@ -1762,6 +1841,7 @@ def main(argv=None):
     s.add_argument("--reason")
     sub.add_parser("autopick")
     sub.add_parser("sync")
+    sub.add_parser("sweep")
     sub.add_parser("formats")
     s = sub.add_parser("import"); s.add_argument("--format", required=True)
     s.add_argument("--source"); s.add_argument("--run"); s.add_argument("--commit")
@@ -1779,7 +1859,7 @@ def main(argv=None):
             "status": cmd_status, "sync": cmd_sync, "formats": cmd_formats,
             "import": cmd_import, "pick": cmd_pick,
             "drop-run": cmd_drop_run, "register-policy": cmd_register_policy,
-            "autopick": cmd_autopick}[a.cmd](a)
+            "autopick": cmd_autopick, "sweep": cmd_sweep}[a.cmd](a)
 
 
 if __name__ == "__main__":

@@ -60,8 +60,9 @@ An arrow from A to B means A sends work or data to B. `==>` contract envelope, `
   Zendesk and Intercom.
 
 The agent runs each command or MCP search tool. It pipes CLI output straight into
-`intake.py import`, so it does not read that text first. The tool runs no command, opens no
-network connection and holds no token. Your normal permission prompts show every command the
+`intake.py import`, so it does not read that text first. The tool opens no network
+connection and holds no token. It runs a command only in `intake sweep`, and only the argv
+lists that you commit in the config. Your normal permission prompts show every command the
 agent runs.
 
 ## How an item moves
@@ -114,12 +115,16 @@ only when its source sees it again after the dismissal.
 - `references/formats.md`: every format, the config, the states and the machine lines.
 - `references/conversion-recipes.md`: an export and transform recipe for Jira, Linear, App
   Store Connect, Play Console, Zendesk and Intercom.
-- `assets/intake.py`, `assets/adapters.py`: the tool (Python 3.10+, standard library only).
+- `assets/intake.py`, `assets/adapters.py`, `assets/intake_sweep.py`: the tool (Python 3.10+, standard library only).
 - `assets/schemas/intake-item.v1.json`: the envelope payload schema.
 - `eval/run_eval.py`: the outcome eval.
 
 ## Changes
 
+- **0.4.0.** `intake sweep`. A source in the config can list `sweep` entries: a format and an
+  argv list. `intake sweep` runs each one with no shell and imports its output, the same way
+  as `intake import`. A failed command prints a `PROBLEM:` line, and the others still run.
+  All writes go to the git-ignored intake directory.
 - **0.3.1.** The pick policy filters by format. A low-trust item matches only when the policy
   names every format it was imported from. Each item now records its import formats. An item
   imported before this change has none, so it never matches.
