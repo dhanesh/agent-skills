@@ -2,7 +2,7 @@
 
 - id: pipeline-tick
 - proven: no
-- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-pipeline/assets/pipeline.py:stage_plan, factory-pipeline/assets/pipeline.py:plan_one, factory-pipeline/assets/pipeline.py:run_planner, spec-first-planning/assets/write_grant.py:build_pipeline_grant, factory-conductor/assets/reentry_timer.py:cron_schedule
+- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-pipeline/assets/pipeline.py:stage_plan, factory-pipeline/assets/pipeline.py:plan_one, factory-pipeline/assets/pipeline.py:run_planner, factory-pipeline/assets/pipeline.py:snapshot, factory-pipeline/assets/pipeline.py:git, spec-first-planning/assets/write_grant.py:build_pipeline_grant, factory-conductor/assets/reentry_timer.py:cron_schedule
 
 ## What it is
 
@@ -85,7 +85,12 @@ Shipped:
   --unattended`, `spec_to_tasks.py --allowlist` (the allowlist whose sha256 the grant
   pins) and `spec_to_tasks.py --envelope` all exit 0. Otherwise `PLAN: waiting <spec>
   reason=<reason>`, nothing is handed on, and the digest list gains a waiting entry.
-  The planner's output is echoed with the `  plan| ` prefix and never trusted.
+  The planner's output is echoed with the `  plan| ` prefix and never trusted. A tamper
+  snapshot before and after the planner (every work-tree file, ignored ones included;
+  the git config, refs, hooks and info; the spec-first-planning tool files) makes the
+  plan wait with `planner-changed-the-repo`, `planner-changed-git` or
+  `planner-changed-tools`. Every git call of the tick runs with fsmonitor and hooks off.
+  These are tripwires, not a sandbox.
 
 - The schedule (R16): `schedule install --every <minutes>` with 15 to 1440 installs one
   timer through factory-conductor's `reentry_timer.py` (imported from where that skill is

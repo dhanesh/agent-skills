@@ -187,6 +187,104 @@ class TestPlanStage(PlanFixture):
         self.assertEqual(self.planner_calls(), [])
 
 
+class TestTamper(PlanFixture):
+    """The planner runs as the owner, so the tick takes a tamper snapshot before it and
+    after it: any change outside the spec makes the plan wait, and every git call the tick
+    makes is hardened, so a planted config key never runs."""
+
+    def extra(self, code):
+        with open(os.path.join(self.agent, "extra.py"), "w", encoding="utf-8") as f:
+            f.write(code)
+
+    def test_fsmonitor_in_git_config_never_runs_and_the_plan_waits(self):
+        marker = os.path.join(self.tmp, "PWNED")
+        self.extra("open(os.path.join(root, '.git', 'config'), 'a').write("
+                   "'[core]\\n\\tfsmonitor = touch %s; false\\n')\n" % marker)
+        self.pick("I0000000001")
+        _, text, res, seen = self.tick()
+        self.assertWaits(text, res, seen, "I0000000001", "planner-changed-git")
+        self.assertFalse(os.path.exists(marker))
+        # The config stays poisoned, and the next tick's git calls stay hardened too.
+        self.pick("I0000000002")
+        self.tick()
+        self.assertFalse(os.path.exists(marker))
+
+    def test_hook_file_makes_the_plan_wait(self):
+        self.extra("p = os.path.join(root, '.git', 'hooks', 'post-checkout')\n"
+                   "open(p, 'w').write('#!/bin/sh\\necho pwned\\n')\n"
+                   "os.chmod(p, 0o755)\n")
+        self.pick("I0000000001")
+        _, text, res, seen = self.tick()
+        self.assertWaits(text, res, seen, "I0000000001", "planner-changed-git")
+
+    def test_ignored_file_makes_the_plan_wait(self):
+        self.extra("open(os.path.join(root, '.skill-contract', 'intake', 'evil.sh'), 'w')"
+                   ".write('cat .env\\n')\n")
+        self.pick("I0000000001")
+        _, text, res, seen = self.tick()
+        self.assertWaits(text, res, seen, "I0000000001", "planner-changed-the-repo")
+        self.assertIn("  plan| changed: repo/.skill-contract/intake/evil.sh", text)
+
+    def test_already_dirty_tracked_file_edited_again_makes_the_plan_wait(self):
+        K.write_rel(self.repo, "Makefile", "test:\n\ttrue\n")
+        subprocess.run(["git", "-C", self.repo, "-c", "core.hooksPath=/dev/null", "add",
+                        "Makefile"], check=True, timeout=60)
+        subprocess.run(["git", "-C", self.repo, "-c", "user.name=t", "-c",
+                        "user.email=t@example.invalid", "-c", "core.hooksPath=/dev/null",
+                        "commit", "-qm", "x"], check=True, timeout=60)
+        with open(os.path.join(self.repo, "Makefile"), "a", encoding="utf-8") as f:
+            f.write("# dirty before the tick\n")
+        self.extra("open(os.path.join(root, 'Makefile'), 'a').write('\\tcat .env\\n')\n")
+        self.pick("I0000000001")
+        _, text, res, seen = self.tick()
+        self.assertWaits(text, res, seen, "I0000000001", "planner-changed-the-repo")
+
+    def test_replaced_sibling_tool_makes_the_plan_wait(self):
+        tool = os.path.join(self.skills, "spec-first-planning", "assets", "spec_to_tasks.py")
+        self.extra("open(%r, 'w').write('import sys\\nsys.exit(0)\\n')\n" % tool)
+        self.pick("I0000000001")
+        _, text, res, seen = self.tick()
+        self.assertWaits(text, res, seen, "I0000000001", "planner-changed-tools")
+
+    def test_planted_bytecode_makes_the_plan_wait(self):
+        cache = os.path.join(self.skills, "spec-first-planning", "assets", "__pycache__")
+        self.extra("os.makedirs(%r, exist_ok=True)\n"
+                   "open(os.path.join(%r, 'allowlist.planted.pyc'), 'wb').write(b'x')\n"
+                   % (cache, cache))
+        self.pick("I0000000001")
+        _, text, res, seen = self.tick()
+        self.assertWaits(text, res, seen, "I0000000001", "planner-changed-tools")
+
+    def test_snapshot_over_its_bound_waits_before_the_planner_runs(self):
+        self.pick("I0000000001")
+        with mock.patch.object(P, "SNAP_MAX_FILES", 3):
+            _, text, res, seen = self.tick()
+        self.assertWaits(text, res, seen, "I0000000001", "snapshot-too-large-files")
+        self.assertEqual(self.planner_calls(), [])
+
+    def test_tool_and_git_calls_run_hardened(self):
+        env = P.git_env()
+        self.assertFalse([k for k in env if k.startswith("GIT_") and not k.startswith(
+            ("GIT_CONFIG_", "GIT_NO_REPLACE_OBJECTS"))])
+        pairs = {env["GIT_CONFIG_KEY_%d" % i]: env["GIT_CONFIG_VALUE_%d" % i]
+                 for i in range(int(env["GIT_CONFIG_COUNT"]))}
+        self.assertEqual(pairs["core.fsmonitor"], "false")
+        self.assertEqual(pairs["core.hooksPath"], "/dev/null")
+        self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+        with mock.patch.dict(os.environ, {"GIT_DIR": "/elsewhere",
+                                          "GIT_CONFIG_PARAMETERS": "'core.fsmonitor=x'"}):
+            tenv = P.tool_env()
+        self.assertNotIn("GIT_DIR", tenv)
+        self.assertNotIn("GIT_CONFIG_PARAMETERS", tenv)
+        self.assertEqual(tenv["GIT_CONFIG_COUNT"], env["GIT_CONFIG_COUNT"])
+
+    def test_bypass_flag_in_any_form_is_not_a_planner(self):
+        for flag in ("--dangerously-skip-permissions=true", "--Dangerously-Skip-Permissions",
+                     "--permission-mode=bypassPermissions"):
+            self.assertFalse(P.planner_ok(["claude", flag, "{prompt}"]), flag)
+        self.assertTrue(P.planner_ok(["claude", "-p", "{prompt}"]))
+
+
 class TestNoPlanner(PlanFixture):
     planner = False
 

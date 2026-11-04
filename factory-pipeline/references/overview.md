@@ -96,11 +96,39 @@ the digest list as waiting for the owner's read, and hands nothing on.
 | 1 | Reads the envelope kind and the item id (or the idea slug). | `not-a-request`, `envelope-unreadable`, `envelope-outside-root` |
 | 2 | Makes sure that git ignores `.skill-contract/intake/specs/<id>.md` (`git check-ignore`), and that no spec is there yet. | `spec-not-ignored`, `spec-exists`, `spec-dir` |
 | 3 | Writes the skeleton with `intake_request.py` (or `idea_request.py`). | `request-refused`, `spec-write` |
+| 3a | Takes the tamper snapshot. When the repository is too large for it, the planner does not run. | `snapshot-too-large-files`, `snapshot-too-large-bytes` |
 | 4 | Runs the planner with no shell, in its own process group, with the tick's timeout. Then it kills what the planner left running. | `planner-exit=<n>`, `planner-timeout`, `planner-failed` |
-| 5 | Makes sure that git sees no changed file, that the spec is still a regular file, and that the allowlist still has the pinned sha256. | `planner-changed-the-repo`, `spec-replaced`, `allowlist-changed`, `git-status` |
-| 6 | Runs `spec_lint.py --unattended <spec>`. | `lint-failed` |
+| 5 | Takes the tamper snapshot again and compares it with the one taken before the planner (see below). Then it makes sure that the spec is still a regular file, and that the allowlist still has the pinned sha256. | `planner-changed-the-repo`, `planner-changed-git`, `planner-changed-tools`, `spec-replaced`, `allowlist-changed` |
+| 6 | Runs `spec_lint.py --unattended <spec>` with `python -I`, only when the tool's sha256 matches the snapshot. | `lint-failed`, `planner-changed-tools` |
 | 7 | Runs `spec_to_tasks.py <spec> --allowlist <allowlist>`. | `allowlist-unlisted` (exit 3), `allowlist-error` (exit 2), `allowlist-failed` |
 | 8 | Runs `spec_to_tasks.py <spec> --envelope <repo>` and reads its `ENVELOPE:` line. | `envelope-failed` |
+
+The tamper snapshot holds the sha256 of these files:
+
+- every file under the work tree: tracked, untracked and git-ignored. It leaves out the
+  spec, `.git`, `.skill-contract/pipeline/` (the tick's state) and `.skill-contract/runs/`
+  (the conductor's runs and their worktrees);
+- `config`, `config.worktree`, `HEAD`, `packed-refs`, `hooks/`, `info/` and `refs/` of
+  the git directory and the common directory. It never reads `objects/`;
+- `~/.gitconfig`, the XDG git config, and every `core.hooksPath` directory that one of
+  these config files names;
+- every file of the spec-first-planning skill that the stage runs, `__pycache__`
+  included.
+
+A symlink is recorded by its target and is not followed. The snapshot stops at 200000
+files or 2 GiB. Past that limit, the plan waits before the planner starts. A repository
+that large plans by hand, or keeps its bulk out of the work tree.
+
+Every git call of the tick is hardened: `git --no-replace-objects -c
+core.fsmonitor=false -c core.hooksPath=/dev/null -c core.commitGraph=false`, with no
+`GIT_*` variable from the caller and with `GIT_CONFIG_NOSYSTEM=1`. Every tool that the
+tick runs gets the same three settings through `GIT_CONFIG_COUNT`. So a hook or an
+fsmonitor command that the planner plants never runs in a tick.
+
+These guards are tripwires, not a sandbox. The planner runs as the owner, so it can reach
+anything the owner can reach. Run it with restricted tools: let it edit files and read
+the repository, and give it no shell. Keep its permission prompts on. The checker refuses
+a permission-bypass flag in any form (`--flag=value` and any letter case too).
 
 When all steps pass, the stage prints `PLAN: ready <plan> spec=<spec>` and hands the plan
 to derive grant. Derive grant checks the plan again with the real `write_grant.py

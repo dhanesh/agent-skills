@@ -812,8 +812,10 @@ def reentry_problems(block):
 
 
 # The permission-bypass flags of a headless agent CLI. A planner reads untrusted evidence,
-# so a planner that skips its permission prompts would let that text run commands.
-BYPASS_FLAGS = ("--dangerously-skip-permissions", "--permission-mode=bypassPermissions")
+# so a planner that skips its permission prompts would let that text run commands. Matched
+# as case-insensitive substrings of each argument, so `--flag=value`, `--Flag` and
+# `--allow-dangerously-skip-permissions` are caught too.
+BYPASS_MARKS = ("dangerously-skip-permissions", "bypasspermissions")
 
 
 def planner_problems(cmd):
@@ -829,9 +831,8 @@ def planner_problems(cmd):
         return out
     if cmd.count("{prompt}") != 1:
         out.append("must contain the {prompt} token exactly once")
-    for i, a in enumerate(cmd):
-        if a in BYPASS_FLAGS or (a == "--permission-mode" and i + 1 < len(cmd)
-                                 and cmd[i + 1] == "bypassPermissions"):
+    for a in cmd:
+        if any(m in a.lower() for m in BYPASS_MARKS):
             out.append("must not carry a permission-bypass flag (%s): the planner reads "
                        "untrusted text" % a)
     return out

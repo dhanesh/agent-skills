@@ -1844,6 +1844,14 @@ class PipelineGrantTests(unittest.TestCase):
                 planner=["claude", "--dangerously-skip-permissions", "-p", "{prompt}"]),
             "planner bypass mode": lambda p, pr: p.update(
                 planner=["claude", "--permission-mode", "bypassPermissions", "{prompt}"]),
+            "planner bypass =value": lambda p, pr: p.update(
+                planner=["claude", "--dangerously-skip-permissions=true", "{prompt}"]),
+            "planner bypass case": lambda p, pr: p.update(
+                planner=["claude", "--Dangerously-Skip-Permissions", "{prompt}"]),
+            "planner bypass mode =value": lambda p, pr: p.update(
+                planner=["claude", "--permission-mode=BYPASSPERMISSIONS", "{prompt}"]),
+            "planner allow bypass": lambda p, pr: p.update(
+                planner=["claude", "--allow-dangerously-skip-permissions", "{prompt}"]),
         }
         for label, mutate in cases.items():
             with self.subTest(label):

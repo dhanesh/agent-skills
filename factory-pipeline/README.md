@@ -39,8 +39,12 @@ What runs today:
   the queue or the evidence. The tick hands the plan on only when `spec_lint.py
   --unattended` and `spec_to_tasks.py --allowlist` pass. Otherwise it prints
   `PLAN: waiting <spec> reason=<reason>`, and the plan waits for the owner's read. The
-  tick uses only the exit codes of these tools. It ignores what the planner says. With no
-  planner in the grant, the stage says `unavailable no-planner`.
+  tick uses only the exit codes of these tools. It ignores what the planner says. A
+  snapshot before and after the planner makes the plan wait when the planner changed any
+  other file, the git config or hooks, or the spec-first-planning tools. Every git call of
+  the tick is hardened against hooks and fsmonitor. These guards are tripwires, not a
+  sandbox: give the planner restricted tools. With no planner in the grant, the stage
+  says `unavailable no-planner`.
 - `derive-grant` runs spec-first-planning `write_grant.py --under-pipeline` for each plan
   that the plan stage hands on.
 - `pipeline schedule install --every <minutes>` installs one timer that runs the tick

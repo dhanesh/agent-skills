@@ -143,10 +143,26 @@ For each item that autopick picked in this tick, the stage:
    <repo>`. Only when all three exit 0 does it print `PLAN: ready <plan> spec=<spec>` and
    hand the plan to derive grant.
 
+Before and after the planner, the stage takes a tamper snapshot: the sha256 of every file
+in the work tree (tracked, untracked and git-ignored, except the spec and the tick's and
+the conductor's state directories), of `.git/config`, `HEAD`, `refs/`, `hooks/` and
+`info/` (not `objects/`, which is large and runs nothing), of the global git config and every `core.hooksPath`
+directory, and of every file in the spec-first-planning skill that it runs. Any change
+makes the plan wait. spec_lint and spec_to_tasks run (as `python -I`) only when their
+bytes match the snapshot. Every git call of the tick runs with `core.fsmonitor=false`,
+`core.hooksPath=/dev/null`, no replace objects, no system config and no `GIT_*` variable
+from the caller, and every tool gets the same switches through `GIT_CONFIG_COUNT`.
+
+These guards are tripwires, not a sandbox: the planner runs as the owner and can reach
+whatever the owner can. Give it restricted tools (for Claude Code, an `--allowedTools`
+list that lets it edit files and read the repository, and no shell), and keep its
+permission prompts on; the checker refuses a permission-bypass flag in any form.
+
 Anything else prints `PLAN: waiting <spec> reason=<reason>` and hands nothing on. The
-reasons include `planner-exit=<n>`, `planner-timeout`, `planner-changed-the-repo` (git
-sees a changed file), `allowlist-changed`, `lint-failed`, `allowlist-unlisted` (a check
-command is not on the allowlist), `spec-exists` and `spec-not-ignored`. The plan then
+reasons include `planner-exit=<n>`, `planner-timeout`, `planner-changed-the-repo`,
+`planner-changed-git`, `planner-changed-tools`, `snapshot-too-large-<files|bytes>`,
+`allowlist-changed`, `lint-failed`, `allowlist-unlisted` (a check command is not on the
+allowlist), `spec-exists` and `spec-not-ignored`. The plan then
 waits for the owner's read, and the digest lists it. Before each plan after the first,
 the tick checks the caps again.
 

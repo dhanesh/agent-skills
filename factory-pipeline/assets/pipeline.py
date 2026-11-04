@@ -89,10 +89,12 @@ The stage then decides only from the exit codes of spec-first-planning's tools:
 `spec_lint.py --unattended <spec>`, `spec_to_tasks.py <spec> --allowlist <the allowlist
 whose sha256 the grant pins>`, and `spec_to_tasks.py <spec> --envelope <root>`, whose
 `ENVELOPE:` line names the plan it hands on (`PLAN: ready <plan> spec=<spec>`). Anything
-else (the planner failed, timed out or changed a file git sees, the allowlist changed,
-lint failed, a command is not on the allowlist) prints `PLAN: waiting <spec>
+else (the planner failed or timed out, the tamper snapshot taken before and after it
+differs, the allowlist changed, lint failed, a command is not on the allowlist) prints `PLAN: waiting <spec>
 reason=<reason>`, hands nothing on and adds a waiting-for-the-owner's-read entry to the
-digest list. Before each plan after the first, the tick checks the caps again.
+digest list. Before each plan after the first, the tick checks the caps again. The
+tamper snapshot and the hardened git calls are described at snapshot() and GIT_SAFE; they
+are tripwires, not a sandbox, so the owner gives the planner restricted tools.
 
 Result words: ok, attention (the tool exited 3, or some plans were refused), refused (the
 tool exited 2, or 1 for write_grant), failed (another exit, or the tool could not start),
@@ -269,6 +271,59 @@ def find_tool(roots, skill, rel=None):
     return None
 
 
+# ── git and tool environments ───────────────────────────────────────────────────────────
+# The repository's .git is writable by the planner (R17), so it is hostile. Like
+# factory-conductor's GIT_SAFE, every git call the tick makes switches off the config keys
+# that run a program on an ordinary call (core.fsmonitor, core.hooksPath), ignores the
+# commit-graph and replace refs, and reads no system config. The same switches reach every
+# tool the tick runs through GIT_CONFIG_COUNT (environment config ranks with `-c`, above
+# the repository's own config), so the checker's and write_grant's git calls ignore them
+# too.
+GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+            "-c", "core.commitGraph=false")
+GIT_SCRUB = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+             "GIT_CEILING_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS",
+             "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_EXEC_PATH",
+             "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+
+
+def _safe_config(env):
+    for k in [k for k in env if k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))]:
+        del env[k]
+    pairs = [GIT_SAFE[i + 1].split("=", 1) for i in range(0, len(GIT_SAFE), 2)]
+    env["GIT_CONFIG_COUNT"] = str(len(pairs))
+    for i, (key, value) in enumerate(pairs):
+        env["GIT_CONFIG_KEY_%d" % i] = key
+        env["GIT_CONFIG_VALUE_%d" % i] = value
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_NO_REPLACE_OBJECTS="1")
+    return env
+
+
+def tool_env():
+    """The environment of every tool the tick runs: os.environ without the variables that
+    point git at another repository or add config, plus the GIT_SAFE switches."""
+    env = {k: v for k, v in os.environ.items() if k not in GIT_SCRUB}
+    return _safe_config(env)
+
+
+def git_env():
+    """The environment of the tick's own git calls: no GIT_* variable at all, plus the
+    GIT_SAFE switches."""
+    return _safe_config({k: v for k, v in os.environ.items() if not k.startswith("GIT_")})
+
+
+def git(tick, *args):
+    """Run git in the repo root, hardened (GIT_SAFE, no replace objects, no system config,
+    no GIT_* from the caller). Return the CompletedProcess, or None when git cannot run."""
+    try:
+        return subprocess.run(["git", "--no-replace-objects", "-C", tick.root] + list(GIT_SAFE)
+                              + list(args), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              stdin=subprocess.DEVNULL, timeout=CHECK_TIMEOUT, check=False,
+                              env=git_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
 # ── running one tool ────────────────────────────────────────────────────────────────────
 
 def run_tool(tick, stage, argv, input_bytes=None, echo_stdout=True):
@@ -279,11 +334,13 @@ def run_tool(tick, stage, argv, input_bytes=None, echo_stdout=True):
     kw = {"input": input_bytes} if input_bytes is not None else {"stdin": subprocess.DEVNULL}
     try:
         cp = subprocess.run(argv, cwd=tick.root, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, timeout=tick.timeout, check=False, **kw)
+                            stderr=subprocess.PIPE, timeout=tick.timeout, check=False,
+                            env=tool_env(), **kw)
     except subprocess.TimeoutExpired:
         return "timeout", None, b""
     except OSError as e:
-        echo(stage, "cannot start %s: %s" % (os.path.basename(argv[1]), e))
+        name = next((a for a in argv[1:] if a.endswith(".py")), argv[0])
+        echo(stage, "cannot start %s: %s" % (os.path.basename(name), e))
         return "failed", None, b""
     if echo_stdout:
         echo_bytes(stage, cp.stdout)
@@ -311,6 +368,13 @@ def worse(a, b):
 
 def py(tool, *args):
     return [sys.executable, tool] + list(args)
+
+
+def py_isolated(tool, *args):
+    """python -I: no PYTHONPATH, no user site-packages (where a planner could plant a
+    usercustomize.py), no script directory on sys.path. spec-first-planning's tools put
+    their own directory on sys.path themselves."""
+    return [sys.executable, "-I", tool] + list(args)
 
 
 # ── the stages ──────────────────────────────────────────────────────────────────────────
@@ -380,7 +444,7 @@ def stage_plan(tick):
         wait_all(tick, "planner-invalid")
         return "unavailable", "planner-invalid picked=%d" % n
     tools = {k: find_tool(tick.roots, PLANNING, rel) for k, rel in PLAN_TOOLS.items()}
-    if None in tools.values():
+    if None in tools.values() or len({skill_dir_of(t) for t in tools.values()}) != 1:
         wait_all(tick, "no-spec-first-planning")
         return "unavailable", "spec-first-planning"
     allow = allowlist_rel(tick)
@@ -436,6 +500,9 @@ def planner_ok(argv):
         return False
     if argv.count("{prompt}") != 1:
         return False
+    if any(m in a.lower() for a in argv for m in ("dangerously-skip-permissions",
+                                                    "bypasspermissions")):
+        return False  # the checker refuses it too; a planner reads untrusted text
     return all(a in ("{prompt}", "{root}") or not TOKEN.search(a) for a in argv)
 
 
@@ -489,26 +556,163 @@ def allowlist_rel(tick):
     return rel if digest == a["sha256"] else None
 
 
-def git_state(tick):
-    """`git status` of the work tree (untracked files included, ignored files not), or None
-    when git cannot say. The planner may write only its git-ignored spec."""
-    try:
-        cp = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-                            cwd=tick.root, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            stdin=subprocess.DEVNULL, timeout=CHECK_TIMEOUT, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return cp.stdout if cp.returncode == 0 else None
-
-
 def ignored(tick, rel):
+    cp = git(tick, "check-ignore", "-q", "--", rel)
+    return cp is not None and cp.returncode == 0
+
+
+# ── the tamper snapshot (R17) ───────────────────────────────────────────────────────────
+# A tripwire, not a sandbox: the planner runs as the owner, so it can reach anything the
+# owner can. The snapshot records what the tick depends on after the planner exits, and a
+# plan waits for the owner's read when any of it changed:
+#   repo:    every file under the work tree (tracked, untracked and git-ignored), except
+#            the spec the planner is told to write, .git, and the state directories in
+#            SNAP_SKIP (the tick's own, and factory-conductor's runs with their worktrees);
+#   git:     config, config.worktree, HEAD, packed-refs, hooks/, info/ and refs/ of the
+#            git dir and the common dir (never objects/), the files that the global
+#            config can live in, and every core.hooksPath directory any of them names;
+#   tools:   every file of the spec-first-planning skill whose tools the plan stage and
+#            derive-grant run (its __pycache__ included, since Python loads it).
+# Symlinks are recorded by target and never followed. The cost is bounded: past
+# SNAP_MAX_FILES files or SNAP_MAX_BYTES bytes the snapshot stops, and the plan waits
+# with `snapshot-too-large-<files|bytes>` before the planner starts. A repository that
+# large plans by hand, or keeps its bulk out of the work tree.
+SNAP_SKIP = (".git", PIPELINE_DIR, RUNS_DIR)
+SNAP_MAX_FILES = 200000
+SNAP_MAX_BYTES = 2 * 1024 ** 3
+GIT_META = ("config", "config.worktree", "HEAD", "packed-refs", "hooks", "info", "refs")
+
+
+class TooLarge(Exception):
+    """The snapshot passed SNAP_MAX_FILES or SNAP_MAX_BYTES. args: (files|bytes,)."""
+
+
+def _sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _record(out, budget, key, path):
+    """Record one path (a file by sha256, a symlink by target, anything else by kind)."""
+    budget[0] += 1
+    if budget[0] > SNAP_MAX_FILES:
+        raise TooLarge("files")
     try:
-        cp = subprocess.run(["git", "check-ignore", "-q", "--", rel], cwd=tick.root,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            stdin=subprocess.DEVNULL, timeout=CHECK_TIMEOUT, check=False)
-    except (OSError, subprocess.TimeoutExpired):
+        if os.path.islink(path):
+            out[key] = "link:" + os.readlink(path)
+        elif os.path.isfile(path):
+            budget[1] += os.path.getsize(path)
+            if budget[1] > SNAP_MAX_BYTES:
+                raise TooLarge("bytes")
+            out[key] = _sha(path)
+        elif os.path.isdir(path):
+            out[key] = "dir"
+        else:
+            out[key] = "other"
+    except OSError as e:
+        out[key] = "error:%s" % type(e).__name__
+
+
+def _walk(out, budget, label, top, skip=()):
+    """Record top and everything under it, never following a symlink. skip holds
+    top-relative paths (files or directories) to leave out."""
+    if not os.path.lexists(top):
+        out[label] = "missing"
+        return
+    _record(out, budget, label, top)
+    if os.path.islink(top) or not os.path.isdir(top):
+        return
+    for dirpath, dirnames, filenames in os.walk(top, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, top).replace(os.sep, "/")
+        rel_dir = "" if rel_dir == "." else rel_dir + "/"
+        keep = []
+        for name in sorted(dirnames):
+            rel = rel_dir + name
+            if rel in skip:
+                continue
+            _record(out, budget, "%s/%s" % (label, rel), os.path.join(dirpath, name))
+            if not os.path.islink(os.path.join(dirpath, name)):
+                keep.append(name)
+        dirnames[:] = keep
+        for name in sorted(filenames):
+            rel = rel_dir + name
+            if rel not in skip:
+                _record(out, budget, "%s/%s" % (label, rel), os.path.join(dirpath, name))
+
+
+def _hooks_paths(tick, config_files):
+    """Every core.hooksPath value in these config files, as absolute paths."""
+    paths = []
+    for cfg in config_files:
+        if not os.path.isfile(cfg):
+            continue
+        cp = git(tick, "config", "--file", cfg, "--get-all", "core.hooksPath")
+        for value in (cp.stdout.decode("utf-8", "replace").splitlines() if cp else []):
+            value = os.path.expanduser(value.strip())
+            if value:
+                paths.append(value if os.path.isabs(value) else os.path.join(tick.root, value))
+    return paths
+
+
+def skill_dir_of(tool):
+    return os.path.dirname(os.path.dirname(tool))
+
+
+def snapshot(tick, spec, tools):
+    """{key: digest} of what the planner must not change. See the comment above."""
+    out, budget = {}, [0, 0]
+    _walk(out, budget, "repo", tick.root, skip=set(SNAP_SKIP) | {spec})
+    cp = git(tick, "rev-parse", "--absolute-git-dir", "--git-common-dir")
+    dirs = cp.stdout.decode("utf-8", "replace").splitlines() if cp and not cp.returncode else []
+    dirs = sorted({os.path.realpath(d if os.path.isabs(d) else os.path.join(tick.root, d))
+                   for d in dirs if d})
+    out["git:dirs"] = "|".join(dirs) or "none"
+    configs = []
+    for d in dirs:
+        for name in GIT_META:
+            _walk(out, budget, "git:%s/%s" % (d, name), os.path.join(d, name))
+        configs += [os.path.join(d, "config"), os.path.join(d, "config.worktree")]
+    home = os.path.expanduser("~")
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    for cfg in (os.path.join(home, ".gitconfig"), os.path.join(xdg, "git", "config")):
+        _walk(out, budget, "git:" + cfg, cfg)
+        configs.append(cfg)
+    for hooks in _hooks_paths(tick, configs):
+        _walk(out, budget, "git:hooksPath:" + hooks, hooks)
+    sk = skill_dir_of(tools["lint"])
+    _walk(out, budget, "tools:" + sk, sk)
+    return out
+
+
+def changed_reason(before, after):
+    """None when nothing changed, else `planner-changed-<repo|git|tools|snapshot>`. The
+    changed paths are echoed (sanitised) so the owner knows where to look."""
+    if after is None:
+        return "planner-changed-snapshot"
+    keys = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+    if not keys:
+        return None
+    for k in keys[:5]:
+        echo("plan", "changed: %s" % shown(k))
+    first = keys[0].split(":", 1)[0].split("/", 1)[0]
+    kinds = {k.split(":", 1)[0].split("/", 1)[0] for k in keys}
+    for kind in ("git", "tools", "repo"):  # the worst first
+        if kind in kinds:
+            return "planner-changed-%s" % ("the-repo" if kind == "repo" else kind)
+    return "planner-changed-%s" % first
+
+
+def tool_unchanged(before, tools, name):
+    """True when the tool file still has the sha256 the pre-planner snapshot recorded."""
+    sk = skill_dir_of(tools[name])
+    key = "tools:%s/%s" % (sk, os.path.relpath(tools[name], sk).replace(os.sep, "/"))
+    try:
+        return key in before and _sha(tools[name]) == before[key]
+    except OSError:
         return False
-    return cp.returncode == 0
 
 
 def request_of(tick, env):
@@ -542,7 +746,7 @@ def run_planner(tick, argv):
     try:
         proc = subprocess.Popen(argv, cwd=tick.root, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                start_new_session=True)
+                                start_new_session=True, env=tool_env())
     except OSError as e:
         echo("plan", "cannot start the planner: %s" % type(e).__name__)
         return "failed", None
@@ -588,7 +792,8 @@ def plan_one(tick, env, tools, allow):
     # written.
     if not ignored(tick, spec):
         return None, spec, "spec-not-ignored"
-    word, code, out = run_tool(tick, "plan", py(tools[kind], env_path), echo_stdout=False)
+    word, code, out = run_tool(tick, "plan", py_isolated(tools[kind], env_path),
+                               echo_stdout=False)
     if code != 0:
         return None, spec, "request-refused"
     try:
@@ -597,9 +802,12 @@ def plan_one(tick, env, tools, allow):
             f.write(out)
     except OSError:
         return None, spec, "spec-write"
-    before = git_state(tick)
-    if before is None:
-        return None, spec, "git-status"
+    # The tamper snapshot (see snapshot()): taken with the skeleton in place, so the only
+    # file the planner may change is the spec.
+    try:
+        before = snapshot(tick, spec, tools)
+    except TooLarge as e:
+        return None, spec, "snapshot-too-large-%s" % e
     prompt = PLANNER_PROMPT % {"spec": spec, "envelope": inside(tick.root, env_path),
                                "allowlist": allow}
     argv = [prompt if a == "{prompt}" else tick.root if a == "{root}" else a
@@ -609,24 +817,36 @@ def plan_one(tick, env, tools, allow):
         return None, spec, "planner-timeout"
     if code != 0:
         return None, spec, "planner-failed" if code is None else "planner-exit=%d" % code
-    # Nothing the planner says counts. What counts is the file and the two checks.
-    if git_state(tick) != before:
-        return None, spec, "planner-changed-the-repo"
+    # Nothing the planner says counts. What counts is the file and the two checks, run from
+    # tools whose bytes are the ones the snapshot saw before the planner started.
+    try:
+        after = snapshot(tick, spec, tools)
+    except TooLarge:
+        after = None
+    changed = changed_reason(before, after)
+    if changed:
+        return None, spec, changed
     if os.path.islink(spec_path) or not os.path.isfile(spec_path):
         return None, spec, "spec-replaced"
     if allowlist_rel(tick) != allow:
         return None, spec, "allowlist-changed"
-    word, code, _ = run_tool(tick, "plan", py(tools["lint"], "--unattended", spec))
+    if not tool_unchanged(before, tools, "lint"):
+        return None, spec, "planner-changed-tools"
+    word, code, _ = run_tool(tick, "plan", py_isolated(tools["lint"], "--unattended", spec))
     if code != 0:
         return None, spec, "lint-failed"
-    word, code, _ = run_tool(tick, "plan", py(tools["tasks"], spec, "--allowlist", allow))
+    if not tool_unchanged(before, tools, "tasks"):
+        return None, spec, "planner-changed-tools"
+    word, code, _ = run_tool(tick, "plan", py_isolated(tools["tasks"], spec,
+                                                       "--allowlist", allow))
     if code != 0:
         return None, spec, {3: "allowlist-unlisted", 2: "allowlist-error"}.get(
             code, "allowlist-failed")
     # The absolute spec path: spec_to_tasks.py pins it relative to --envelope's root, and
     # a cwd that the OS reports through a symlink (macOS /var) would not match that root.
-    word, code, out = run_tool(tick, "plan", py(tools["tasks"], spec_path, "--envelope",
-                                                tick.root), echo_stdout=False)
+    word, code, out = run_tool(tick, "plan", py_isolated(tools["tasks"], spec_path,
+                                                         "--envelope", tick.root),
+                               echo_stdout=False)
     plan = None
     for line in out.decode("utf-8", "replace").splitlines():
         m = ENVELOPE_LINE.match(line)
@@ -953,7 +1173,7 @@ def check_grant(tick, ref=None):
     try:
         cp = subprocess.run(argv, cwd=tick.root, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                            timeout=CHECK_TIMEOUT, check=False)
+                            timeout=CHECK_TIMEOUT, check=False, env=tool_env())
     except (OSError, subprocess.TimeoutExpired) as e:
         echo("grant", "cannot run contract_check.py: %s" % type(e).__name__)
         return None, "checker-error"

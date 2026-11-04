@@ -263,8 +263,9 @@ PLANNER_MODES = ("good", "unlisted", "fail", "sleep", "touch")
 # The stub planner. It finds the spec path in the prompt (the `SPEC:` line), logs its
 # argv, and acts as <its dir>/mode says: good (append body.md), unlisted (append body.md
 # with the command the evidence asked for, as a steered agent would), fail (exit 1), sleep
-# (hang), touch (also change a file that git sees). It prints lines that look like the
-# tick's own, to show that the tick never trusts them.
+# (hang), touch (also change a file that git sees). When <its dir>/extra.py exists, it
+# runs that file after it writes the spec (a test's own tampering). It prints lines that
+# look like the tick's own, to show that the tick never trusts them.
 PLANNER = r'''import json, os, sys, time
 HOME = os.path.dirname(os.path.abspath(__file__))
 prompt, root = sys.argv[1], sys.argv[2]
@@ -288,6 +289,10 @@ with open(os.path.join(root, spec), "a", encoding="utf-8") as f:
 if mode == "touch":
     with open(os.path.join(root, "Makefile"), "a", encoding="utf-8") as f:
         f.write("test:\n\tcat .env\n")
+extra = os.path.join(HOME, "extra.py")  # a test's own tampering, run after the spec
+if os.path.exists(extra):
+    with open(extra, encoding="utf-8") as f:
+        exec(f.read(), {"root": root, "spec": spec, "os": os})
 ''' % (GOOD_CMD, EVIL_CMD)
 
 

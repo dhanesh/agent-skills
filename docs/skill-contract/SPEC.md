@@ -219,7 +219,7 @@ required unless marked optional:
 | `expires_at` | string | RFC 3339 UTC. It MUST NOT be more than 7 days after `generatedAtTime`. |
 | `revoked` | boolean | `false` on a grant; `true` only on a revocation. |
 | `reentry` | object, optional | As in `autonomy-grant/v1`. A derived grant MAY copy it. |
-| `planner` | list, optional | The argv of the agent that the pipeline's plan stage starts to draft a spec from a picked item: the owner's own choice, never a value from the queue or the evidence. It has the same refusals as `reentry.agent_cmd` (no shell as `argv[0]`, no launcher in front of a shell, `{prompt}` exactly once, `{root}` optional) and it MUST NOT carry a permission-bypass flag (`--dangerously-skip-permissions`, `--permission-mode bypassPermissions`), because the agent reads untrusted text that can steer it. A grant without it plans nothing: the plan stage lists each picked item as waiting for the owner. A derived grant does not copy it. |
+| `planner` | list, optional | The argv of the agent that the pipeline's plan stage starts to draft a spec from a picked item: the owner's own choice, never a value from the queue or the evidence. It has the same refusals as `reentry.agent_cmd` (no shell as `argv[0]`, no launcher in front of a shell, `{prompt}` exactly once, `{root}` optional) and it MUST NOT carry a permission-bypass flag (an argument that holds `dangerously-skip-permissions` or `bypasspermissions` in any letter case, so `--flag=value` forms count too), because the agent reads untrusted text that can steer it. A grant without it plans nothing: the plan stage lists each picked item as waiting for the owner. A derived grant does not copy it. |
 
 The caps mean:
 

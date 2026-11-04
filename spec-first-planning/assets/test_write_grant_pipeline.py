@@ -221,7 +221,9 @@ class TestPipelineWrite(PipelineBase):
 
     def test_bad_planner_refused(self):
         for planner in (["sh", "-c", "{prompt}"], ["claude", "-p"], "claude -p {prompt}",
-                        ["claude", "--dangerously-skip-permissions", "-p", "{prompt}"]):
+                        ["claude", "--dangerously-skip-permissions", "-p", "{prompt}"],
+                        ["claude", "--dangerously-skip-permissions=true", "-p", "{prompt}"],
+                        ["claude", "--permission-mode=BypassPermissions", "{prompt}"]):
             with self.subTest(planner=planner):
                 rc, out, _ = self.run_cli(dict(good_answers(), planner=planner))
                 self.assertEqual(rc, 1, out)

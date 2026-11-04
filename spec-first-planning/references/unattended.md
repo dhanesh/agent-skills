@@ -397,7 +397,9 @@ The answers file for `--pipeline` accepts exactly these keys and refuses any oth
 - `planner` (optional): the argv list of the agent that factory-pipeline's plan stage
   starts to draft a spec from a picked item. It holds `{prompt}` once and may hold
   `{root}`. The checker refuses a shell as the first element and a permission-bypass
-  flag, because the agent reads untrusted text. Without it, the pipeline plans nothing.
+  flag in any form (`--flag=value` or any letter case), because the agent reads
+  untrusted text. The flag check and factory-pipeline's tamper snapshot are tripwires,
+  not a sandbox: give the planner restricted tools. Without it, the pipeline plans nothing.
   A derived grant does not copy it.
 - `pick_policy_path`, `allowlist_path` (optional): a different path, relative to `--root`,
   for one of the two pinned files.
