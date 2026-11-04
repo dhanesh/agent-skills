@@ -484,13 +484,15 @@ New skill (growth-review 0.1.0, roadmap step 6D part 1, 2026-10-12), written wit
 | c14 | 177 | You MUST NOT edit or delete files under `.skill-contract/growth/` by hand, because… | not judged (new skill) | MUST | the frozen registrations and the append-only data log are what every review reads back; same rule as idea-validation c11 and ops-intake c7 |
 | c15 | 181 | You SHOULD run factory-conductor's money-ledger check (`ledger.py check`) before you put any spend to the human, when that skill is installed, because… | not judged (new in 0.1.1) | SHOULD | money-ledger review M5 (2026-10-12): same rule and level as idea-validation c13; the check lives in another skill that may not be installed, so it is conditional and SHOULD; the no-spend rule (c10) stays the hard rule. No amount or budget went to Jev |
 
-## factory-pipeline (1 candidates · 1 MUST · 0 SHOULD · 0 MAY · 0 plain · 0 departures)
+## factory-pipeline (3 candidates · 3 MUST · 0 SHOULD · 0 MAY · 0 plain · 0 departures)
 
-New skill skeleton (factory-pipeline 0.0.1, autonomous-factory wave 0, 2026-11-04), written with BCP 14 from the start. In development: no command ships yet. Jev did not judge this row. The one rule keeps the skeleton honest until run 2 ships the tool.
+factory-pipeline 0.1.0 (autonomous-factory run 2, task T12, R12, 2026-11-04): `pipeline tick` ships, and five of its nine stages report `pending-R<n>`. The skeleton's one rule (do not claim a `pipeline` command) is gone with the skeleton. Jev did not judge these rows; each level follows the rule it carries and names what enforces it.
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
-| c1 | 29 | You MUST NOT tell the user that a `pipeline` command exists, and you MUST NOT try to run one, because… | not judged (new skill) | MUST | autonomous-factory wave 0 spec, constraint S1 (a scaffolded skill claims no command or capability that it does not yet have); the eval rejects a skeleton that names or ships a script, but only the rule stops the agent from inventing one in its reply |
+| c1 | 43 | **Locating this skill's helpers (do this first).** The steps below run bundled … | not judged (new in 0.1.0) | MUST | the shared `$SKILL_DIR` preamble, same block and level as every other adopter; asset-paths.sh lints the SKILL.md half |
+| c2 | 104 | You MUST NOT report a stage as done when its line says `pending-R<n>`, `unavailable`, … | not judged (new in 0.1.0) | MUST | autonomous-factory spec B4 (a status never claims more than is true) and the R12 brief ("an honest result word, never a fake ok"); the tick prints the true word and the eval rejects a fake `ok`, but only the rule keeps the agent's report honest |
+| c3 | 108 | You MUST NOT merge a pull request, accept a release grant, or write or register the pick … | not judged (new in 0.1.0) | MUST | autonomous-factory spec B1 (no change removes a human gate) and S3 (the owner registers the pick policy); `merge` is never grantable (skill-contract A8) and `register-policy` refuses an `agent:` name, but a shell agent can type a human's name, so the rule carries the rest; same rule as ops-intake's pick-policy row |
 
 ## incident-watch (1 candidates · 1 MUST · 0 SHOULD · 0 MAY · 0 plain · 0 departures)
 
