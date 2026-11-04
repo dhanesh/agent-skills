@@ -10,6 +10,10 @@ each stage. Each stage calls the tool of the skill that owns it. The tick uses n
 
 What runs today:
 
+- Before any stage, the tick checks the standing pipeline grant with spec-first-planning's
+  `contract_check.py check-pipeline-grant` (R13). With no live grant (none, revoked,
+  expired, stale or tracked by git), it runs no stage, prints
+  `STOP: no-grant reason=<reason>` and exits 2.
 - `sweep` runs ops-intake `intake sweep`.
 - `growth-review` runs growth-review `growth auto` and imports its breaches with ops-intake
   `intake import`.
@@ -18,9 +22,8 @@ What runs today:
   that the plan stage hands on. The plan stage is not built yet, so it hands on no plan.
 
 What is still pending: the idea follow-up (R20), plan (R17), build (R18), release stage
-(R19) and digest (R21) stages, which print `pending-R<n>`. The check for a live pipeline
-grant (R13), the one-tick lock (R14), the caps (R15) and `pipeline schedule install` (R16)
-are also pending. A sibling skill that is not installed gives `unavailable`. The tick
+(R19) and digest (R21) stages, which print `pending-R<n>`. The one-tick lock (R14), the
+caps (R15) and `pipeline schedule install` (R16) are also pending. A sibling skill that is not installed gives `unavailable`. The tick
 removes no human gate.
 
 The design is in

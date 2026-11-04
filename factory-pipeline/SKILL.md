@@ -7,8 +7,9 @@ description: >-
   autopick, plan, derive grant, build, release stage and digest, and prints one
   `STAGE: <name> <result>` line per stage. It calls each installed sibling skill's own tool
   (ops-intake, growth-review, spec-first-planning) with no shell, and reports a missing one
-  as unavailable. Partly built: idea follow-up, plan, build, release stage and digest report
-  `pending-R<n>`, and the grant check, the lock, the caps and the schedule are not built yet.
+  as unavailable. With no live pipeline grant it runs no stage, prints `STOP: no-grant` and
+  exits 2. Partly built: idea follow-up, plan, build, release stage and digest report
+  `pending-R<n>`, and the lock, the caps and the schedule are not built yet.
   Every human gate stays with the owner. Not for running one approved plan to a PR (use
   factory-conductor), not for writing a plan (use spec-first-planning).
 license: MIT
@@ -29,11 +30,13 @@ mechanical part of each stage. It stops at the human gates: merge, production de
 rollback, spend, external messages, the release grant and idea decisions stay with the
 owner.
 
-**Status: partly built.** `pipeline tick` ships and runs the sweep, growth review and
-autopick stages for real, and runs derive grant for each plan that the plan stage hands
-on. The plan stage is not built yet, so it hands on no plan today. The idea follow-up,
-plan, build, release stage and digest stages report `pending-R<n>`. The standing-grant
-check, the one-tick lock, the caps and `pipeline schedule install` are not built yet. The
+**Status: partly built.** `pipeline tick` ships. Before any stage, it checks the standing
+pipeline grant (R13, shipped): with no live grant it runs no stage, prints
+`STOP: no-grant reason=<reason>` and exits 2. It runs the sweep, growth review and autopick
+stages for real, and runs derive grant for each plan that the plan stage hands on. The plan
+stage is not built yet, so it hands on no plan today. The idea follow-up, plan, build,
+release stage and digest stages report `pending-R<n>`. The one-tick lock, the caps and
+`pipeline schedule install` are not built yet. The
 design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R12 to R21) in the
 agent-skills repository.
 
@@ -62,11 +65,13 @@ under a `Bash(...)` allowlist, skip this lookup and use the interpreter that the
 none passes, follow this skill's own fallback for running without Python where it gives one;
 otherwise stop and tell the user that this skill needs Python 3.10 or newer.
 
-The command is `python3 "$SKILL_DIR/assets/pipeline.py" --root <repo> tick`. Options:
-`tick --grant <pipeline grant id or path>` names the pipeline grant for derive grant (by
-default the tick uses the one `pipeline-grant-v1-*` envelope under
-`.skill-contract/envelopes/`), and `tick --growth-source <name>` names the intake source of
-growth signals (default `growth`). `--skills-dir <dir>` (before `tick`, repeatable) makes the
+The command is `python3 "$SKILL_DIR/assets/pipeline.py" --root <repo> tick`. Before any
+stage, the tick runs spec-first-planning's `contract_check.py check-pipeline-grant`. It goes
+on only when that answers VALID for the newest pipeline grant that no revision supersedes,
+and it prints `TICK: grant <id> expires_at <time>`. Derive grant then uses that grant id and
+no other. Options: `tick --grant <pipeline grant id or envelope path>` checks that grant
+instead of the newest, and `tick --growth-source <name>` names the intake source of growth
+signals (default `growth`). `--skills-dir <dir>` (before `tick`, repeatable) makes the
 tick look for sibling skills only in that directory; it is for tests.
 
 ## When to use
@@ -92,7 +97,11 @@ skill gives `STAGE: <name> unavailable`, and the tick goes on.
 ## Workflow
 
 1. **Run one tick.** Run `python3 "$SKILL_DIR/assets/pipeline.py" --root <repo> tick`. Lines
-   that start with two spaces and `<stage>|` are the stage tool's own output.
+   that start with two spaces and `<stage>|` are the stage tool's own output. When the tick
+   prints `STOP: no-grant reason=<reason>` and exits 2, no stage ran: report the reason
+   (`none`, `revoked`, `expired`, `stale`, `tracked` and so on), and tell the owner that a
+   new pipeline grant is theirs to accept (`write_grant.py --pipeline` in
+   spec-first-planning).
 2. **Read every STAGE: line.** There are nine, in order. A result other than `ok` or `idle`
    needs a sentence in your report: `attention` (the tool exited 3), `refused` (exit 2, for
    example no intake config or no registered growth plan), `failed`, `timeout`,

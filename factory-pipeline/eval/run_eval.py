@@ -8,13 +8,16 @@ Prints one `CHECK: <name> — PASS|FAIL` line per check and a final
 The promise of `pipeline tick` (R12): in a repo with the sibling skills installed, one
 tick prints a `STAGE:` line for each of the nine stages, in order, and exits 0. A stage
 that is not built yet says `pending-R<n>`, never `ok`, and a missing skill says
-`unavailable` instead of crashing the tick. The harness builds stub skills with
-assets/pipeline_testkit.py in a tempdir, runs the shipped assets/pipeline.py against
-them, and a model-free grader checks the transcript. The docs check keeps every path the
+`unavailable` instead of crashing the tick. The promise of R13: with no live pipeline
+grant (none, or revoked), the tick runs no stage, prints `STOP: no-grant`, and exits 2.
+The harness builds stub skills with assets/pipeline_testkit.py in a tempdir, writes a real
+pipeline grant into the fixture repo with the testkit, runs the shipped
+assets/pipeline.py against them, and a model-free grader checks the transcript. The docs check keeps every path the
 docs name real, and keeps the old skeleton line out.
 
 Negative fixtures feed the grader known-bad transcripts (order swapped, a stage missing,
-a fake `ok` for an unbuilt stage, a non-zero exit) and a docs copy that names a missing
+a fake `ok` for an unbuilt stage, a non-zero exit, a no-grant tick that ran a stage or
+exited 0) and a docs copy that names a missing
 script, and require the grader to reject each one.
 """
 import os
@@ -105,6 +108,19 @@ def tick_errors(stdout, code, missing=()):
     return errors
 
 
+def stop_errors(stdout, code):
+    """Model-free grader for a tick with no live pipeline grant (R13)."""
+    errors = []
+    if code != 2:
+        errors.append("exit %s, want 2" % code)
+    lines = stdout.splitlines()
+    if not any(ln.startswith("STOP: no-grant") for ln in lines):
+        errors.append("no STOP: no-grant line")
+    if any(ln.startswith("STAGE: ") for ln in lines):
+        errors.append("a stage ran without a grant")
+    return errors
+
+
 def docs_errors(skill_dir):
     """Every skill-relative path the docs name exists; the skeleton line is gone."""
     errors = []
@@ -123,9 +139,11 @@ def docs_errors(skill_dir):
     return errors
 
 
-def run_tick(tmp, label, skills=None, behave=()):
+def run_tick(tmp, label, skills=None, behave=(), grant=True):
     repo = os.path.join(tmp, label, "repo")
     os.makedirs(repo)
+    if grant:
+        K.pipeline_grant(repo)
     sk = K.stubs(os.path.join(tmp, label, "skills"), skills)
     for b in behave:
         K.behave(sk, *b[:2], **b[2])
@@ -178,6 +196,26 @@ def main():
               not errs and "STAGE: sweep attention exit=3" in cp.stdout,
               "; ".join(errs)[:120])
 
+        cp, sk = run_tick(tmp, "no-grant", grant=False)
+        errs = stop_errors(cp.stdout, cp.returncode)
+        check("no pipeline grant: STOP: no-grant, exit 2, no stage ran",
+              not errs and not K.calls(sk), "; ".join(errs)[:120])
+
+        repo = os.path.join(tmp, "revoked", "repo")
+        os.makedirs(repo)
+        K.pipeline_grant(repo)
+        rv = subprocess.run([sys.executable, K.CHECKER, "revoke-grant", "--root", repo],
+                            capture_output=True, text=True, timeout=60,
+                            stdin=subprocess.DEVNULL)
+        sk = K.stubs(os.path.join(tmp, "revoked", "skills"))
+        cp = subprocess.run([sys.executable, TOOL, "--root", repo, "--skills-dir", sk, "tick"],
+                            capture_output=True, text=True, timeout=60,
+                            stdin=subprocess.DEVNULL)
+        errs = stop_errors(cp.stdout, cp.returncode)
+        check("kill switch revokes the grant: STOP: no-grant reason=revoked, exit 2",
+              rv.returncode == 0 and not errs and "reason=revoked" in cp.stdout
+              and not K.calls(sk), "; ".join(errs)[:120])
+
         good = "\n".join("STAGE: %s %s" % (s, PENDING.get(s, "ok")) for s in ORDER)
         swapped = good.replace("STAGE: sweep ok\nSTAGE: growth-review ok",
                                "STAGE: growth-review ok\nSTAGE: sweep ok")
@@ -192,6 +230,16 @@ def main():
             check("grader rejects negative fixture %s" % label,
                   any(want in e for e in bad), "; ".join(bad)[:100])
         check("grader accepts the known-good transcript", not tick_errors(good, 0))
+        stop = "TICK: start x root r\nSTOP: no-grant reason=none"
+        for label, out, code, want in (
+            ("no-grant-exit-0", stop, 0, "exit 0"),
+            ("no-grant-ran-a-stage", stop + "\nSTAGE: sweep ok", 2, "a stage ran"),
+            ("no-grant-no-stop-line", "TICK: start x root r", 2, "no STOP"),
+        ):
+            bad = stop_errors(out, code)
+            check("grader rejects negative fixture %s" % label,
+                  any(want in e for e in bad), "; ".join(bad)[:100])
+        check("grader accepts the known-good no-grant transcript", not stop_errors(stop, 2))
         bad = tick_errors(good, 0, missing=[("growth-review", ["growth-review"])])
         check("grader rejects ok for a stage whose skill is missing",
               any("missing" in e for e in bad), "; ".join(bad)[:100])
