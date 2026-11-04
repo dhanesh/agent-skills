@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Shape suite for incident-watch. Stdlib unittest; no pip, no network, deterministic.
 
-Checks the skill's shape and its honest status: `incident probe` ships, and the
-pending parts (R23 to R26) are named as pending. The probe's behaviour is in
+Checks the skill's shape and its honest status: `incident probe` and `incident close`
+ship (R22 to R26), and no doc still calls the skill partly built. The behaviour is in
 test_incident.py.
 Run:  python3 test_incident_watch_smoke.py
 """
@@ -42,13 +42,16 @@ class TestSkeleton(unittest.TestCase):
     def test_status_line_in_skill_and_readme(self):
         for rel in ("SKILL.md", "README.md"):
             text = read(rel).lower()
-            self.assertIn("status: partly built", text, rel)
+            self.assertIn("status: built", text, rel)
             self.assertNotIn("no command ships yet", text, rel)
+            self.assertNotIn("partly built", text, rel)
+            self.assertNotIn("not built yet", text, rel)
 
-    def test_pending_parts_are_named(self):
+    def test_every_part_is_named(self):
         text = read("SKILL.md")
-        for req in ("R23", "R24", "R25", "R26"):
+        for req in ("R22", "R23", "R24", "R25", "R26"):
             self.assertIn(req, text, req)
+        self.assertIn("NEXT: run bug-autopsy with <record path>", text)
 
     def test_shipped_tooling(self):
         shipped = sorted(f for f in os.listdir(os.path.join(SKILL_DIR, "assets"))

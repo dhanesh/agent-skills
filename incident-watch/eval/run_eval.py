@@ -24,8 +24,11 @@ local stub scripts (no real endpoint), and checks:
     `ROLLBACK:` line and the `NEXT:` line about `release rollback`, and the rollback stub
     never ran; a recipe rollback word that holds a newline prints escaped on the one
     `ROLLBACK:` line, so it cannot forge a line of its own;
-  - SKILL.md and README.md say "partly built", not the old skeleton line, and every
-    skill-relative path they name exists.
+  - R26: `incident close --by "Owner"` closes the record (closed_by, closed_at) and prints
+    `NEXT: run bug-autopsy with <record path>` naming that record; without --by, and with
+    an agent name, it exits 2 and the record is unchanged;
+  - SKILL.md and README.md say "status: built", not "partly built" or the old skeleton
+    line, and every skill-relative path they name exists.
 
 Negative fixtures break one property each and require the grader to reject them.
 """
@@ -46,8 +49,8 @@ import incident_testkit as kit  # noqa: E402
 
 TOOL = os.path.join(ASSETS, "incident.py")
 SKILLS_ROOT = os.path.dirname(SKILL)  # release-conductor sits beside incident-watch
-STATUS = "status: partly built"
-OLD_STATUS = "no command ships yet"
+STATUS = "status: built"
+OLD_STATUSES = ("no command ships yet", "partly built", "not built yet")
 PROBE_NAMES = ["health", "version_probe", "prod_smoke[0]", "prod_smoke[1]"]
 STATE_FILES = {".gitignore", ".lock", "probes.jsonl", "state.json"}
 PATH_RE = re.compile(r"(?<![\w.-])((?:references|assets|scripts|eval)/[\w./-]*\w)")
@@ -100,10 +103,11 @@ def doc_errors(skill_dir):
             continue
         text = read(path)
         if STATUS not in text.lower():
-            errors.append("%s lacks the partly-built status" % doc)
-        if OLD_STATUS in text.lower():
-            errors.append("%s still says no command ships" % doc)
+            errors.append("%s lacks the built status" % doc)
         text = GRAPH_BLOCK.sub("", text)
+        for old in OLD_STATUSES:
+            if old in text.lower():
+                errors.append("%s still says %s" % (doc, old))
         for rel in sorted(set(PATH_RE.findall(text))):
             if not os.path.exists(os.path.join(skill_dir, rel)):
                 errors.append("%s names %s, which does not exist" % (doc, rel))
@@ -250,6 +254,33 @@ def grade_escaped(out):
     return errors
 
 
+def run_close(root, *extra):
+    cp = subprocess.run([sys.executable, TOOL, "--root", root, "close"] + list(extra),
+                        capture_output=True, text=True, timeout=60)
+    return cp.returncode, cp.stdout
+
+
+def grade_close(root, rc, out, by):
+    """Model-free grader for one R26 close: exit 0, the record closed by `by`, and the
+    NEXT line names that record for bug-autopsy."""
+    errors = []
+    if rc != 0:
+        errors.append("exit %s, not 0" % rc)
+    rdir = os.path.join(root, ".skill-contract", "incidents", "records")
+    names = sorted(os.listdir(rdir)) if os.path.isdir(rdir) else []
+    if len(names) != 1:
+        return errors + ["%d records, not 1" % len(names)]
+    rel = ".skill-contract/incidents/records/" + names[0]
+    rec = json.loads(read(os.path.join(rdir, names[0])))
+    if rec.get("status") != "closed":
+        errors.append("record status %r, not closed" % rec.get("status"))
+    if rec.get("closed_by") != by or not rec.get("closed_at"):
+        errors.append("record does not show who closed it and when")
+    if "NEXT: run bug-autopsy with %s" % rel not in out.splitlines():
+        errors.append("no NEXT: run bug-autopsy line naming the record")
+    return errors
+
+
 def main():
     text = read(os.path.join(SKILL, "SKILL.md"))
     fm = frontmatter_errors(text)
@@ -313,7 +344,40 @@ def main():
         check("unlisted command: refused with exit 2, nothing run (R23)", not errs,
               "; ".join(errs)[:120])
 
+        cl = kit.fixture(os.path.join(tmp, "close"), fail=["health"])
+        run_probe(cl)
+        run_probe(cl)
+        cdir = os.path.join(cl, ".skill-contract", "incidents", "records")
+        cpath = os.path.join(cdir, sorted(os.listdir(cdir))[0])
+        before = read(cpath)
+        errs = []
+        for extra in ([], ["--by", "agent:claude"], ["--by", "Agent Smith"]):
+            crc, cout = run_close(cl, *extra)
+            if crc != 2 or not cout.startswith("STOP: ") or "NEXT:" in cout:
+                errs.append("close %s: exit %s" % (extra, crc))
+        if read(cpath) != before:
+            errs.append("a refused close changed the record")
+        check("close without --by or with an agent name: exit 2, nothing changed (R26)",
+              not errs, "; ".join(errs)[:120])
+        crc, cout = run_close(cl, "--by", "Owner")
+        errs = grade_close(cl, crc, cout, "Owner")
+        check("close --by Owner: record closed and handed to bug-autopsy (R26)", not errs,
+              "; ".join(errs)[:120])
+        crc2, cout2 = run_close(cl, "--by", "Owner")
+        check("a second close with no open record: exit 2 with a STOP line (R26)",
+              crc2 == 2 and cout2.startswith("STOP: no open incident record"), cout2[:80])
+
         # Negative fixtures: each must be rejected.
+        check("grader rejects negative fixture close-without-next-line",
+              any("bug-autopsy" in e for e in grade_close(
+                  cl, crc, "\n".join(ln for ln in cout.splitlines()
+                                     if not ln.startswith("NEXT:")), "Owner")))
+        check("grader rejects negative fixture close-by-someone-else",
+              any("who closed" in e for e in grade_close(cl, crc, cout, "Someone")))
+        with open(cpath, "w", encoding="utf-8") as f:
+            f.write(before)
+        check("grader rejects negative fixture record-left-open",
+              any("not closed" in e for e in grade_close(cl, crc, cout, "Owner")))
         check("grader rejects negative fixture refusal-that-ran-a-command",
               grade_refusal(good, 2, "PROBE: refused: x\n"))
         check("grader rejects negative fixture failing-run-as-pass",
