@@ -467,6 +467,15 @@ command to run itself instead, since it only reads, and a hand-copied diff drift
 real one. Give the reviewer every verify step of the task with its pinned command: in a live
 trial the reviewer was the only check that noticed a pinned test filter matching no test.
 
+`conductor brief reviewer <task> --plan <envelope> --base <ref> [--head <ref>] [--root <repo>]`
+prints this brief filled from the plan: the title, the requirement, every verify step with its
+pinned command, the plan's constraints and decisions, and the diff command against `--base`
+(`--head` is `HEAD` unless you name the `<sha>`; `--root` is the `-C` directory). It needs no
+run and writes no file, so it also works outside a run. It exits 2 for an unknown task, a plan
+that fails check-envelope or is stale, or a ref git cannot resolve. In a run, pass
+`--base <run_branch> --head <sha> --root <worktree>`, then add the grant's decisions and
+defaults to the constraints, since the command does not read the grant.
+
 ```text
 You are reviewing task <id> of an approved plan. You did not write this code. You MUST NOT
 dispatch subagents or edit any file.
