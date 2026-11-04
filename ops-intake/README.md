@@ -120,6 +120,10 @@ only when its source sees it again after the dismissal.
 
 ## Changes
 
+- **0.3.0.** A pick policy. The owner writes `.intake/pick-policy.json` and registers it with
+  `intake register-policy --by <name>`. A registration pins the file's sha256. `intake autopick`
+  stops (exit 2) before a registration and after any edit, until the owner registers again.
+  In this version `autopick` lists the matching items and picks nothing.
 - **0.2.4.** The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **0.2.3.** Jira, Linear, App Store Connect, Play Console, Zendesk and Intercom get no
   dedicated reader. This is the owner's decision. The new `references/conversion-recipes.md`

@@ -6,7 +6,7 @@ agent hands it and writes its own queue. Stdlib only, Python 3.10+, POSIX.
 
 Exits: 0 ok; 3 import or envelope problems, or a human is needed; 2 invalid config,
 unknown format or refused input. Machine lines: IMPORT:, SYNC:, ITEM:, NEXT:, STOP:,
-PROBLEM:.
+PROBLEM:, REGISTERED:, POLICY:, MATCH:, AUTOPICK:.
 """
 import argparse
 import contextlib
@@ -25,7 +25,7 @@ import adapters
 import contract_check as CC  # the vendored skill-contract checker, same dir
 
 SKILL_NAME = "ops-intake"
-VERSION = "0.2.4"
+VERSION = "0.3.0"
 _KIND_BASE = "https://github.com/dhanesh/agent-skills/skill-contract/"
 INTAKE_ITEM_KIND = _KIND_BASE + "intake-item/v1"
 PLAN_KIND = _KIND_BASE + "task-plan/v1"
@@ -717,6 +717,232 @@ def cmd_status(a):
     reg = sum(1 for i in q.items.values() if i["state"] == "new" and i.get("regressed"))
     print("SYNC: %d items %s regressed=%d" % (
         len(q.items), " ".join("%s=%d" % kv for kv in counts.items()), reg))
+    return 0
+
+
+# -- Pick policy (R7, decision D2) ------------------------------------------------
+# The owner writes .intake/pick-policy.json and registers it with
+# `register-policy --by <name>`. A registration pins the sha256 of the file's bytes and the
+# registrant's name, in the git-ignored intake dir (the house pattern of growth-review's
+# and idea-validation's `register`). `autopick` refuses (exit 2) before a registration and
+# after any edit to the file, until the owner registers again.
+POLICY_PATH = ".intake/pick-policy.json"
+POLICY_STATE = "policy-registration.json"
+POLICY_KEYS = ("kinds", "min_rank", "formats", "max_picks_per_day")
+POLICY_KINDS = ("release", "ci", "issue", "feedback")
+MAX_PICKS_PER_DAY = 100
+
+
+def _name_ok(name):
+    """A name (--by) is non-empty after stripping and holds no hidden characters.
+    Copied from growth-review's assets/growth.py."""
+    return (isinstance(name, str) and name.strip() != "" and len(name) <= 200
+            and not any(is_hidden_char(c) for c in name))
+
+
+# The block from here to the end of _is_agent() is copied byte for byte from
+# growth-review's assets/growth.py (itself identical in idea-validation's assets/ideas.py
+# and factory-conductor's assets/ledger.py), because skills cannot import each other.
+# Latin lookalikes of the letters in "agent" that NFKD does not fold: Cyrillic, Greek, the
+# IPA script g and alpha, and the small capitals.
+_CONFUSABLES = str.maketrans({"а": "a", "е": "e", "о": "o", "р": "p",
+                              "с": "c", "х": "x", "і": "i", "А": "a",
+                              "Е": "e", "О": "o", "Р": "p", "С": "c",
+                              "Х": "x", "І": "i", "α": "a", "ε": "e",
+                              "ο": "o", "Α": "a", "Ε": "e", "Ο": "o",
+                              "Ν": "n", "Τ": "t", "т": "t", "н": "n",
+                              "Т": "t", "Н": "n", "ɡ": "g", "ɑ": "a",
+                              "ᴀ": "a", "ɢ": "g", "ᴇ": "e", "ɴ": "n",
+                              "ᴛ": "t"})
+# Letters and digits stay; every other character (punctuation, a symbol, a modifier letter
+# such as U+02D0, whitespace) becomes one space, so it counts as a separator.
+_WORD_CATEGORIES = frozenset({"Lu", "Ll", "Lt", "Lo", "Nd"})
+# "agent" at the start, its letters apart or not, and no letter after it (a digit or a
+# space may follow: "agent2" and "agent x" are refused).
+_AGENT_RE = re.compile(r"^ *a *g *e *n *t(?![^\W\d_])")
+
+
+def _fold(name):
+    """name as lowercase Latin letters, digits and spaces: NFKD, combining marks dropped,
+    the lookalikes above folded, casefolded, and every other character a space."""
+    s = "".join(c for c in unicodedata.normalize("NFKD", name)
+                if unicodedata.category(c) != "Mn")
+    s = unicodedata.normalize("NFKC", s.translate(_CONFUSABLES).casefold())
+    return "".join(c if unicodedata.category(c) in _WORD_CATEGORIES else " " for c in s)
+
+
+def _is_agent(name):
+    """True for a name that starts with the word "agent" in any form: `agent:x`, a bare
+    `agent`, any separator (a space, `.`, `;`, `|`, a ratio or modifier-letter colon, a dash
+    or a middle dot), letters apart (`a gent:x`), fullwidth, Cyrillic, Greek or
+    small-capital letters. A human name that starts with that word ("Agent Smith") is
+    refused too: the check fails closed. "Agentha", "agentur" and "Reagent" pass."""
+    folded = _fold(name)
+    return bool(_AGENT_RE.match(folded))
+
+
+def _is_num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def policy_problems(pol):
+    """[] for a valid pick policy, else one line per problem."""
+    if not isinstance(pol, dict):
+        return ["the pick policy is not a JSON object"]
+    problems = ["unknown key %s" % code(k) for k in sorted(set(pol) - set(POLICY_KEYS))]
+    problems += ["missing key %s" % k for k in POLICY_KEYS if k not in pol]
+    kinds = pol.get("kinds")
+    if "kinds" in pol and not (isinstance(kinds, list) and kinds
+                               and all(k in POLICY_KINDS for k in kinds)
+                               and len(set(kinds)) == len(kinds)):
+        problems.append("kinds is a non-empty list of distinct kinds from %s"
+                        % ", ".join(POLICY_KINDS))
+    fmts = pol.get("formats")
+    if "formats" in pol and not (isinstance(fmts, list) and all(f in SOURCE_FORMATS for f in fmts)
+                                 and len(set(fmts)) == len(fmts)):
+        problems.append("formats is a list of distinct source formats (intake formats)")
+    if "min_rank" in pol and not (_is_num(pol["min_rank"]) and pol["min_rank"] >= 0):
+        problems.append("min_rank is a number of 0 or more")
+    m = pol.get("max_picks_per_day")
+    if "max_picks_per_day" in pol and not (isinstance(m, int) and not isinstance(m, bool)
+                                           and 1 <= m <= MAX_PICKS_PER_DAY):
+        problems.append("max_picks_per_day is a whole number from 1 to %d" % MAX_PICKS_PER_DAY)
+    return problems
+
+
+def load_policy(root):
+    """(policy, sha256 of the file's bytes) or (None, problems)."""
+    path = os.path.join(root, *POLICY_PATH.split("/"))
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return None, ["no pick policy at %s" % POLICY_PATH]
+    except OSError as e:
+        return None, ["cannot read %s: %s" % (POLICY_PATH, code(e))]
+    try:
+        pol = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None, ["%s is not valid JSON" % POLICY_PATH]
+    problems = policy_problems(pol)
+    return (None, problems) if problems else (pol, hashlib.sha256(data).hexdigest())
+
+
+def load_registrations(root):
+    """Every pick-policy registration, oldest first. Raises ValueError when the state file
+    is unreadable or malformed."""
+    path = os.path.join(_intake_dir(root), POLICY_STATE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            st = json.load(f)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        raise ValueError("%s/%s is unreadable" % (INTAKE_DIR, POLICY_STATE))
+    regs = st.get("registrations") if isinstance(st, dict) else None
+    if not (isinstance(regs, list) and all(
+            isinstance(r, dict) and isinstance(r.get("sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", r["sha256"]) and _name_ok(r.get("by"))
+            and isinstance(r.get("at"), str) for r in regs)):
+        raise ValueError("%s/%s is malformed" % (INTAKE_DIR, POLICY_STATE))
+    return regs
+
+
+def cmd_register_policy(a):
+    if not _name_ok(a.by):
+        print("STOP: --by needs the name of the owner who registers the pick policy")
+        return 2
+    if _is_agent(a.by):
+        print("STOP: an agent: name cannot register the pick policy; only the owner decides "
+              "what the factory picks on its own")
+        return 2
+    if a.reason is not None and not _name_ok(a.reason):
+        print("STOP: --reason must be non-empty text without hidden characters")
+        return 2
+    if _need_config(a.root) is None:
+        return 2
+    pol, sha = load_policy(a.root)
+    if pol is None:
+        for p in sha:
+            print("STOP: policy: %s" % p)
+        return 2
+    try:
+        with run_lock(a.root):
+            regs = load_registrations(a.root)
+            if regs and regs[-1]["sha256"] == sha:
+                print("REGISTERED: %s (no change since the last registration)" % sha)
+                return 0
+            at = _now()
+            regs.append({"sha256": sha, "by": a.by.strip(), "at": at,
+                         "reason": a.reason.strip() if a.reason else None})
+            _write_atomic(a.root, "%s/%s" % (INTAKE_DIR, POLICY_STATE),
+                          json.dumps({"version": 1, "registrations": regs}, indent=1,
+                                     sort_keys=True) + "\n")
+            Queue(a.root).log("register-policy", sha256=sha, by=a.by.strip(), reason=a.reason)
+    except Locked:
+        print("STOP: the intake lock is held by another command")
+        return 3
+    except ValueError as e:
+        print("STOP: %s" % one_line(e))
+        return 2
+    print("REGISTERED: %s by %s at %s" % (sha, code(a.by.strip()), at))
+    return 0
+
+
+def registered_policy(root):
+    """(policy, registration) when the policy file matches its latest registration, else
+    (None, None) after printing STOP lines."""
+    pol, sha = load_policy(root)
+    if pol is None:
+        for p in sha:
+            print("STOP: policy: %s" % p)
+        return None, None
+    try:
+        regs = load_registrations(root)
+    except ValueError as e:
+        print("STOP: %s" % one_line(e))
+        return None, None
+    if not regs:
+        print("STOP: policy-unregistered: the owner registers %s first" % POLICY_PATH)
+        print("NEXT: the owner runs intake register-policy --by <their name>")
+        return None, None
+    if regs[-1]["sha256"] != sha:
+        print("STOP: policy-changed: %s changed since the registration of %s"
+              % (POLICY_PATH, regs[-1]["at"]))
+        print("NEXT: the owner reads the change and runs intake register-policy --by "
+              "<their name>")
+        return None, None
+    return pol, regs[-1]
+
+
+def _format_allowed(item, policy):
+    """Seam for R8: whether the item's format may match. R7 does not filter by format."""
+    return True
+
+
+def policy_matches(item, policy):
+    """True when a `new` item is inside the registered policy."""
+    return (item["state"] == "new" and item.get("kind", "issue") in policy["kinds"]
+            and _rank(item) >= policy["min_rank"] and _format_allowed(item, policy))
+
+
+def cmd_autopick(a):
+    """Check the registered pick policy, then list the items inside it. Picking (with the
+    daily maximum, R10) is not built yet, so autopick picks nothing."""
+    if _need_config(a.root) is None:
+        return 2
+    pol, reg = registered_policy(a.root)
+    if pol is None:
+        return 2
+    q = _load(a.root)
+    if q is None:
+        return 2
+    print("POLICY: %s by %s at %s" % (reg["sha256"], code(reg["by"]), reg["at"]))
+    shown = sorted((i for i in q.items.values() if policy_matches(i, pol)),
+                   key=lambda i: (-_rank(i), i["id"]))
+    for i in shown:
+        print("MATCH: %s %s %s %s" % (i["id"], _flag(i), _rank(i), code(i["title"])))
+    print("AUTOPICK: matched %d picked 0" % len(shown))
     return 0
 
 
@@ -1513,6 +1739,9 @@ def main(argv=None):
     s.add_argument("--by", required=True); s.add_argument("--reason", required=True)
     s = sub.add_parser("pick"); s.add_argument("id"); s.add_argument("--by", required=True)
     sub.add_parser("status")
+    s = sub.add_parser("register-policy"); s.add_argument("--by", required=True)
+    s.add_argument("--reason")
+    sub.add_parser("autopick")
     sub.add_parser("sync")
     sub.add_parser("formats")
     s = sub.add_parser("import"); s.add_argument("--format", required=True)
@@ -1530,7 +1759,8 @@ def main(argv=None):
     return {"init": cmd_init, "list": cmd_list, "show": cmd_show, "link": cmd_link,
             "status": cmd_status, "sync": cmd_sync, "formats": cmd_formats,
             "import": cmd_import, "pick": cmd_pick,
-            "drop-run": cmd_drop_run}[a.cmd](a)
+            "drop-run": cmd_drop_run, "register-policy": cmd_register_policy,
+            "autopick": cmd_autopick}[a.cmd](a)
 
 
 if __name__ == "__main__":

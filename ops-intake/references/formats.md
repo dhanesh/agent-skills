@@ -253,6 +253,29 @@ Write it with `intake init --answers <file>`. It is committed. It holds only dat
   short strings. You use them when you run the CLI or MCP tool; intake does not.
 - `weights` maps configured source names to numbers. The default is 1.
 
+## Pick policy: `.intake/pick-policy.json`
+
+The owner writes it and registers it with `register-policy --by <name>` before any
+`autopick`. It is committed, like the config. It holds only data.
+
+```json
+{"kinds": ["ci", "release"], "min_rank": 300,
+ "formats": ["gh-run-jobs-json", "release-status"], "max_picks_per_day": 2}
+```
+
+- All four keys are required. Any other key is refused.
+- `kinds` is a non-empty list of distinct kinds: `release`, `ci`, `issue`, `feedback`.
+- `min_rank` is a number of 0 or more. An item matches only when its rank is at least this.
+- `formats` is a list of distinct source formats (`git-rev-list` is not one). It can be empty.
+- `max_picks_per_day` is a whole number from 1 to 100.
+- A registration pins the sha256 of the file's bytes, the owner's name and the time, in the
+  git-ignored `.skill-contract/intake/policy-registration.json`. A name that starts with the
+  word "agent" (`agent:claude`) is refused.
+- Any edit to the file changes its sha256, a whitespace edit too. `autopick` then stops with
+  `STOP: policy-changed` (exit 2) until the owner registers again.
+- In this version `autopick` lists the `new` items whose kind and rank are inside the policy.
+  It does not use `formats` or `max_picks_per_day` yet, and it picks nothing.
+
 ## Ranking
 
 `rank = (severity × 100 + recency + min(count, 20)) × weight`. `recency` is 30 minus the days
@@ -292,6 +315,8 @@ drops it flags `plan-superseded`.
 | `drop-run <run id> --by NAME --reason TEXT` | `NEXT: run <id> dropped`; logs a `drop-run` event; `STOP:` (exit 2) for an unknown or non-digit id |
 | `link <keep> <other>` | `NEXT: merged <other> into <keep>`; `STOP:` when `<other>` is `picked` or `planned`. Later signals for `<other>` go to `<keep>` |
 | `status` | `SYNC: <n> items … regressed=<r>` |
+| `register-policy --by NAME [--reason TEXT]` | `REGISTERED: <sha256> by <name> at <time>`, or `REGISTERED: <sha256> (no change since the last registration)`; logs a `register-policy` event; `STOP: policy: …` (exit 2) for a missing or invalid policy or an `agent` name |
+| `autopick` | `POLICY: <sha256> by <name> at <time>`, one `MATCH: <id> <flag> <rank> <title>` per item inside the policy, then `AUTOPICK: matched <n> picked 0`; `STOP: policy-unregistered` or `STOP: policy-changed` (exit 2) when the file has no registration that matches it |
 | `formats` | `FORMAT:` lines (needs no config) |
 
 The flag is `<state>`, plus `+regressed`, plus for `picked` and `planned` items one of
@@ -308,6 +333,8 @@ config, unknown format, refused input or an unreadable queue (`STOP:` line, noth
 | Path | Committed | What |
 |---|---|---|
 | `.intake/config.json` | yes | the config |
+| `.intake/pick-policy.json` | yes | the pick policy the owner registers |
+| `.skill-contract/intake/policy-registration.json` | no | every pick-policy registration: sha256, name, time, reason |
 | `.skill-contract/intake/queue.json` | no (git-ignored) | the queue, written by atomic replace |
 | `.skill-contract/intake/intake-log.jsonl` | no | an append-only log of every change |
 | `.skill-contract/intake/items/<id>.json` | no | the snapshot that `pick` pins |
