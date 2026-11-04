@@ -2,69 +2,104 @@
 
 - id: incident-probe
 - proven: no
-- anchors: incident-watch/SKILL.md, incident-watch/references/overview.md, incident-watch/assets/test_incident_watch_smoke.py
+- anchors: incident-watch/assets/incident.py:cmd_probe, incident-watch/assets/incident.py:probe_commands, incident-watch/assets/incident.py:run_probe, incident-watch/assets/incident.py:ensure_dir, incident-watch/assets/incident.py:after_probe
 
 ## What it is
 
-**Status: in development. No command ships yet.** The `incident-watch` skill is a
-skeleton. It has a SKILL.md, a README, a smoke test and an eval, and no script. This
-entry describes the planned surface from the approved spec
-(`docs/factory/2026-11-04-autonomous-factory-spec.md`, R22 to R26). The task that
-builds the command moves the anchors to the new code and fills in the full recipe.
-
-The planned `incident probe` runs only the release recipe's `health`, `version_probe`
-and `prod_smoke` commands, and records each result. After 2 or more consecutive failed
-probes it opens one incident record and writes one `intake-signals-jsonl` line of kind
-`incident`. The record shows the recipe's rollback command word for word and the
-release-conductor command that asks the owner. incident-watch never runs a rollback or a
-deploy: the owner mitigates.
+**Status: partly built.** `incident probe` ships (R22). It loads `.release/recipe.json`
+with release-conductor's own `load_recipe` (imported from the release-conductor skill
+beside incident-watch). It runs only the recipe's `health`, `version_probe` and each
+`prod_smoke` command, as argv lists with no shell and a timeout each. It appends each
+result (time, name, argv, exit code, a 2000-character output tail) to
+`.skill-contract/incidents/probes.jsonl`, which a `*` `.gitignore` in that directory keeps
+out of git. It keeps the consecutive-failure count in `state.json`. The design is
+`docs/factory/2026-11-04-autonomous-factory-spec.md` (R22 to R26, D1, S4).
 
 ## How to reach it
 
-Today: there is no command. Read `incident-watch/SKILL.md` and run the smoke test
-`python3 incident-watch/assets/test_incident_watch_smoke.py`.
+`python3 incident-watch/assets/incident.py --root <repo> [--skills-dir <dir>] probe
+[--version V] [--commit C] [--timeout S]`. `--skills-dir` makes the tool look for
+release-conductor only in that directory. `python3 incident-watch/assets/incident_testkit.py
+fixture <dir> [--fail NAME]` makes `<dir>` a git repo with a valid recipe whose every
+command runs a local stub (`<dir>/stubs/stub.py <name>`). Each stub call is logged to
+`<dir>/stubs/calls.log`, and a stub named in `--fail` exits 1.
+
+Shipped:
+
+- `incident probe` with passing stubs: four `PROBE:` lines (`health`, `version_probe`,
+  `prod_smoke[0]`, `prod_smoke[1]`), each `pass rc=0`, then
+  `PROBE_RESULT: pass commands=4 failed=0 consecutive_failures=0`, exit 0. One recorded
+  pass, and no incident record.
+- A failing probe command: `PROBE: <name> fail rc=<n>`, `PROBE_RESULT: fail ...`, exit 3,
+  and the count goes up by one. A pass sets it back to 0.
+- A refusal (no release-conductor, an invalid or missing recipe, a `{version}` or
+  `{commit}` with no value, a `.gitignore` with a `!` line): `PROBE: refused: <reason>`,
+  exit 2, and no command runs.
 
 Planned (not yet shipped):
 
-- `incident probe` with a passing health command: a recorded pass, no incident record.
 - A command that is not one of the recipe's `health`, `version_probe` or `prod_smoke`
-  entries: exit 2, and no command runs.
+  entries: exit 2, and no command runs (R23).
 - One failed probe: no record. The second consecutive failure: one record with the probe
   output, the last release record and the recent default-branch CI runs, and one
-  `incident` line in the signals file.
+  `incident` line in the signals file (R24).
 - The open record: the recipe's rollback argv word for word. The rollback is shown, never
-  run.
+  run (R25).
 - `incident close --by <name>`: closes the record and prints
-  `NEXT: run bug-autopsy with <record path>`. Without `--by` it exits 2.
+  `NEXT: run bug-autopsy with <record path>`. Without `--by` it exits 2 (R26).
 
 ## Drive it
 
-Until the command ships, drive the skeleton. On the checkout under test:
+On the checkout under test, make a fixture repo and probe it twice: once with every stub
+passing, once with a failing health stub.
 
 ```sh
-python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name ip-smoke -- \
-  python3 incident-watch/assets/test_incident_watch_smoke.py
-python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name ip-status -- \
-  grep -n "in development: no command ships yet" incident-watch/SKILL.md incident-watch/README.md
+IP="$WT/.verify-run/$INSTANCE/ip"
+python3 incident-watch/assets/incident_testkit.py fixture "$IP/pass"
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name ip-pass -- \
+  python3 incident-watch/assets/incident.py --root "$IP/pass" probe
+cp "$IP/pass/.skill-contract/incidents/probes.jsonl" "$WT/.verify-run/$INSTANCE/ip-pass-probes.jsonl"
+cp "$IP/pass/stubs/calls.log" "$WT/.verify-run/$INSTANCE/ip-pass-calls.log"
+ls -A "$IP/pass/.skill-contract/incidents" > "$WT/.verify-run/$INSTANCE/ip-pass-state.txt"
+git -C "$IP/pass" check-ignore -v .skill-contract/incidents/probes.jsonl \
+  > "$WT/.verify-run/$INSTANCE/ip-pass-ignored.txt"
+python3 incident-watch/assets/incident_testkit.py fixture "$IP/fail" --fail health
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name ip-fail -- \
+  python3 incident-watch/assets/incident.py --root "$IP/fail" probe
+cp "$IP/fail/stubs/calls.log" "$WT/.verify-run/$INSTANCE/ip-fail-calls.log"
 ```
 
-- `ip-smoke`: exit 0, `Ran 6 tests` and `OK`.
-- `ip-status`: exit 0, one match in each file.
+- `ip-pass`: exit 0. The lines are `PROBE: health pass rc=0`,
+  `PROBE: version_probe pass rc=0`, `PROBE: prod_smoke[0] pass rc=0`,
+  `PROBE: prod_smoke[1] pass rc=0` and
+  `PROBE_RESULT: pass commands=4 failed=0 consecutive_failures=0`.
+- `ip-pass-probes.jsonl`: one line, `"result": "pass"`, with four commands, each with
+  `at`, `argv`, `rc` 0 and `out_tail`.
+- `ip-pass-state.txt`: only `.gitignore`, `.lock`, `probes.jsonl` and `state.json`. There
+  is no incident record.
+- `ip-pass-ignored.txt`: one line that names `.skill-contract/incidents/.gitignore`.
+- `ip-pass-calls.log` and `ip-fail-calls.log`: only `health production`, `version_probe`,
+  `prod_smoke_0` and `prod_smoke_1`. No `build`, `deploy_staging`, `deploy_prod`,
+  `rollback` or `staging_check` line.
+- `ip-fail`: exit 3, `PROBE: health fail rc=1` and
+  `PROBE_RESULT: fail commands=4 failed=1 consecutive_failures=1`.
 
-This proves only that the skeleton is honest about its status. It proves none of R22 to
-R26. The task that builds `incident probe` replaces this section with a recipe that runs
-the probe on a fixture recipe with stub commands and checks each planned line above.
+The R23 to R26 recipes join this section as each ships.
 
 ## Proof
 
-Today: the two captures above. After the command ships: the probe results, the exit-2
-refusal, the incident record and its rollback argv, the signals line, the `NEXT:` line
+The `ip-pass` and `ip-fail` captures (their `PROBE:` and `PROBE_RESULT:` lines and exit
+codes), `ip-pass-probes.jsonl`, `ip-pass-state.txt`, `ip-pass-ignored.txt` and both
+`calls.log` copies. After the planned parts ship: the exit-2 refusal of an unlisted
+command, the incident record and its rollback argv, the signals line, the `NEXT:` line
 from `incident close`, and a rollback stub that was never called.
 
 ## Gotchas
 
-- Do not invent an `incident` command or report one as working: none ships yet, and the
-  skeleton SKILL.md tells agents not to run one.
-- Never point a probe at production while driving a fixture: the planned probe runs only
+- Without `--skills-dir`, the tool finds release-conductor beside incident-watch first.
+  If release-conductor is not installed, the probe refuses with exit 2.
+- Never point a probe at production while driving a fixture: the probe runs only
   read-only commands, but a wrong recipe is still a real command.
-- `proven: no` stays until the real recipe is driven with SHA-bound evidence.
+- The output tails in `probes.jsonl` can carry production details. They stay in the
+  git-ignored state directory. Do not paste them into a public place.
+- `proven: no` stays until the recipe is driven with SHA-bound evidence.
