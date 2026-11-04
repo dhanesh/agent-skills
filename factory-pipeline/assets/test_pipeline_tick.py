@@ -74,8 +74,12 @@ class TestTick(Fixture):
         self.assertEqual(res["autopick"][:2], ["ok", "picked=1"])
         self.assertEqual(res["derive-grant"][0], "idle")
         keys = [(c["skill"], c["key"]) for c in K.calls(self.skills)]
+        # R15: a cap check before autopick, plan and derive-grant; build has no grant to
+        # build, so it checks nothing.
+        caps = ("spec-first-planning", "pipeline-caps")
         self.assertEqual(keys, [("ops-intake", "sweep"), ("growth-review", "auto"),
-                                ("ops-intake", "import"), ("ops-intake", "autopick")])
+                                ("ops-intake", "import"), caps, ("ops-intake", "autopick"),
+                                caps, caps])
 
     def test_unbuilt_stages_say_pending_never_ok(self):
         _, res, _ = self.tick()

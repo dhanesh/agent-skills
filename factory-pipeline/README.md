@@ -19,6 +19,15 @@ What runs today:
   `contract_check.py check-pipeline-grant` (R13). With no live grant (none, revoked,
   expired, stale or tracked by git), it runs no stage, prints
   `STOP: no-grant reason=<reason>` and exits 2.
+- Before autopick, plan and derive grant, the tick checks the pipeline grant's caps
+  against today's UTC counts (R15). Before build, it checks only the dispatch cap, so a
+  grant that it already derived is never blocked by its own count. The
+  caps are `max_plans_per_day`, `max_open_runs` and `max_dispatches_per_day`. Plans and
+  open runs are counted by spec-first-planning `write_grant.py --pipeline-caps`, the same
+  counter that refuses a derivation. Dispatches are counted from factory-conductor's run
+  logs. At a cap, the tick prints `STOP: cap <name>`, records why in
+  `.skill-contract/pipeline/cap-stops.jsonl` and skips the stages that the cap gates. A count that it cannot
+  make is also a stop. The stages that only read, sweep or report still run.
 - `sweep` runs ops-intake `intake sweep`.
 - `growth-review` runs growth-review `growth auto` and imports its breaches with ops-intake
   `intake import`.
@@ -27,8 +36,8 @@ What runs today:
   that the plan stage hands on. The plan stage is not built yet, so it hands on no plan.
 
 What is still pending: the idea follow-up (R20), plan (R17), build (R18), release stage
-(R19) and digest (R21) stages, which print `pending-R<n>`. The caps (R15) and
-`pipeline schedule install` (R16) are also pending. A sibling skill that is not installed gives `unavailable`. The tick
+(R19) and digest (R21) stages, which print `pending-R<n>`. `pipeline schedule install`
+(R16) is also pending. A sibling skill that is not installed gives `unavailable`. The tick
 removes no human gate.
 
 The design is in

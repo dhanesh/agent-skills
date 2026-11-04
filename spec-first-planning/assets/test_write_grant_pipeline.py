@@ -522,6 +522,45 @@ class TestUnderPipelineOpenRuns(UnderPipelineBase):
         self.assertEqual(rc, 0, out)
 
 
+class TestPipelineCapCounts(UnderPipelineBase):
+    """--pipeline-caps prints the counts that --under-pipeline refuses with (R15)."""
+    caps = {"max_plans_per_day": 2, "max_open_runs": 5, "max_dispatches_per_day": 7}
+
+    def counts(self, ref=None):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = write_grant.main(["--pipeline-caps", ref or self.pipe_id, "--root", self.root])
+        return rc, out.getvalue()
+
+    def test_counts_follow_derivations(self):
+        rc, out = self.counts()
+        self.assertEqual(rc, 0, out)
+        rep = json.loads(out)
+        self.assertEqual(rep["caps"], self.caps)
+        self.assertEqual(rep["counts"], {"max_plans_per_day": 0, "max_open_runs": 0})
+        self.assertEqual(rep["derived"], [])
+        plan = self.autopicked_plan()
+        rc, dout, _ = self.derive(plan)
+        self.assertEqual(rc, 0, dout)
+        gid = os.path.basename(self.derived_path(dout))[:-len(".json")]
+        rep = json.loads(self.counts(self.pipe_path)[1])
+        self.assertEqual(rep["counts"], {"max_plans_per_day": 1, "max_open_runs": 1})
+        self.assertEqual(rep["derived"], [gid])
+
+    def test_unreadable_envelope_is_a_refusal_not_a_zero(self):
+        with open(os.path.join(contract_check.envelope_dir(self.root), "junk.json"), "w",
+                  encoding="utf-8") as f:
+            f.write("{not json")
+        rc, out = self.counts()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("REFUSED: cannot read envelope junk.json", out)
+
+    def test_unknown_pipeline_grant_refused(self):
+        rc, out = self.counts("pipeline-grant-v1-20260101T000000Z-abcdef")
+        self.assertEqual(rc, 1, out)
+        self.assertTrue(out.startswith("REFUSED: "), out)
+
+
 class TestPipelineRevocation(UnderPipelineBase):
     """S2: the kill switch revokes the pipeline grant and every grant derived from it."""
 
