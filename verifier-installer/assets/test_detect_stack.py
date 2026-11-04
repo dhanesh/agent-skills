@@ -356,6 +356,104 @@ class TestDeterminism(TempRepoCase):
         self.assertEqual(rails, sorted(rails))
 
 
+class TestProofBackends(TempRepoCase):
+    """R28: one `BACKEND: <tool>` line per proof backend a root manifest declares."""
+
+    def run_cli(self):
+        r = subprocess.run([sys.executable, SCRIPT, self.root],
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        json.loads(r.stdout)  # stdout stays one JSON document
+        return r
+
+    def backend_lines(self):
+        r = self.run_cli()
+        return [l for l in (r.stdout + r.stderr).splitlines() if l.startswith("BACKEND:")]
+
+    def test_cargo_with_proptest_and_kani(self):
+        write(self.root, "Cargo.toml",
+              '[package]\nname = "x"\n\n[dev-dependencies]\nproptest = "1"\n'
+              'kani = { git = "https://github.com/model-checking/kani" }\n')
+        self.assertEqual(self.backend_lines(), ["BACKEND: kani", "BACKEND: proptest"])
+        self.assertEqual(self.plan()["backends"], ["kani", "proptest"])
+
+    def test_cargo_with_neither_prints_no_backend_line(self):
+        write(self.root, "Cargo.toml",
+              '[package]\nname = "x"\n# proptest later, maybe kani\n'
+              '[dependencies]\nserde = "1"\nproptest-derive-ish = "0.1"\n')
+        self.assertEqual(self.backend_lines(), [])
+        self.assertNotIn("backends", self.plan())
+
+    def test_cargo_subtable_and_kani_metadata(self):
+        write(self.root, "Cargo.toml",
+              '[package]\nname = "x"\n[package.metadata.kani]\nflags = {}\n'
+              '[target.\'cfg(unix)\'.dev-dependencies.proptest]\nversion = "1"\n')
+        self.assertEqual(self.plan()["backends"], ["kani", "proptest"])
+
+    def test_package_name_is_not_a_dependency(self):
+        write(self.root, "Cargo.toml", '[package]\nname = "proptest"\n')
+        self.assertNotIn("backends", self.plan())
+
+    def test_verus(self):
+        write(self.root, "Cargo.toml",
+              '[package]\nname = "x"\n[dependencies]\nvstd = { path = "../verus/vstd" }\n')
+        self.assertEqual(self.backend_lines(), ["BACKEND: verus"])
+
+    def test_hypothesis_in_pyproject(self):
+        write(self.root, "pyproject.toml",
+              '[project]\nname = "x"\n[project.optional-dependencies]\n'
+              'test = ["pytest", "hypothesis>=6"]\n')
+        self.assertEqual(self.backend_lines(), ["BACKEND: hypothesis"])
+
+    def test_hypothesis_in_requirements(self):
+        write(self.root, "requirements-dev.txt", "pytest\nhypothesis==6.100.0\n")
+        self.assertEqual(self.backend_lines(), ["BACKEND: hypothesis"])
+
+    def test_hypothesis_plugin_or_comment_is_not_hypothesis(self):
+        write(self.root, "requirements.txt",
+              "hypothesis-jsonschema==0.23\n# hypothesis soon\n")
+        write(self.root, "pyproject.toml",
+              '[project]\nname = "x"\ndescription = "test a hypothesis"\n')
+        self.assertEqual(self.backend_lines(), [])
+
+    def test_rapid_in_go_mod(self):
+        write(self.root, "go.mod",
+              "module example.com/x\n\ngo 1.22\n\nrequire pgregory.net/rapid v1.1.0\n")
+        self.assertEqual(self.backend_lines(), ["BACKEND: rapid"])
+
+    def test_go_mod_without_rapid(self):
+        write(self.root, "go.mod", "module example.com/x\n// pgregory.net/rapid later\n")
+        self.assertEqual(self.backend_lines(), [])
+
+    def test_fast_check_in_package_json(self):
+        write(self.root, "package.json", json.dumps(
+            {"name": "x", "devDependencies": {"fast-check": "^3.0.0", "vitest": "^1"}}))
+        self.assertEqual(self.backend_lines(), ["BACKEND: fast-check"])
+
+    def test_fast_check_only_in_scripts_is_not_a_dependency(self):
+        write(self.root, "package.json", json.dumps(
+            {"name": "x", "scripts": {"test": "echo fast-check"}}))
+        self.assertEqual(self.backend_lines(), [])
+
+    def test_many_backends_stable_order_no_duplicates(self):
+        write(self.root, "Cargo.toml",
+              '[dependencies]\nproptest = "1"\n[dev-dependencies]\nproptest = "1"\n'
+              'kani-verifier = "0.50"\n[lints.rust]\n'
+              'unexpected_cfgs = { level = "warn", check-cfg = [\'cfg(kani)\'] }\n')
+        write(self.root, "go.mod", "module x\nrequire (\n\tpgregory.net/rapid v1.1.0\n)\n")
+        write(self.root, "package.json", json.dumps(
+            {"dependencies": {"@fast-check/vitest": "0.1"}}))
+        write(self.root, "setup.cfg", "[options]\ninstall_requires =\n    hypothesis\n")
+        expected = ["BACKEND: kani", "BACKEND: proptest", "BACKEND: hypothesis",
+                    "BACKEND: rapid", "BACKEND: fast-check"]
+        self.assertEqual(self.backend_lines(), expected)
+        self.assertEqual(self.backend_lines(), expected)
+
+    def test_nested_manifest_is_not_read(self):
+        write(self.root, "vendor/x/Cargo.toml", '[dependencies]\nproptest = "1"\n')
+        self.assertEqual(self.backend_lines(), [])
+
+
 class TestCLI(TempRepoCase):
     def test_cli_emits_valid_json(self):
         write(self.root, "go.mod", "module x\n")
