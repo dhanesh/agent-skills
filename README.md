@@ -64,8 +64,10 @@ You start each next skill yourself. The one exception is an approved grant: with
 flowchart TB
   subgraph st_find["1. Find work"]
     direction TB
+    s_factory_pipeline["factory-pipeline"]
     s_growth_review["growth-review"]
     s_idea_validation["idea-validation"]
+    s_incident_watch["incident-watch"]
     s_ops_intake["ops-intake"]
   end
   subgraph st_plan["2. Plan"]
@@ -111,7 +113,11 @@ flowchart TB
   s_agent_ready_rails -->|"loop rails"| s_crafting_self_prompting_loops
   s_factory_conductor -->|"no grant"| s_spec_first_planning
   s_factory_conductor -->|"feature not mapped"| s_verification_skill_forge
+  s_factory_pipeline -->|"growth review"| s_growth_review
+  s_factory_pipeline -->|"sweep and autopick"| s_ops_intake
+  s_factory_pipeline -->|"grant check"| s_spec_first_planning
   s_growth_review -->|"metric breach"| s_ops_intake
+  s_incident_watch -->|"recipe probes"| s_release_conductor
   s_release_conductor -->|"no verify skill"| s_verification_skill_forge
   s_spec_first_planning -->|"no verify skill or contract"| s_verification_skill_forge
   s_agent_ready_rails --o|"hollow test rail"| s_test_safety_net
@@ -119,6 +125,8 @@ flowchart TB
   s_ai_migration_operating_model --o|"pack ready"| s_crafting_self_prompting_loops
   s_ai_migration_operating_model --o|"new behaviour"| s_spec_first_planning
   s_factory_conductor --o|"PR merged"| s_release_conductor
+  s_incident_watch --o|"closed incident"| s_bug_autopsy
+  s_incident_watch --o|"incident signal"| s_ops_intake
   s_test_safety_net --o|"seam list"| s_clean_code
   s_verifier_installer --o|"only a smoke test"| s_test_safety_net
   s_bug_autopsy -.->|"re-pin bundle"| s_feynman_walkthrough
@@ -130,7 +138,7 @@ flowchart TB
   s_knowledge_gardener -.->|"rebuild site"| s_okf_site_kit
   s_test_safety_net -.->|"HTTP boundary"| s_mockstar_mock
   classDef entry stroke-width:3px
-  class s_agent_ready_rails,s_ai_migration_operating_model,s_bug_autopsy,s_clean_code,s_crafting_self_prompting_loops,s_feynman_walkthrough,s_growth_review,s_idea_validation,s_mockstar_mock,s_ops_intake,s_spec_first_planning,s_test_safety_net entry
+  class s_agent_ready_rails,s_ai_migration_operating_model,s_bug_autopsy,s_clean_code,s_crafting_self_prompting_loops,s_factory_pipeline,s_feynman_walkthrough,s_growth_review,s_idea_validation,s_incident_watch,s_mockstar_mock,s_ops_intake,s_spec_first_planning,s_test_safety_net entry
 ```
 
 How to read it. An arrow from A to B means A sends work or data to B.
@@ -141,7 +149,7 @@ How to read it. An arrow from A to B means A sends work or data to B.
 - `-.->` dashed arrow, **optional**: used only when you install the next skill.
 - A thick border marks a good place to start.
 
-The diagram shows the 18 linked skills and all 31 links. It leaves out 10 skills that work alone: `base-in-reality`, `context-hygiene-kit`, `factory-pipeline`, `incident-watch`, `jev-agent-setup`, `repo2skill`, `security-posture-audit`, `starlight-handbook-kit`, `tmux-agent-herdr-lite` and `world-model-ledger`. They call no skill, and no skill calls them.
+The diagram shows the 20 linked skills and all 37 links. It leaves out 8 skills that work alone: `base-in-reality`, `context-hygiene-kit`, `jev-agent-setup`, `repo2skill`, `security-posture-audit`, `starlight-handbook-kit`, `tmux-agent-herdr-lite` and `world-model-ledger`. They call no skill, and no skill calls them.
 
 Each skill's README has a smaller diagram with its own callers and callees, and the full when and why of each link.
 <!-- skill-graph:end -->
