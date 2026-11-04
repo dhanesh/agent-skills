@@ -4,6 +4,34 @@ Status: partly built. `pipeline tick` ships. Five of its nine stages are not bui
 report `pending-R<n>`. The design is `docs/factory/2026-11-04-autonomous-factory-spec.md`
 in the agent-skills repository (requirements R12 to R21).
 
+## The grant check, before any stage
+
+Before the first stage, the tick runs spec-first-planning's vendored
+`contract_check.py check-pipeline-grant --root <repo>` (R13). The checker judges the newest
+pipeline grant that no revision supersedes, as the skill-contract SPEC says. With
+`tick --grant <id or envelope path>`, it judges that grant instead. The tick goes on only
+when the checker exits 0 with `VALID`. Then it prints `TICK: grant <id> expires_at <time>`,
+and the derive-grant stage uses that id and no other.
+
+In every other case the tick runs no stage, so it sweeps, picks and plans nothing. It
+prints `STOP: no-grant reason=<reason>` and exits 2. The reasons are:
+
+| Reason | Meaning |
+|---|---|
+| `none` | There is no pipeline grant (or no grant with the `--grant` id). |
+| `revoked` | The grant is revoked, by its id or by the kill switch (`revoke-grant` with no id). |
+| `superseded` | A newer revision replaces the grant. |
+| `expired` | `expires_at` is past. |
+| `lifetime` | `expires_at` is more than 7 days from now. |
+| `stale` | The pick policy or the command allowlist changed after the owner accepted the grant. |
+| `tracked` | Git tracks the grant file. A grant is one person's acceptance and stays out of commits. |
+| `invalid` | The envelope breaks the contract (the checker prints a `FAIL:` line for each problem). |
+| `checker-unavailable` | spec-first-planning, or its vendored `contract_check.py`, is not installed. |
+| `checker-error` | The checker did not start, timed out or gave an answer the tick cannot read. |
+| `not-an-envelope` | `--grant` names no pipeline grant id and no envelope under `.skill-contract/envelopes/`. |
+
+The checker's own lines are printed with the `  grant| ` prefix.
+
 ## The stages, in order
 
 One `pipeline tick` runs these stages and prints one `STAGE: <name> <result>` line for each.
@@ -21,8 +49,8 @@ A detail can follow the result, for example `exit=3` or `picked=2`.
 | `release-stage` | Not built yet (R19). Result: `pending-R19`. | (`release-conductor`, later) |
 | `digest` | Not built yet (R21). Result: `pending-R21`. | none |
 
-Also not built yet: the check for a live pipeline grant (R13), the one-tick lock (R14), the
-caps (R15) and `pipeline schedule install` (R16).
+Also not built yet: the one-tick lock (R14), the caps (R15) and `pipeline schedule install`
+(R16).
 
 ## Result words
 
@@ -38,8 +66,8 @@ caps (R15) and `pipeline schedule install` (R16).
 | `pending-R<n>` | The stage is not built yet. |
 
 A result that is not `ok` does not stop the tick. The tick goes on to the next stage, and
-exits 0 when every stage ran. Exit 2 is a usage error, for example a `--root` that is not
-a directory.
+exits 0 when every stage ran. Exit 2 is a usage error (for example a `--root` that is not
+a directory) or `STOP: no-grant`.
 
 ## How the tick finds a skill
 
@@ -52,8 +80,8 @@ whole list. The tests use it to point at stub skills.
 
 ## Output
 
-The tick prints `TICK: start <time> root <repo>`, then the stages, then
-`TICK: done stages=<n>`. A line that starts with two spaces and `<stage>|` is the stage
+The tick prints `TICK: start <time> root <repo>`, then `TICK: grant <id> expires_at <time>`,
+then the stages, then `TICK: done stages=<n>`. A line that starts with two spaces and `<stage>|` is the stage
 tool's own stdout or stderr. The prefix keeps a tool's `STOP:` line apart from the tick's
 own lines. The growth signals themselves are not printed: they go only to `intake import`.
 

@@ -3,6 +3,15 @@
 
 Usage: pipeline.py [--root R] [--skills-dir D ...] tick [--grant G] [--growth-source NAME]
 
+Before any stage runs, the tick checks the pipeline grant (R13). It runs spec-first-planning's
+vendored `contract_check.py check-pipeline-grant --root R [--id G]`, which judges the newest
+pipeline grant that no revision supersedes (or the one `--grant` names): valid, not revoked,
+not superseded, not expired, not past 7 days, not stale and not tracked by git. Only on exit
+0 (VALID) does the tick go on, and it prints `TICK: grant <id> expires_at <time>`. Otherwise
+it prints `STOP: no-grant reason=<reason>` (none, revoked, superseded, expired, lifetime,
+stale, tracked, invalid, checker-unavailable, checker-error or not-an-envelope), runs no
+stage and exits 2. The derive-grant stage uses only the grant id that this check returned.
+
 The tick runs nine stages in this order and prints one `STAGE: <name> <result>` line
 per stage, optionally followed by a detail such as `exit=3` or `picked=2`:
 
@@ -33,11 +42,11 @@ directory beside this skill, <root>/.agents/skills, <root>/.claude/skills,
 (os.pathsep-separated) replaces that list, so a test can point at stub skills only.
 
 The tick runs every tool with sys.executable, an argv list and no shell. Stdlib only,
-Python 3.10+, POSIX. Exits: 0 every stage ran; 2 usage error.
+Python 3.10+, POSIX. Exits: 0 every stage ran; 2 usage error or no live pipeline grant.
 """
 import argparse
 import datetime
-import glob
+import json
 import os
 import re
 import subprocess
@@ -49,7 +58,11 @@ SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STAGE_TIMEOUT = 3600  # seconds per tool call; intake sweep caps each source at 300 s
 NEXT_PLAN = re.compile(r"^NEXT: run spec-first-planning with (\S+)\s*$")
 GRANT_LINE = re.compile(r"^GRANT: (\S+)\s*$")
-PIPELINE_GRANT_GLOB = ".skill-contract/envelopes/pipeline-grant-v1-*"
+PIPELINE_GRANT_ID = re.compile(r"^pipeline-grant-v1-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\Z")
+REASON = re.compile(r"^[a-z]+(?:-[a-z]+)*\Z")
+# The pipeline-grant check: spec-first-planning ships the reference checker, byte-identical.
+CHECKER = ("spec-first-planning", "assets/contract_check.py")
+CHECK_TIMEOUT = 120  # seconds; the checker reads local files and asks git
 
 # skill directory -> its tool, relative to the skill directory
 TOOLS = {
@@ -70,7 +83,8 @@ class Tick:
                  timeout=STAGE_TIMEOUT):
         self.root = root
         self.roots = roots
-        self.grant = grant
+        self.grant = grant  # the pipeline grant id check_grant() judged VALID
+        self.grant_expires = None
         self.growth_source = growth_source
         self.timeout = timeout
         self.picked = []    # intake-item envelopes autopick wrote (for the plan stage)
@@ -97,11 +111,12 @@ def skill_roots(root, env=None, overrides=None):
     return [os.path.abspath(d) for d in roots]
 
 
-def find_tool(roots, skill):
-    """The absolute path of a sibling skill's tool, or None when it is not installed."""
+def find_tool(roots, skill, rel=None):
+    """The absolute path of a sibling skill's tool (TOOLS[skill], or rel), or None when it
+    is not installed."""
     for r in roots:
         d = os.path.join(r, skill)
-        tool = os.path.join(d, TOOLS[skill])
+        tool = os.path.join(d, rel or TOOLS[skill])
         if os.path.isfile(os.path.join(d, "SKILL.md")) and os.path.isfile(tool):
             return tool
     return None
@@ -213,7 +228,7 @@ def stage_derive_grant(tick):
     tool = find_tool(tick.roots, "spec-first-planning")
     if tool is None:
         return "unavailable", "spec-first-planning"
-    grant = tick.grant or single_pipeline_grant(tick.root)
+    grant = tick.grant  # the id check_grant() judged VALID; never a fresh lookup
     if grant is None:
         return "refused", "no-grant"
     derived = refused = 0
@@ -261,10 +276,67 @@ STAGES = (
 )
 
 
-def single_pipeline_grant(root):
-    """The one pipeline-grant envelope under the root, or None when there are 0 or 2+."""
-    found = sorted(glob.glob(os.path.join(root, PIPELINE_GRANT_GLOB)))
-    return found[0] if len(found) == 1 else None
+# ── the pipeline-grant check (R13) ──────────────────────────────────────────────────────
+
+def grant_id_of(root, ref):
+    """The pipeline grant id that `--grant` names (an id, or the path of its envelope in
+    <root>/.skill-contract/envelopes/), or None when it names neither."""
+    if ref is None:
+        return None
+    if PIPELINE_GRANT_ID.match(ref):
+        return ref
+    base = os.path.basename(ref)
+    if not base.endswith(".json"):
+        return None
+    gid = base[:-len(".json")]
+    want = os.path.join(root, ".skill-contract", "envelopes", base)
+    path = ref if os.path.isabs(ref) else os.path.join(root, ref)
+    if not PIPELINE_GRANT_ID.match(gid) or os.path.realpath(path) != os.path.realpath(want):
+        return None
+    return gid
+
+
+def check_grant(tick, ref=None):
+    """Judge the pipeline grant before any stage runs. Return (grant id, None) when
+    check-pipeline-grant answers VALID, else (None, reason). Fails closed: no checker, a
+    checker error or an answer it cannot read is a refusal."""
+    checker = find_tool(tick.roots, CHECKER[0], CHECKER[1])
+    if checker is None:
+        return None, "checker-unavailable"
+    argv = py(checker, "check-pipeline-grant", "--root", tick.root, "--json")
+    if ref is not None:
+        gid = grant_id_of(tick.root, ref)
+        if gid is None:
+            return None, "not-an-envelope"
+        argv += ["--id", gid]
+    try:
+        cp = subprocess.run(argv, cwd=tick.root, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                            timeout=CHECK_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        echo("grant", "cannot run contract_check.py: %s" % type(e).__name__)
+        return None, "checker-error"
+    lines = cp.stdout.decode("utf-8", "replace").splitlines()
+    rep = None
+    for line in lines:
+        if line.startswith("{"):
+            try:
+                rep = json.loads(line)
+            except ValueError:
+                rep = None
+            break
+    echo_bytes("grant", "\n".join(ln for ln in lines if not ln.startswith("{")).encode())
+    echo_bytes("grant", cp.stderr)
+    if not isinstance(rep, dict) or cp.returncode not in (0, 2, 3):
+        return None, "checker-error"
+    status = rep.get("status")
+    if cp.returncode == 0 and status == "VALID" and isinstance(rep.get("id"), str):
+        tick.grant_expires = rep.get("expires_at")
+        return rep["id"], None
+    if status == "NONE":
+        return None, "none"
+    reason = rep.get("reason")
+    return None, reason if isinstance(reason, str) and REASON.match(reason) else "invalid"
 
 
 def exit_detail(code):
@@ -278,12 +350,19 @@ def join(*parts):
 # ── the command ─────────────────────────────────────────────────────────────────────────
 
 def cmd_tick(a):
-    tick = Tick(a.root, skill_roots(a.root, overrides=a.skills_dir), grant=a.grant,
+    tick = Tick(a.root, skill_roots(a.root, overrides=a.skills_dir),
                 growth_source=a.growth_source)
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     print("TICK: start %s root %s" % (now, a.root))
-    # R13 (no live pipeline grant), R14 (the lock) and R15 (caps) stop the tick here or
-    # between stages; until they ship, every stage runs.
+    # R13: no stage runs (nothing is swept, picked or planned) without a live pipeline grant.
+    gid, reason = check_grant(tick, a.grant)
+    if gid is None:
+        print("STOP: no-grant reason=%s" % reason)
+        return 2
+    tick.grant = gid
+    print("TICK: grant %s expires_at %s" % (gid, tick.grant_expires))
+    # R14 (the lock) and R15 (caps) stop the tick here or between stages; until they ship,
+    # every stage runs.
     ran = 0
     for name, fn in STAGES:
         try:
@@ -306,7 +385,8 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("tick")
     s.add_argument("--grant", default=None,
-                   help="the pipeline grant id or envelope path for derive-grant")
+                   help="check this pipeline grant (an id, or its envelope path) instead "
+                        "of the newest live one")
     s.add_argument("--growth-source", default="growth",
                    help="the intake source name for growth signals (default growth)")
     try:
