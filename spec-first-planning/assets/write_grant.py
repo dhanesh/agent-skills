@@ -54,6 +54,17 @@ Exit 1: refused; prints "REFUSED: <reason>" (a GrantRefused: the spec, the plan,
 Exit 2: usage error (an unreadable or malformed --answers file, or one missing a required
     key; a bad CLI invocation).
 
+--pipeline mode (pipeline-grant/v1, skill-contract SPEC "The pipeline grant"):
+    python3 write_grant.py --pipeline --root <repo-root> --answers <answers.json>
+                           --accepted-by <human name>
+    Answers keys: branch_pattern, gate_policy, expires_at, caps, budget, stop_on,
+    reentry, pick_policy_path (default .intake/pick-policy.json), allowlist_path
+    (default .factory/check-commands.txt). The statement must pass the reference
+    checker's check_statement and pipeline_grant_violations and must not be expired, so
+    it refuses what check-pipeline-grant refuses. Exit 0 prints REVOKE:/KILL-SWITCH:
+    lines and ends with "GRANT: <path>"; exit 1 "REFUSED: <reason>"; exit 2 on usage
+    (a missing --accepted-by writes nothing).
+
 Stdlib only. contract_check (vendored, same dir) needs Python >= 3.10 and is imported
 lazily, mirroring spec_to_tasks.py's style, so importing this module doesn't force that
 floor on callers that only want GrantRefused or the constants.
@@ -75,6 +86,8 @@ import spec_to_tasks  # noqa: E402
 
 USAGE = ("usage: write_grant.py --root DIR --spec REL_SPEC --plan PLAN_ENVELOPE_PATH "
         "--answers ANSWERS.json --accepted-by NAME")
+PIPELINE_USAGE = ("usage: write_grant.py --pipeline --root DIR --answers ANSWERS.json "
+                  "--accepted-by NAME")
 
 KNOWN_ANSWER_KEYS = frozenset({
     "branch_pattern", "gate_policy", "expires_at", "budget", "stop_on", "defaults", "system_one",
@@ -90,9 +103,10 @@ RELEASE_DEFAULTS_KEYS = frozenset({"bump", "grant_staging", "grant_tag"})
 GRANT_EXCLUDE = ".skill-contract/envelopes/autonomy-grant-v1-*"
 
 
-def exclude_grants(root):
-    """Append GRANT_EXCLUDE to <root>/.git/info/exclude unless it is already there.
-    Returns True when the line is in place, False when <root>/.git is not a directory."""
+def exclude_grants(root, pattern=GRANT_EXCLUDE):
+    """Append `pattern` (GRANT_EXCLUDE by default) to <root>/.git/info/exclude unless it
+    is already there. Returns True when the line is in place, False when <root>/.git is
+    not a directory."""
     git_dir = os.path.join(root, ".git")
     if not os.path.isdir(git_dir):
         return False
@@ -103,10 +117,10 @@ def exclude_grants(root):
             text = f.read()
     except FileNotFoundError:
         text = ""
-    if GRANT_EXCLUDE in (ln.strip() for ln in text.splitlines()):
+    if pattern in (ln.strip() for ln in text.splitlines()):
         return True
     with open(path, "a", encoding="utf-8", newline="\n") as f:
-        f.write(("\n" if text and not text.endswith("\n") else "") + GRANT_EXCLUDE + "\n")
+        f.write(("\n" if text and not text.endswith("\n") else "") + pattern + "\n")
     return True
 
 
@@ -724,6 +738,156 @@ def build_grant(root, spec_rel, plan_rel, answers, accepted_by, now=None):
     return st
 
 
+# ── --pipeline: the standing pipeline grant (pipeline-grant/v1, skill-contract SPEC) ─────
+# The validation is the reference checker's own (check_statement, then
+# pipeline_grant_violations, then the "expired" answer check-pipeline-grant gives), so this
+# writer refuses what check-pipeline-grant would refuse and keeps no second rule list.
+PIPELINE_ANSWER_KEYS = frozenset({
+    "branch_pattern", "gate_policy", "expires_at", "caps", "budget", "stop_on", "reentry",
+    "pick_policy_path", "allowlist_path",
+})
+PICK_POLICY_REL = ".intake/pick-policy.json"      # ops-intake's registered pick policy
+ALLOWLIST_REL = ".factory/check-commands.txt"     # the owner's committed command allowlist
+PIPELINE_GRANT_EXCLUDE = ".skill-contract/envelopes/pipeline-grant-v1-*"
+
+
+def _pinned_rel(root, answers, key, default):
+    """The root-relative path answers[key] (or `default`) names, refused when it is not a
+    safe relative path, resolves outside root, or is not a readable file."""
+    rel = answers.get(key, default)
+    import contract_check  # lazy: needs Python >= 3.10 (see the module docstring)
+    if not contract_check.safe_path(rel):
+        raise GrantRefused("answers.%s must be a relative path inside --root" % key)
+    root_real = os.path.realpath(root)
+    if _contained_rel(root, root_real, rel) is None:
+        raise GrantRefused("answers.%s %s resolves outside --root" % (key, rel))
+    if not os.path.isfile(os.path.join(root, *rel.split("/"))):
+        raise GrantRefused("%s does not exist: the pipeline grant pins it by sha256" % rel)
+    return rel
+
+
+def build_pipeline_grant(root, answers, accepted_by, now=None):
+    """Build (but do not write) a pipeline-grant/v1 statement.
+
+    Its subjects pin the pick policy (default .intake/pick-policy.json) and the command
+    allowlist (default .factory/check-commands.txt); answers.pick_policy_path and
+    answers.allowlist_path override them. Raises GrantRefused when an answers key is
+    unknown, --accepted-by is blank, a pinned file is missing or outside --root, the
+    re-entry allowlist reaches production (as for an autonomy grant), or the statement
+    fails check_statement (C3-C6) or pipeline_grant_violations (C10), or is already
+    expired."""
+    import contract_check  # lazy: needs Python >= 3.10 (see the module docstring)
+
+    unknown = sorted(k for k in answers if k not in PIPELINE_ANSWER_KEYS)
+    if unknown:
+        note = " (A8: grants are never signed)" if unknown[0] == "require_signature" else ""
+        raise GrantRefused("unknown answer key %r for --pipeline%s" % (unknown[0], note))
+    _check_accepted_by(accepted_by)
+    _check_production_allowlist(root, answers)
+    pick_rel = _pinned_rel(root, answers, "pick_policy_path", PICK_POLICY_REL)
+    allow_rel = _pinned_rel(root, answers, "allowlist_path", ALLOWLIST_REL)
+
+    now = now or contract_check.utc_now()
+    reentry = answers.get("reentry")
+    payload = {
+        "scope": {"repo": ".", "branch_pattern": answers.get("branch_pattern")},
+        "gate_policy": answers.get("gate_policy"),
+        "caps": answers.get("caps"),
+        "pick_policy": {"path": pick_rel,
+                        "sha256": contract_check.sha256_file(
+                            os.path.join(root, *pick_rel.split("/")))},
+        "allowlist": {"path": allow_rel,
+                      "sha256": contract_check.sha256_file(
+                          os.path.join(root, *allow_rel.split("/")))},
+        "budget": answers.get("budget", {}),
+        "stop_on": answers.get("stop_on", []),
+        "expires_at": answers.get("expires_at"),
+        "revoked": False,
+    }
+    if reentry is not None:
+        payload["reentry"] = (dict(contract_check.REENTRY_DEFAULTS, **reentry)
+                              if isinstance(reentry, dict) else reentry)
+    accepted = {"test": "grant-accepted", "assertedBy": {"human": accepted_by.strip()},
+                "result": {"outcome": "passed"},
+                "command": ["{python}", "{skill_dir:spec-first-planning}/assets/contract_check.py",
+                            "check-pipeline-grant", "--root", "."],
+                "subject": [contract_check.pin(root, pick_rel),
+                            contract_check.pin(root, allow_rel)]}
+    st = contract_check.build_statement(contract_check.PIPELINE_GRANT_KIND,
+                                        "spec-first-planning", spec_to_tasks.SKILL_VERSION,
+                                        root, [pick_rel, allow_rel], payload, [accepted], now=now)
+    viol = ["C%d: %s" % v for v in contract_check.check_statement(st)] \
+        or ["C10: %s" % v for v in contract_check.pipeline_grant_violations(st)]
+    if viol:
+        raise GrantRefused(viol[0])
+    if contract_check._parse_time(payload["expires_at"]) <= now:
+        raise GrantRefused("expires_at must be in the future (check-pipeline-grant answers "
+                           "ASK expired)")
+    return st
+
+
+def _revoke_lines(root, grant_id):
+    """The two revoke commands to show the user: this grant alone, and the kill switch."""
+    cc = os.path.join(os.path.dirname(os.path.abspath(__file__)), "contract_check.py")
+    base = ["python3", cc, "revoke-grant", "--root", root]
+    return ["REVOKE: %s" % shlex.join(base + ["--id", grant_id]),
+            "KILL-SWITCH: %s" % shlex.join(base)]
+
+
+def main_pipeline(argv):
+    """`write_grant.py --pipeline`: write a pipeline-grant/v1 after the user says yes."""
+    ap = argparse.ArgumentParser(prog="write_grant.py --pipeline",
+                                 description="build the pipeline-grant/v1 envelope after the "
+                                             "user says yes")
+    ap.add_argument("--pipeline", action="store_true", required=True)
+    ap.add_argument("--root", required=True, help="repo root")
+    ap.add_argument("--answers", required=True, help="path to a JSON file of answers")
+    ap.add_argument("--accepted-by", required=True, dest="accepted_by",
+                    help="the human who said yes")
+    try:
+        a = ap.parse_args(argv)
+    except SystemExit as exc:
+        return exc.code if exc.code else 0
+    root = os.path.abspath(a.root)
+    try:
+        with open(a.answers, encoding="utf-8") as f:
+            answers = json.load(f)
+    except (OSError, ValueError) as exc:
+        print(PIPELINE_USAGE, file=sys.stderr)
+        print("usage: cannot read --answers %s: %s" % (a.answers, exc), file=sys.stderr)
+        return 2
+    if not isinstance(answers, dict):
+        print(PIPELINE_USAGE, file=sys.stderr)
+        print("usage: --answers must be a JSON object", file=sys.stderr)
+        return 2
+    try:
+        st = build_pipeline_grant(root, answers, a.accepted_by)
+    except GrantRefused as exc:
+        print("REFUSED: %s" % exc)
+        return 1
+
+    import contract_check  # lazy: needs Python >= 3.10 (see the module docstring)
+    try:
+        path = contract_check.write_envelope(root, st)
+    except (OSError, ValueError) as exc:
+        print("REFUSED: cannot write the envelope: %s" % exc)
+        return 1
+    try:
+        excluded = exclude_grants(root, PIPELINE_GRANT_EXCLUDE)
+    except (OSError, UnicodeDecodeError) as exc:
+        print("WARNING: could not add %s to .git/info/exclude (%s); do not commit the grant: "
+              "check-pipeline-grant treats a tracked grant as covering nothing"
+              % (PIPELINE_GRANT_EXCLUDE, exc))
+    else:
+        if excluded:
+            print("NOTE: the grant is yours alone and is kept out of commits "
+                  "(.git/info/exclude lists %s)" % PIPELINE_GRANT_EXCLUDE)
+    for line in _revoke_lines(root, st["predicate"]["id"]):
+        print(line)
+    print("GRANT: %s" % path)
+    return 0
+
+
 def _contained_rel(root, root_real, given):
     """Root-relative, forward-slash path for `given` (absolute, or relative to root), or
     None when it resolves — after following symlinks — outside root. Used for both --spec
@@ -758,6 +922,8 @@ def build_parser():
 
 
 def main(argv=None):
+    if "--pipeline" in (sys.argv[1:] if argv is None else argv):
+        return main_pipeline(sys.argv[1:] if argv is None else list(argv))
     try:
         a = build_parser().parse_args(argv)
     except SystemExit as exc:

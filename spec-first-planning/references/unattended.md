@@ -15,6 +15,7 @@ The spec grammar for every section named here is in `references/spec-format.md`.
 - [The grant summary](#the-grant-summary)
 - [answers.json](#answersjson)
 - [What a grant can never cover](#what-a-grant-can-never-cover)
+- [The pipeline grant: `--pipeline`](#the-pipeline-grant---pipeline)
 
 ## The full loop
 
@@ -360,3 +361,63 @@ for it, and every step it gated asks again. The same command with no `--id` is t
 switch: it revokes every live grant in the repo, an in-flight release's grant included, so
 that release stops too and ends only with `release abandon`. It tries every grant and prints
 `REVOKED: <id>` or `FAILED: <id> <why>` for each, exiting non-zero if any failed.
+
+## The pipeline grant: `--pipeline`
+
+A pipeline grant (`pipeline-grant/v1`) is a standing grant. The owner accepts it once.
+Later, the pipeline derives one autonomy grant for each plan from it, inside its caps. A
+pipeline grant covers no action by itself. The rules for it are in the skill-contract
+SPEC, section "The pipeline grant".
+
+Show the owner the same kind of summary as for an autonomy grant: the gate table, the
+branch pattern, the expiry, the caps and the budget. Wait for an explicit yes. Then run:
+
+```sh
+python3 "$SKILL_DIR/assets/write_grant.py" --pipeline --root <repo> \
+  --answers <answers.json> --accepted-by "<owner's name>"
+```
+
+`--pipeline` takes no `--spec` and no `--plan`. The grant pins two files by sha256:
+
+- the pick policy that the owner registered with ops-intake, `.intake/pick-policy.json`;
+- the command allowlist, `.factory/check-commands.txt`.
+
+Both files must exist. If the owner changes one of them later, the grant becomes stale and
+covers nothing until the owner accepts a new one.
+
+The answers file for `--pipeline` accepts exactly these keys and refuses any other:
+
+- `branch_pattern`, `gate_policy`, `expires_at`: the same meaning as for an autonomy grant.
+- `caps`: exactly `max_plans_per_day`, `max_open_runs` and `max_dispatches_per_day`. Each
+  is an integer of 1 or more.
+- `budget`, `stop_on`, `reentry` (optional): the same keys as for an autonomy grant.
+  The budget is the ceiling for each derived grant.
+- `pick_policy_path`, `allowlist_path` (optional): a different path, relative to `--root`,
+  for one of the two pinned files.
+
+A filled example:
+
+```json
+{
+  "branch_pattern": "factory/*",
+  "gate_policy": {"read_only": "auto", "local_reversible": "auto",
+                  "push_branch": "grant", "open_pr": "grant"},
+  "expires_at": "2026-11-07T18:00:00Z",
+  "caps": {"max_plans_per_day": 3, "max_open_runs": 1, "max_dispatches_per_day": 40},
+  "budget": {"max_parallel": 2, "max_repairs_per_task": 2, "wall_clock_min": 1440},
+  "stop_on": ["a new dependency is needed"]
+}
+```
+
+The tool uses the reference checker's own checks, so it refuses what
+`contract_check.py check-pipeline-grant` refuses. It prints `REFUSED: <reason>` and exits 1
+when, for example:
+
+- `merge`, `deploy`, `spend`, `external_message` or `delete` has a gate other than `ask`;
+- a cap is missing, extra, or not an integer of 1 or more;
+- `expires_at` is in the past, or more than 7 days after now;
+- a pinned file is missing or is outside `--root`.
+
+Without `--accepted-by`, it exits 2 and writes no file. On success it lists the grant in
+`.git/info/exclude`, prints a `REVOKE:` line (this grant alone) and a `KILL-SWITCH:` line
+(every live grant), and ends with `GRANT: <path>`.
