@@ -392,3 +392,27 @@ exits 1. `allowlist.py match <file> <command>` prints `MATCH: <pattern>`
 (exit 0) or `NO-MATCH: <command>` (exit 1). A file that fails the lint
 matches no command. Other code imports `lint_text`, `load`, `matches`,
 `match_command` and `arg_ok` from the module.
+
+### Check a plan's commands (`--allowlist <file>`)
+
+`spec_to_tasks.py <spec.md> --allowlist <file>` checks each verify command
+of the derived plan against the allowlist. It prints one line for each
+command, in plan order, and nothing else:
+
+```
+ALLOWLIST: pass T1
+ALLOWLIST: fail T2 curl -s example.com
+```
+
+- Exit 0: every command matches a pattern.
+- Exit 3: one or more commands match no pattern. The plan waits for the
+  owner's read.
+- Exit 2: the allowlist cannot be read, or it fails its lint. The lint
+  problems print as `ALLOWLIST-LINT: fail line <n>: <reason>` lines. A bad
+  file allows no command.
+
+The flag uses the lint and the matcher in `allowlist.py`. It matches the
+argv list of the `[cmd: ...]` hint token by token, not a shell string. An
+argument that is empty or holds whitespace cannot be one token, so its
+command fails. A verify step without a command prints no line. Do not use
+the flag with `--json`, `--waves` or `--envelope`.
