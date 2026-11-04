@@ -10,6 +10,10 @@ sorted keys, so the same tree always yields byte-identical output.
 Usage:
     python3 detect_stack.py <repo-dir>
 
+When a root manifest declares a proof backend (Verus, Kani, proptest,
+Hypothesis, rapid or fast-check), the plan gains a "backends" list in a fixed
+order, and stderr gets one `BACKEND: <tool>` line per backend.
+
 Exit codes: 0 on success (plan printed to stdout, even when the repo has
 recoverable problems — those land in the plan's "errors" list), 2 on bad usage
 or a missing directory.
@@ -274,6 +278,119 @@ def _python_formatter(root, files, fileset):
     return None
 
 
+# ── Proof backends ──────────────────────────────────────────────────────────
+# The tools that verification-skill-forge's runner table knows, in the order the
+# detector reports them. The names are the runner table's names. A backend is
+# reported only when a root manifest of its stack declares it: the detector
+# reads manifests, never source files, and runs no tool.
+BACKENDS = ("verus", "kani", "proptest", "hypothesis", "rapid", "fast-check")
+
+# Cargo dependency names that declare a backend. Verus ships `vstd` and its
+# `verus_builtin*` crates; Kani's crate is `kani` (the installer is
+# `kani-verifier`).
+_CARGO_DEP_BACKENDS = {
+    "vstd": "verus", "verus_builtin": "verus", "verus_builtin_macros": "verus",
+    "verus_state_machines_macros": "verus",
+    "kani": "kani", "kani-verifier": "kani",
+    "proptest": "proptest",
+}
+_TOML_HEADER_RE = re.compile(r"^\[\[?\s*(.+?)\s*\]\]?\s*$")
+# A dependency table: [dependencies], [dev-dependencies], [build-dependencies],
+# [workspace.dependencies] or [target.'cfg(unix)'.dependencies].
+_CARGO_DEP_TABLE_RE = re.compile(r"(^|\.)(dev-|build-)?dependencies$")
+# One dependency as its own table: [dev-dependencies.proptest].
+_CARGO_DEP_SUBTABLE_RE = re.compile(
+    r"(^|\.)(?:dev-|build-)?dependencies\.[\"']?([A-Za-z0-9_-]+)[\"']?$")
+_CARGO_DEP_KEY_RE = re.compile(r"^[\"']?([A-Za-z0-9_-]+)[\"']?\s*[.=]")
+# Tool configuration: [package.metadata.kani] or [workspace.metadata.verus].
+_CARGO_METADATA_RE = re.compile(r"^(?:package|workspace)\.metadata\.(kani|verus)(\.|$)")
+
+# Hypothesis as a requirement line (`hypothesis>=6`), a quoted dependency
+# string (`"hypothesis[cli]"`) or a Poetry-style key (`hypothesis = "^6"`).
+# `hypothesis-jsonschema` matches none of them, because `-` follows the name.
+_HYPOTHESIS_LINE_RE = re.compile(r"(?m)^\s*hypothesis\s*(\[[^\]]*\])?\s*([=<>!~;@]|$)")
+_HYPOTHESIS_STRING_RE = re.compile(r"[\"']hypothesis\s*([=<>!~\[;]|[\"'])")
+_RAPID_RE = re.compile(r"(?m)(^|\s)pgregory\.net/rapid(\s|$)")
+_NODE_DEP_KEYS = ("dependencies", "devDependencies", "peerDependencies",
+                  "optionalDependencies")
+
+
+def _cargo_backends(text):
+    """Backends that a Cargo.toml declares, from its tables and keys only."""
+    found = set()
+    in_deps = False
+    for line in _strip_hash_comments(text).splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        header = _TOML_HEADER_RE.match(s)
+        if header:
+            name = header.group(1)
+            in_deps = bool(_CARGO_DEP_TABLE_RE.search(name))
+            sub = _CARGO_DEP_SUBTABLE_RE.search(name)
+            if sub and sub.group(2) in _CARGO_DEP_BACKENDS:
+                found.add(_CARGO_DEP_BACKENDS[sub.group(2)])
+            meta = _CARGO_METADATA_RE.match(name)
+            if meta:
+                found.add(meta.group(1))
+            continue
+        if in_deps:
+            key = _CARGO_DEP_KEY_RE.match(s)
+            if key and key.group(1) in _CARGO_DEP_BACKENDS:
+                found.add(_CARGO_DEP_BACKENDS[key.group(1)])
+    # A crate that declares the `kani` cfg (lints.rust check-cfg) is proved with Kani.
+    if "cfg(kani)" in text:
+        found.add("kani")
+    return found
+
+
+def _python_backends(root, files, fileset):
+    blob = _strip_hash_comments("".join(
+        _read(root, f) + "\n" for f in ("pyproject.toml", "setup.cfg") if f in fileset))
+    blob += "\n" + _strip_hash_comments("".join(
+        _read(root, f) + "\n" for f in files
+        if re.match(r"^requirements[A-Za-z0-9_.-]*\.txt$", f)))
+    if _HYPOTHESIS_LINE_RE.search(blob) or _HYPOTHESIS_STRING_RE.search(blob):
+        return {"hypothesis"}
+    return set()
+
+
+def _go_backends(root):
+    text = "\n".join(line.split("//", 1)[0] for line in _read(root, "go.mod").splitlines())
+    return {"rapid"} if _RAPID_RE.search(text) else set()
+
+
+def _node_backends(root):
+    try:
+        pkg = json.loads(_read(root, "package.json"))
+    except ValueError:
+        return set()  # _detect_node already reports the broken file
+    if not isinstance(pkg, dict):
+        return set()
+    for key in _NODE_DEP_KEYS:
+        deps = pkg.get(key)
+        if isinstance(deps, dict) and any(
+                name == "fast-check" or name.startswith("@fast-check/") for name in deps):
+            return {"fast-check"}
+    return set()
+
+
+def detect_backends(root, files=None):
+    """Proof backends the repo's root manifests declare, in BACKENDS order."""
+    if files is None:
+        files = _walk_files(root)
+    fileset = set(files)
+    found = set()
+    if "Cargo.toml" in fileset:
+        found |= _cargo_backends(_read(root, "Cargo.toml"))
+    found |= _python_backends(root, files, fileset)
+    if "go.mod" in fileset:
+        found |= _go_backends(root)
+    if "package.json" in fileset:
+        found |= _node_backends(root)
+    return [b for b in BACKENDS if b in found]
+
+
 def detect(root):
     """Build the deterministic plan dict for the repo rooted at `root`."""
     files = _walk_files(root)
@@ -401,7 +518,7 @@ def detect(root):
         })
     proposals.sort(key=lambda p: (p["rail"], p["command"], p["file"]))
 
-    return {
+    plan = {
         "stacks": sorted(stacks),
         "existing_verifiers": existing,
         "ci_note": ci_note,
@@ -410,6 +527,12 @@ def detect(root):
         "lockfiles": sorted(f for f in LOCKFILE_NAMES if f in fileset),
         "errors": sorted(errors, key=lambda e: (e["file"], e["error"])),
     }
+    # Added only when a backend is found, so a plan for a repo with no proof
+    # backend keeps the exact shape it had before backend detection existed.
+    backends = detect_backends(root, files)
+    if backends:
+        plan["backends"] = backends
+    return plan
 
 
 def main(argv):
@@ -420,7 +543,12 @@ def main(argv):
     if not os.path.isdir(root):
         print("error: not a directory: %s" % root, file=sys.stderr)
         return 2
-    print(json.dumps(detect(root), indent=2, sort_keys=True))
+    plan = detect(root)
+    print(json.dumps(plan, indent=2, sort_keys=True))
+    # One `BACKEND: <tool>` line per proof backend, on stderr, so stdout stays
+    # one JSON document that a consumer can parse whole.
+    for backend in plan.get("backends", []):
+        print("BACKEND: %s" % backend, file=sys.stderr)
     return 0
 
 
