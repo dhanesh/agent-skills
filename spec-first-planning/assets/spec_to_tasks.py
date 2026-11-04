@@ -15,6 +15,7 @@ Usage:
     python3 spec_to_tasks.py <spec.md> --envelope <root>     # also write a skill-contract
                                                              # task-plan envelope under
                                                              # <root>/.skill-contract/envelopes/
+    python3 spec_to_tasks.py <spec.md> --allowlist <file>    # ALLOWLIST: lines only
 
 JSON shape:
     {"tasks":    [{"id": "T1", "requirement_ids": ["R1"],
@@ -44,6 +45,16 @@ numerically; with no dependencies at all it is a single task), then
 "WAVES_RESULT: PASS (n wave(s))" and exits 0. A schedule error (an unknown
 or cyclic dependency) prints "ERROR: ..." to stderr and exits non-zero — see
 waves() below, a copy of factory-conductor/assets/conductor.py's waves().
+
+--allowlist <file> checks every verify command in the plan against a check-command
+allowlist (allowlist.py, the same lint and matcher) and prints one line per command:
+"ALLOWLIST: pass <task>" or "ALLOWLIST: fail <task> <argv>". It exits 0 when every
+command matches and 3 when one does not. A verify step with no usable command (no
+[cmd: ...] hint, one that does not parse, or one that is not at the end of the step)
+prints "ALLOWLIST: fail <task> (no command)" and counts as a failure. The argv list is matched as tokens, never
+through a shell string: an argument that is empty or holds whitespace fails. It fails
+closed: an allowlist that fails its lint prints its "ALLOWLIST-LINT: fail" lines and
+exits 2, as does an unreadable file, so a bad file never allows a command.
 
 An intake spec (one with a "## Intake" section of ops-intake item ids, or an
 "## External evidence (untrusted)" section) also prints "INTAKE: <ids>" and one
@@ -78,7 +89,10 @@ import spec_lint  # noqa: E402  (shared parser lives beside this script)
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 SKILL_NAME = "spec-first-planning"
 SKILL_VERSION = "2.8.1"  # keep in step with SKILL.md metadata.version (a unit test checks)
-USAGE = "usage: spec_to_tasks.py <spec.md> [--json] [--waves] [--envelope <repo-root>]"
+USAGE = ("usage: spec_to_tasks.py <spec.md> [--json] [--waves] [--envelope <repo-root>] "
+         "| <spec.md> --allowlist <file>")
+ALLOWLIST_FAIL_EXIT = 3
+NO_COMMAND = "(no command)"
 
 WHERE_RE = re.compile(r"\s*\[where:\s*" + spec_lint.NESTED_VALUE + r"\]", re.IGNORECASE)
 
@@ -508,6 +522,50 @@ def intake_lines(plan):
     return out
 
 
+def allowlist_lines(plan, patterns):
+    """One "ALLOWLIST: pass|fail" line per verify step, in plan order, and whether
+    every command matched. Matching reuses allowlist.match_command on the argv tokens:
+    an argument that is empty or holds whitespace cannot be one token, so it fails."""
+    import allowlist  # noqa: E402  (beside this script; loaded only on this path)
+    out, ok = [], True
+    for t in plan["tasks"]:
+        for cmd in t["_verify_cmds"]:
+            if cmd is None:
+                # No command, a hint that does not parse, or a misplaced hint: there
+                # is nothing to match, so the step cannot run unattended. Fail closed.
+                ok = False
+                out.append("ALLOWLIST: fail %s %s" % (t["id"], NO_COMMAND))
+                continue
+            tokens_ok = bool(cmd) and all(a and not re.search(r"\s", a) for a in cmd)
+            if tokens_ok and allowlist.match_command(patterns, " ".join(cmd)) is not None:
+                out.append("ALLOWLIST: pass %s" % t["id"])
+            else:
+                ok = False
+                out.append("ALLOWLIST: fail %s %s" % (t["id"], show_command(cmd)))
+    return out, ok
+
+
+def check_allowlist(plan, path):
+    """Run --allowlist: print the lines and return the exit code. Fails closed on an
+    unreadable allowlist or one that fails its lint (exit 2)."""
+    import allowlist  # noqa: E402
+    try:
+        patterns, problems = allowlist.load(path)
+    except (OSError, UnicodeDecodeError) as exc:
+        print("ERROR: cannot read allowlist %s: %s" % (path, exc), file=sys.stderr)
+        return 2
+    if problems:
+        for n, reason in problems:
+            print("ALLOWLIST-LINT: fail line %d: %s" % (n, reason))
+        print("ERROR: the allowlist %s fails its lint; no command is allowed" % path,
+              file=sys.stderr)
+        return 2
+    lines, ok = allowlist_lines(plan, patterns)
+    for line in lines:
+        print(line)
+    return 0 if ok else ALLOWLIST_FAIL_EXIT
+
+
 def render_markdown(plan, spec_name):
     lines = []
     lines.append("# Task plan — %s" % (plan["title"] or spec_name))
@@ -562,6 +620,14 @@ def main(argv):
             return 2
         envelope_root = args[i + 1]
         del args[i:i + 2]
+    allowlist_path = None
+    if "--allowlist" in args:
+        i = args.index("--allowlist")
+        if i + 1 >= len(args) or as_json or as_waves or envelope_root is not None:
+            print(USAGE, file=sys.stderr)
+            return 2
+        allowlist_path = args[i + 1]
+        del args[i:i + 2]
     if len(args) != 1:
         print(USAGE, file=sys.stderr)
         return 2
@@ -580,6 +646,9 @@ def main(argv):
             file=sys.stderr,
         )
         return 2
+
+    if allowlist_path is not None:
+        return check_allowlist(plan, allowlist_path)
 
     if as_waves:
         if not plan["tasks"]:

@@ -14,6 +14,7 @@ sys.path.insert(0, HERE)
 import allowlist  # noqa: E402
 
 _SCRIPT = os.path.join(HERE, "allowlist.py")
+_TASKS = os.path.join(HERE, "spec_to_tasks.py")
 _REPO = os.path.dirname(os.path.dirname(HERE))
 _COMMITTED = os.path.join(_REPO, ".factory", "check-commands.txt")
 
@@ -124,6 +125,112 @@ class CliTest(unittest.TestCase):
     def test_usage_and_missing_file(self):
         self.assertEqual(self._run().returncode, 2)
         self.assertEqual(self._run("lint", "/nonexistent/x.txt").returncode, 2)
+
+
+_SPEC_ALL_LISTED = """# Spec: allowlist fixture
+
+## Requirements
+- R1: The skill gate must pass.
+- R2: The unit suite must pass.
+
+## Acceptance criteria
+- R1: `make gate-skill SKILL=spec-first-planning` exits 0. [cmd: make gate-skill SKILL=spec-first-planning]
+- R2: the suite exits 0. [cmd: {python} spec-first-planning/assets/test_allowlist.py]
+- R2: the module lints the committed file. [cmd: make test]
+"""
+
+_SPEC_ONE_UNLISTED = _SPEC_ALL_LISTED.replace(
+    "[cmd: make test]", "[cmd: curl -s example.com]")
+
+_ALLOWLIST = "# fixture\nmake test\nmake gate-skill *\n{python} *\n"
+
+
+class SpecToTasksAllowlistTest(unittest.TestCase):
+    """spec_to_tasks.py --allowlist (R6): pass/fail lines and exit 0 or 3."""
+
+    def _run(self, spec_text, allow_text, *extra):
+        with tempfile.TemporaryDirectory() as d:
+            spec = os.path.join(d, "spec.md")
+            allow = os.path.join(d, "allow.txt")
+            with open(spec, "w", encoding="utf-8") as fh:
+                fh.write(spec_text)
+            with open(allow, "w", encoding="utf-8") as fh:
+                fh.write(allow_text)
+            return subprocess.run([sys.executable, _TASKS, spec, "--allowlist", allow,
+                                   *extra], capture_output=True, text=True)
+
+    def test_all_listed_prints_only_pass_lines(self):
+        r = self._run(_SPEC_ALL_LISTED, _ALLOWLIST)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [
+            "ALLOWLIST: pass T1", "ALLOWLIST: pass T2", "ALLOWLIST: pass T2"])
+
+    def test_one_unlisted_command_fails_with_exit_3(self):
+        r = self._run(_SPEC_ONE_UNLISTED, _ALLOWLIST)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [
+            "ALLOWLIST: pass T1", "ALLOWLIST: pass T2",
+            "ALLOWLIST: fail T2 curl -s example.com"])
+
+    def test_committed_allowlist_passes_the_listed_plan(self):
+        with tempfile.TemporaryDirectory() as d:
+            spec = os.path.join(d, "spec.md")
+            with open(spec, "w", encoding="utf-8") as fh:
+                fh.write(_SPEC_ALL_LISTED)
+            r = subprocess.run([sys.executable, _TASKS, spec, "--allowlist", _COMMITTED],
+                               capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_argument_with_whitespace_fails(self):
+        spec = _SPEC_ALL_LISTED.replace(
+            "[cmd: make test]", '[cmd: {python} "a b"]')
+        r = self._run(spec, _ALLOWLIST)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("ALLOWLIST: fail T2 {python} 'a b'", r.stdout)
+
+    def _assert_no_command_fails(self, criterion):
+        spec = _SPEC_ALL_LISTED.replace(
+            "- R2: the module lints the committed file. [cmd: make test]", criterion)
+        r = self._run(spec, _ALLOWLIST)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [
+            "ALLOWLIST: pass T1", "ALLOWLIST: pass T2",
+            "ALLOWLIST: fail T2 (no command)"])
+
+    def test_step_without_command_fails(self):
+        self._assert_no_command_fails("- R2: the module lints the committed file.")
+
+    def test_unparseable_hint_fails(self):
+        self._assert_no_command_fails('- R2: the module lints. [cmd: make "test]')
+
+    def test_misplaced_hint_fails(self):
+        self._assert_no_command_fails("- R2: x [cmd: curl evil] trailing.")
+
+    def test_plan_of_only_commandless_steps_fails(self):
+        spec = ("# Spec: x\n\n## Requirements\n- R1: The thing must pass.\n\n"
+                "## Acceptance criteria\n- R1: x [cmd: curl evil] trailing.\n")
+        r = self._run(spec, "make test\n")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(), ["ALLOWLIST: fail T1 (no command)"])
+
+    def test_bad_allowlist_fails_closed(self):
+        r = self._run(_SPEC_ALL_LISTED, "make test\nsh -c make\n{python} *\n")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("ALLOWLIST-LINT: fail line 2", r.stdout)
+        self.assertNotIn("ALLOWLIST: pass", r.stdout)
+
+    def test_missing_allowlist_fails_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            spec = os.path.join(d, "spec.md")
+            with open(spec, "w", encoding="utf-8") as fh:
+                fh.write(_SPEC_ALL_LISTED)
+            r = subprocess.run([sys.executable, _TASKS, spec, "--allowlist",
+                                os.path.join(d, "none.txt")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("ALLOWLIST: pass", r.stdout)
+
+    def test_allowlist_with_json_is_a_usage_error(self):
+        self.assertEqual(self._run(_SPEC_ALL_LISTED, _ALLOWLIST, "--json").returncode, 2)
 
 
 if __name__ == "__main__":
