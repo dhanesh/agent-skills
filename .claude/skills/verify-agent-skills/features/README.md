@@ -14,5 +14,5 @@ One file per user-facing CLI surface, in sweep order.
 - [conductor-review-brief](conductor-review-brief.md) — brief a fresh reviewer and record its verdict with conductor review
 - [factory-status-gate](factory-status-gate.md) — read the README stage table and run the gate self-tests
 - [skill-catalog](skill-catalog.md) — check that the README catalog and the call graph list every skill
-- [pipeline-tick](pipeline-tick.md) — run every factory stage in one scheduled, locked, capped tick with factory-pipeline (in development)
+- [pipeline-tick](pipeline-tick.md) — run every factory stage in one scheduled, locked, capped tick with factory-pipeline (partly built)
 - [incident-probe](incident-probe.md) — detect live incidents with incident-watch's read-only probes (in development)
