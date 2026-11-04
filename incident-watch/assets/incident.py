@@ -13,9 +13,13 @@ Commands:
           .skill-contract/incidents/probes.jsonl. Prints one
           `PROBE: <name> <pass|fail|timeout> rc=<rc>` line per command and one
           `PROBE_RESULT: <pass|fail> commands=<n> failed=<n> consecutive_failures=<n>` line.
+          `--only <list>` (repeatable) runs only the named lists. The name has to be
+          exactly `health`, `version_probe` or `prod_smoke`; any other name (another recipe
+          field such as `rollback`, an unknown name, a path or a command), any extra
+          argument after `probe`, and any recipe probe entry whose program word holds a
+          {token} is refused with exit 2 before anything runs (R23).
 
-Pending (not built here): refusing a requested command outside the three lists (R23),
-opening one incident record and writing an `incident` signal after 2 or more consecutive
+Pending (not built here): opening one incident record and writing an `incident` signal after 2 or more consecutive
 failed probes (R24), the rollback command shown word for word (R25) and
 `incident close --by <name>` (R26). This tool never runs `build`, `deploy_staging`,
 `deploy_prod`, `rollback` or `staging_checks`: the only commands it reads from the recipe
@@ -75,6 +79,20 @@ class Refused(Exception):
     """A refusal before any probe command runs: exit 2."""
 
 
+def check_only(names):
+    """The recipe lists a probe runs: all of PROBE_KEYS when `names` is empty, else the
+    named ones in PROBE_KEYS order. Raises Refused for any name that is not exactly one
+    of PROBE_KEYS, so a caller can never name another recipe field, a path or a raw
+    command (R23). The check is exact: no case folding, no prefix match."""
+    if not names:
+        return PROBE_KEYS
+    for n in names:
+        if n not in PROBE_KEYS:
+            raise Refused("--only %r is not a probe list; a probe runs only %s (S4)"
+                          % (n, ", ".join(PROBE_KEYS)))
+    return tuple(k for k in PROBE_KEYS if k in names)
+
+
 class Locked(Exception):
     """Another probe holds the incidents lock: exit 3."""
 
@@ -131,12 +149,18 @@ def load_release_module(path):
 
 # ── the commands a probe may run (S4) ───────────────────────────────────────────────────
 
-def probe_commands(recipe):
+def probe_commands(recipe, keys=PROBE_KEYS):
     """[(name, argv template)] for every command a probe runs, in order: health,
     version_probe, then prod_smoke[0..n-1]. This is the whole set of recipe commands
-    incident-watch can run; R23's refusal of any other command checks against it."""
-    out = [("health", recipe["health"]), ("version_probe", recipe["version_probe"])]
-    out += [("prod_smoke[%d]" % i, argv) for i, argv in enumerate(recipe["prod_smoke"])]
+    incident-watch can run; `keys` (from check_only) can only narrow it."""
+    out = []
+    for key in PROBE_KEYS:
+        if key not in keys:
+            continue
+        if key == "prod_smoke":
+            out += [("prod_smoke[%d]" % i, argv) for i, argv in enumerate(recipe[key])]
+        else:
+            out.append((key, recipe[key]))
     return out
 
 
@@ -151,6 +175,10 @@ def expand_all(release, commands, version=None, commit=None):
         values["commit"] = commit
     out = []
     for name, template in commands:
+        if "{" in template[0] or "}" in template[0]:
+            raise Refused("recipe %s program %r holds a {token}: a value would choose the "
+                          "command, and a probe runs only the recipe's own commands (S4)"
+                          % (name, template[0]))
         try:
             argv = release.expand(template, values)
         except ValueError as e:
@@ -283,6 +311,10 @@ def after_probe(d, state, record):
 def cmd_probe(args):
     root = os.path.abspath(args.root)
     try:
+        if args.extra:
+            raise Refused("unexpected argument %r after probe: a probe takes no command; "
+                          "it runs only %s (S4)" % (args.extra[0], ", ".join(PROBE_KEYS)))
+        keys = check_only(args.only)
         if args.timeout <= 0:
             raise Refused("--timeout must be a positive number of seconds")
         tool = find_release_tool(skill_roots(root, overrides=args.skills_dir))
@@ -294,7 +326,7 @@ def cmd_probe(args):
         if recipe is None or problems:
             raise Refused("invalid recipe %s: %s" % (
                 getattr(release, "RECIPE_PATH", ".release/recipe.json"), "; ".join(problems)))
-        commands = expand_all(release, probe_commands(recipe), args.version, args.commit)
+        commands = expand_all(release, probe_commands(recipe, keys), args.version, args.commit)
         d = ensure_dir(root)
         with probe_lock(d):
             results = run_probe(release, root, commands, args.timeout)
@@ -337,7 +369,11 @@ def main(argv=None):
                     help="the value for a {commit} token in a probe command")
     pr.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                     help="seconds per command (default %d)" % DEFAULT_TIMEOUT)
-    args = p.parse_args(argv)
+    pr.add_argument("--only", action="append", default=None, metavar="LIST",
+                    help="run only this list: health, version_probe or prod_smoke "
+                         "(repeatable); any other name is refused with exit 2")
+    args, extra = p.parse_known_args(argv)
+    args.extra = extra
     if args.cmd == "probe":
         return cmd_probe(args)
     return 2

@@ -2,8 +2,8 @@
 """Unit suite for incident-watch's incident.py. Stdlib unittest; offline, deterministic.
 
 Every probe runs against a fixture repo from incident_testkit.py: each recipe command is a
-local stub script, so no test touches a real endpoint. Later requirements (R23 to R26) add
-their tests to this file.
+local stub script, so no test touches a real endpoint. R23's refusals are in TestOnlyProbeLists. Later
+requirements (R24 to R26) add their tests to this file.
 Run:  python3 test_incident.py
 """
 import json
@@ -203,6 +203,82 @@ class TestRefusals(Base):
         self.assertEqual(rc, 2)
         self.assertIn("un-ignores", out)
         self.assertEqual(kit.calls(self.root), [])
+
+
+class TestOnlyProbeLists(Base):
+    """R23: a request for any command that is not one of the recipe's three probe lists
+    exits 2 and runs nothing, not even the allowed commands. The stub writes a marker line
+    to stubs/calls.log for every call, so an empty log proves nothing ran."""
+
+    def assert_refused_nothing_ran(self, rc, out, *words):
+        self.assertEqual(rc, 2, out)
+        self.assertTrue(out.startswith("PROBE: refused: "), out)
+        self.assertEqual(len(out.splitlines()), 1, out)
+        for w in words:
+            self.assertIn(w, out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "stubs", "calls.log")))
+        self.assertEqual(probes(self.root), [])
+
+    def test_only_each_probe_list_runs_just_that_list(self):
+        rc, out, _ = probe(self.root, "--only", "health")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(kit.calls(self.root), [["health", "production"]])
+        rc, out, _ = probe(self.root, "--only", "prod_smoke", "--only", "version_probe")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([c[0] for c in kit.calls(self.root)][1:],
+                         ["version_probe", "prod_smoke_0", "prod_smoke_1"])
+        self.assertEqual(self.non_probe_calls(), [])
+
+    def test_other_recipe_fields_are_refused(self):
+        for name in ("deploy_prod", "rollback", "build", "staging_check", "staging_checks",
+                     "deploy_staging"):
+            with self.subTest(name=name):
+                rc, out, _ = probe(self.root, "--only", name)
+                self.assert_refused_nothing_ran(rc, out, repr(name), "not a probe list")
+
+    def test_unknown_names_paths_and_near_misses_are_refused(self):
+        stub = os.path.join(self.root, "stubs", "stub.py")
+        for name in ("nope", "Health", "health ", "prod_smoke[0]", "prod_smoke_0", stub,
+                     "../rollback", "", "health;rollback"):
+            with self.subTest(name=name):
+                rc, out, _ = probe(self.root, "--only", name)
+                self.assert_refused_nothing_ran(rc, out, "not a probe list")
+
+    def test_one_bad_name_refuses_the_allowed_ones_too(self):
+        rc, out, _ = probe(self.root, "--only", "health", "--only", "rollback")
+        self.assert_refused_nothing_ran(rc, out, "'rollback'")
+
+    def test_raw_argv_after_probe_is_refused(self):
+        stub = os.path.join(self.root, "stubs", "stub.py")
+        for extra in (["rollback"], [sys.executable, stub, "rollback"], ["--", "rollback"],
+                      ["--cmd", "rollback"]):
+            with self.subTest(extra=extra):
+                rc, out, _ = probe(self.root, *extra)
+                self.assert_refused_nothing_ran(rc, out, "unexpected argument")
+
+    def test_token_in_program_word_is_refused(self):
+        r = kit.recipe(self.root)
+        r["prod_smoke"] = r["prod_smoke"] + [["{version}", "x"]]
+        kit.write_recipe(self.root, r)
+        stub = os.path.join(self.root, "stubs", "stub.py")
+        # release-conductor's loader accepts this recipe, so incident.py is what refuses
+        # it: otherwise --version would choose the program the probe runs.
+        rc, out, _ = probe(self.root, "--version", stub)
+        self.assert_refused_nothing_ran(rc, out, "prod_smoke[2]", "{token}")
+
+    def test_braces_in_a_value_stay_refused(self):
+        r = kit.recipe(self.root)
+        r["version_probe"] = r["version_probe"] + ["{version}"]
+        kit.write_recipe(self.root, r)
+        rc, out, _ = probe(self.root, "--version", "{commit}")
+        self.assert_refused_nothing_ran(rc, out, "brace-free")
+
+    def test_check_only_seam(self):
+        self.assertEqual(incident.check_only(None), incident.PROBE_KEYS)
+        self.assertEqual(incident.check_only(["prod_smoke", "health"]),
+                         ("health", "prod_smoke"))
+        with self.assertRaises(incident.Refused):
+            incident.check_only(["rollback"])
 
 
 class TestNoRollbackPath(unittest.TestCase):

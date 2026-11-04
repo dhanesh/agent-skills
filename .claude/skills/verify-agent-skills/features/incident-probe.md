@@ -2,7 +2,7 @@
 
 - id: incident-probe
 - proven: no
-- anchors: incident-watch/assets/incident.py:cmd_probe, incident-watch/assets/incident.py:probe_commands, incident-watch/assets/incident.py:run_probe, incident-watch/assets/incident.py:ensure_dir, incident-watch/assets/incident.py:after_probe
+- anchors: incident-watch/assets/incident.py:cmd_probe, incident-watch/assets/incident.py:probe_commands, incident-watch/assets/incident.py:run_probe, incident-watch/assets/incident.py:ensure_dir, incident-watch/assets/incident.py:after_probe, incident-watch/assets/incident.py:check_only
 
 ## What it is
 
@@ -12,13 +12,14 @@ beside incident-watch). It runs only the recipe's `health`, `version_probe` and 
 `prod_smoke` command, as argv lists with no shell and a timeout each. It appends each
 result (time, name, argv, exit code, a 2000-character output tail) to
 `.skill-contract/incidents/probes.jsonl`, which a `*` `.gitignore` in that directory keeps
-out of git. It keeps the consecutive-failure count in `state.json`. The design is
+out of git. It keeps the consecutive-failure count in `state.json`. It refuses any other
+command with exit 2 before anything runs (R23). The design is
 `docs/factory/2026-11-04-autonomous-factory-spec.md` (R22 to R26, D1, S4).
 
 ## How to reach it
 
 `python3 incident-watch/assets/incident.py --root <repo> [--skills-dir <dir>] probe
-[--version V] [--commit C] [--timeout S]`. `--skills-dir` makes the tool look for
+[--version V] [--commit C] [--timeout S] [--only health|version_probe|prod_smoke]`. `--skills-dir` makes the tool look for
 release-conductor only in that directory. `python3 incident-watch/assets/incident_testkit.py
 fixture <dir> [--fail NAME]` makes `<dir>` a git repo with a valid recipe whose every
 command runs a local stub (`<dir>/stubs/stub.py <name>`). Each stub call is logged to
@@ -35,11 +36,14 @@ Shipped:
 - A refusal (no release-conductor, an invalid or missing recipe, a `{version}` or
   `{commit}` with no value, a `.gitignore` with a `!` line): `PROBE: refused: <reason>`,
   exit 2, and no command runs.
+- A command that is not one of the recipe's `health`, `version_probe` or `prod_smoke`
+  entries (`--only rollback`, any other `--only` name, an extra argument after `probe`,
+  or a probe entry whose program word holds a `{token}`):
+  `PROBE: refused: <what> ... (S4)`, exit 2, and no command runs, not even the allowed
+  lists (R23).
 
 Planned (not yet shipped):
 
-- A command that is not one of the recipe's `health`, `version_probe` or `prod_smoke`
-  entries: exit 2, and no command runs (R23).
 - One failed probe: no record. The second consecutive failure: one record with the probe
   output, the last release record and the recent default-branch CI runs, and one
   `incident` line in the signals file (R24).
@@ -67,6 +71,12 @@ python3 incident-watch/assets/incident_testkit.py fixture "$IP/fail" --fail heal
 python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name ip-fail -- \
   python3 incident-watch/assets/incident.py --root "$IP/fail" probe
 cp "$IP/fail/stubs/calls.log" "$WT/.verify-run/$INSTANCE/ip-fail-calls.log"
+python3 incident-watch/assets/incident_testkit.py fixture "$IP/refuse"
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name ip-refuse-only -- \
+  python3 incident-watch/assets/incident.py --root "$IP/refuse" probe --only health --only rollback
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name ip-refuse-argv -- \
+  python3 incident-watch/assets/incident.py --root "$IP/refuse" probe rollback
+ls -A "$IP/refuse/stubs" > "$WT/.verify-run/$INSTANCE/ip-refuse-stubs.txt"
 ```
 
 - `ip-pass`: exit 0. The lines are `PROBE: health pass rc=0`,
@@ -84,14 +94,22 @@ cp "$IP/fail/stubs/calls.log" "$WT/.verify-run/$INSTANCE/ip-fail-calls.log"
 - `ip-fail`: exit 3, `PROBE: health fail rc=1` and
   `PROBE_RESULT: fail commands=4 failed=1 consecutive_failures=1`.
 
-The R23 to R26 recipes join this section as each ships.
+- `ip-refuse-only`: exit 2 and one line,
+  `PROBE: refused: --only 'rollback' is not a probe list; a probe runs only health, version_probe, prod_smoke (S4)`.
+- `ip-refuse-argv`: exit 2 and one line that starts
+  `PROBE: refused: unexpected argument 'rollback' after probe`.
+- `ip-refuse-stubs.txt`: only `stub.py`. There is no `calls.log`, so no stub ran, not
+  even `health`.
+
+The R24 to R26 recipes join this section as each ships.
 
 ## Proof
 
 The `ip-pass` and `ip-fail` captures (their `PROBE:` and `PROBE_RESULT:` lines and exit
 codes), `ip-pass-probes.jsonl`, `ip-pass-state.txt`, `ip-pass-ignored.txt` and both
-`calls.log` copies. After the planned parts ship: the exit-2 refusal of an unlisted
-command, the incident record and its rollback argv, the signals line, the `NEXT:` line
+`calls.log` copies. The `ip-refuse-only` and `ip-refuse-argv` captures (exit 2 and the
+`PROBE: refused:` line) and `ip-refuse-stubs.txt` with no `calls.log` (R23). After the
+planned parts ship: the incident record and its rollback argv, the signals line, the `NEXT:` line
 from `incident close`, and a rollback stub that was never called.
 
 ## Gotchas

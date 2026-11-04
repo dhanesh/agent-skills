@@ -1,6 +1,6 @@
 # incident-watch: steps
 
-Status: partly built. The `probe` step ships. The other steps are pending.
+Status: partly built. The `probe` and `refuse` steps ship. The other steps are pending.
 
 The design is `docs/factory/2026-11-04-autonomous-factory-spec.md` in the agent-skills
 repository (requirements R22 to R26, decision D1).
@@ -10,7 +10,7 @@ repository (requirements R22 to R26, decision D1).
 | Step | What it does | Status |
 |---|---|---|
 | probe | Run only the release recipe's read-only `health`, `version_probe` and `prod_smoke` commands, and record each result. | ships (R22) |
-| refuse | Refuse any other command with exit 2, and run nothing. | pending (R23) |
+| refuse | Refuse any other command with exit 2, and run nothing. `--only` takes only `health`, `version_probe` or `prod_smoke`. An extra argument after `probe`, or a probe entry whose program word holds a `{token}`, is refused too. | ships (R23) |
 | open | After 2 or more consecutive failed probes, open one incident record with the probe output, the last release record and the recent CI runs. | pending (R24) |
 | signal | Write one `incident` line into the ops-intake signals file. | pending (R24) |
 | mitigate | Show the recipe's rollback command word for word. The owner decides and runs it through `release-conductor`. | pending (R25) |
