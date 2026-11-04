@@ -284,5 +284,90 @@ class AutopickTests(unittest.TestCase):
         self.assertEqual(out.splitlines()[-1], "AUTOPICK: matched 4 picked 2")
 
 
+class AutopickLogTests(unittest.TestCase):
+    """R10 fails closed: a log line the daily count cannot trust stops autopick, and a log
+    append never merges onto a torn last line."""
+    POL = {"kinds": ["issue"], "min_rank": 0, "formats": [], "max_picks_per_day": 1}
+    DAY = "2026-11-04T09:00:00Z"
+
+    def setUp(self):
+        self.root = repo(config=CONFIG)
+        q = IN.Queue.load(self.root)
+        for n in range(5):
+            q.add("jira", "R-%d" % n, "item %d" % n)["rank"] = 100 + n
+        q.save()
+        with open(os.path.join(self.root, IN.POLICY_PATH), "w", encoding="utf-8") as f:
+            json.dump(self.POL, f)
+        self.assertEqual(self.cmd("register-policy", "--by", "Dhanesh")[0], 0)
+        self.log = os.path.join(self.root, IN.INTAKE_DIR, IN.LOG_FILE)
+
+    def cmd(self, *argv):
+        with mock.patch.object(IN, "_now", return_value=self.DAY), no_io():
+            return run(self.root, *argv)
+
+    def append(self, text):
+        with open(self.log, "a", encoding="utf-8") as f:
+            f.write(text)
+
+    def picked(self):
+        with open(os.path.join(self.root, IN.INTAKE_DIR, IN.QUEUE_FILE), encoding="utf-8") as f:
+            return sum(it["state"] == "picked" for it in json.load(f)["items"].values())
+
+    def assert_stops(self, line_no):
+        rc, out = self.cmd("autopick")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("STOP: log-unreadable: %s/%s line %d " % (IN.INTAKE_DIR, IN.LOG_FILE,
+                                                               line_no), out)
+        self.assertEqual(out.splitlines()[-1], "AUTOPICK: matched 5 picked 0")
+        self.assertEqual(self.picked(), 0)
+
+    def test_torn_line_stops_autopick(self):
+        self.append('{"event": "imp')  # line 2; line 1 is the registration
+        self.assert_stops(2)
+
+    def test_garbage_line_stops_autopick(self):
+        self.append("not json at all\n")
+        self.assert_stops(2)
+        with open(self.log, "w", encoding="utf-8") as f:
+            f.write('["a list"]\n')
+        self.assert_stops(1)
+
+    def test_hand_edited_pick_line_stops_autopick(self):
+        for rec in ({"event": "pick", "id": "I0", "at": self.DAY},  # by removed
+                    {"event": "pick", "id": "I0", "by": ["policy:x"], "at": self.DAY},
+                    {"event": "pick", "id": "I0", "by": "policy:x", "at": "today"}):
+            with open(self.log, "w", encoding="utf-8") as f:
+                f.write(json.dumps(rec) + "\n")
+            self.assert_stops(1)
+
+    def test_reviewer_probe_torn_line_then_two_runs_pick_at_most_the_maximum(self):
+        # max 1, five matching items, a torn line at the end of the log, two autopicks on
+        # one UTC day: together they pick at most 1 (here 0, since the log stops them).
+        self.append('{"event": "imp')
+        for _ in range(2):
+            self.assertEqual(self.cmd("autopick")[0], 2)
+        self.assertLessEqual(self.picked(), 1)
+        self.assertEqual(self.picked(), 0)
+
+    def test_log_append_ends_a_torn_line_first(self):
+        self.append('{"event": "imp')
+        some = sorted(IN.Queue.load(self.root).items)[0]
+        rc, out = self.cmd("pick", some, "--by", "Dhanesh")
+        self.assertEqual(rc, 0, out)
+        with open(self.log, encoding="utf-8") as f:
+            lines = f.read().split("\n")
+        self.assertEqual(lines[1], '{"event": "imp')
+        self.assertEqual(json.loads(lines[2])["by"], "Dhanesh")
+        self.assertEqual(lines[3], "")
+        # The torn line still stops autopick until the owner repairs it.
+        self.assert_stops_after_pick()
+
+    def assert_stops_after_pick(self):
+        rc, out = self.cmd("autopick")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("line 2 is not JSON", out)
+        self.assertEqual(self.picked(), 1)  # only the hand pick
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -519,11 +519,21 @@ class Queue:
             os.close(fd)
 
     def log(self, event, **fields):
-        """Append one JSON line to the intake log."""
+        """Append one JSON line to the intake log. When a crash left the last line without
+        its newline, end that line first, so the new record never merges onto it."""
         d = _ensure_dir(self.root)
         rec = dict(fields, event=event, at=_now())
-        with open(os.path.join(d, LOG_FILE), "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, sort_keys=True) + "\n")
+        path = os.path.join(d, LOG_FILE)
+        torn = False
+        try:
+            with open(path, "rb") as f:
+                if f.seek(0, os.SEEK_END):
+                    f.seek(-1, os.SEEK_END)
+                    torn = f.read(1) != b"\n"
+        except FileNotFoundError:
+            pass
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(("\n" if torn else "") + json.dumps(rec, sort_keys=True) + "\n")
             f.flush()
             os.fsync(f.fileno())
 
@@ -982,22 +992,38 @@ def policy_matches(item, policy):
 POLICY_BY = "policy:"  # the `by` of an autopick: policy:<registered sha256>
 
 
+_LOG_AT_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
+
+
+class LogUnreadable(Exception):
+    """The intake log has a line the daily count cannot trust."""
+
+
 def policy_picks_on(root, day):
     """How many picks the intake log records with a `policy:` by on the UTC date `day`
-    (YYYY-MM-DD). The daily maximum counts these, across runs and policy registrations. A
-    line that is not a JSON object is skipped."""
+    (YYYY-MM-DD). The daily maximum counts these, across runs and policy registrations.
+    It fails closed: a line that is not a JSON object with an `event`, or a `pick` line
+    without a string `by` and a UTC `at`, raises LogUnreadable, since a torn or edited
+    line could hide a pick and the count would let autopick pass the maximum."""
     path = os.path.join(_intake_dir(root), LOG_FILE)
+    rel = "%s/%s" % (INTAKE_DIR, LOG_FILE)
     n = 0
     try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
+        with open(path, "rb") as f:
+            for no, raw in enumerate(f, 1):
                 try:
-                    rec = json.loads(line)
+                    rec = json.loads(raw.decode("utf-8"))
                 except ValueError:
+                    raise LogUnreadable("%s line %d is not JSON" % (rel, no))
+                if not isinstance(rec, dict) or not isinstance(rec.get("event"), str):
+                    raise LogUnreadable("%s line %d is not an intake log record" % (rel, no))
+                if rec["event"] != "pick":
                     continue
-                if (isinstance(rec, dict) and rec.get("event") == "pick"
-                        and str(rec.get("by", "")).startswith(POLICY_BY)
-                        and str(rec.get("at", ""))[:10] == day):
+                by, at = rec.get("by"), rec.get("at")
+                if not (isinstance(by, str) and isinstance(at, str) and _LOG_AT_RE.match(at)):
+                    raise LogUnreadable("%s line %d is a pick without a valid by and at"
+                                        % (rel, no))
+                if by.startswith(POLICY_BY) and at[:10] == day:
                     n += 1
     except FileNotFoundError:
         pass
@@ -1025,7 +1051,13 @@ def cmd_autopick(a):
             for i in shown:
                 print("MATCH: %s %s %s %s" % (i["id"], _flag(i), _rank(i), code(i["title"])))
             day = _now()[:10]
-            done = policy_picks_on(a.root, day)
+            try:
+                done = policy_picks_on(a.root, day)
+            except LogUnreadable as e:
+                print("STOP: log-unreadable: %s; autopick cannot count today's picks" % e)
+                print("NEXT: the owner repairs the line, then runs intake autopick again")
+                print("AUTOPICK: matched %d picked 0" % len(shown))
+                return 2
             room = max(0, pol["max_picks_per_day"] - done)
             by = POLICY_BY + reg["sha256"]
             picked = 0

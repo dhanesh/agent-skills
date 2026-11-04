@@ -125,7 +125,8 @@ only when its source sees it again after the dismissal.
   by id), up to the policy's `max_picks_per_day` per UTC day, counted across runs. Each pick
   writes the same intake-item envelope as `pick` and prints its `NEXT:` line. The intake log
   records each pick with `by: policy:<sha256>`. A hand `pick` keeps its own name and does not
-  count toward the daily maximum.
+  count toward the daily maximum. A log line that `autopick` cannot count stops it with
+  `STOP: log-unreadable`, and it picks nothing. A log append first ends a torn last line.
 - **0.4.0.** `intake sweep`. A source in the config can list `sweep` entries: a format and an
   argv list. `intake sweep` runs each one with no shell and imports its output, the same way
   as `intake import`. A failed command prints a `PROBLEM:` line, and the others still run.
