@@ -39,7 +39,7 @@ pipeline grant (R13, shipped): with no live grant it runs no stage, prints
 stages for real, and runs derive grant for each plan that the plan stage hands on. The plan
 stage is not built yet, so it hands on no plan today. Before each stage that would start
 a plan or run, it checks the grant's caps (R15, shipped): at a cap it prints
-`STOP: cap <name>` and skips those stages. The idea follow-up, plan, build, release stage
+`STOP: cap <name>` and skips the stages that the cap gates. The idea follow-up, plan, build, release stage
 and digest stages report `pending-R<n>`. `pipeline schedule install` is not built yet. The
 design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R12 to R21) in the
 agent-skills repository.
@@ -79,16 +79,17 @@ on only when that answers VALID for the newest pipeline grant that no revision s
 and it prints `TICK: grant <id> expires_at <time>`. Derive grant then uses that grant id and
 no other. Options: `tick --grant <pipeline grant id or envelope path>` checks that grant
 instead of the newest, and `tick --growth-source <name>` names the intake source of growth
-signals (default `growth`). Before autopick, plan, derive grant and build, and before each
-plan after the first in derive grant, the tick checks the three caps against today's UTC
-counts: plans per day and open runs from spec-first-planning
+signals (default `growth`). Before autopick, plan and derive grant, and before each plan
+after the first in derive grant, the tick checks the three caps against today's UTC
+counts; before build, when it has grants to build, it checks only the dispatch cap,
+because a grant already derived was counted when it was derived. The counts are: plans per day and open runs from spec-first-planning
 `write_grant.py --pipeline-caps <grant> --root <repo>` (the counter `--under-pipeline`
 refuses with), and dispatches per day from the `dispatch` events in factory-conductor's
 `.skill-contract/runs/<run>/autonomy-log.jsonl` of each run under a derived grant. At a cap
 it prints `STOP: cap <name> count=<n> limit=<m> stage=<stage>`; when a source cannot be
 read it prints `STOP: cap uncounted source=<what> reason=<why>`. It appends the reason to
 `.skill-contract/pipeline/cap-stops.jsonl`, prints `STAGE: <name> skipped cap=<name>` for
-each later gated stage, still runs the stages that only read, sweep or report, and exits 0.
+each later stage that the same cap gates (a dispatches stop also skips build), still runs the stages that only read, sweep or report, and exits 0.
 `--skills-dir <dir>` (before `tick`, repeatable) makes the
 tick look for sibling skills only in that directory; it is for tests.
 

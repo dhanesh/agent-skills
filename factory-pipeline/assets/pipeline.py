@@ -39,9 +39,12 @@ per stage, optionally followed by a detail such as `exit=3` or `picked=2`:
   release-stage   not built yet (R19): `pending-R19`
   digest          not built yet (R21): `pending-R21`
 
-Before each stage that would start a new plan or run (autopick, plan, derive-grant and
-build), and before each plan after the first inside derive-grant, the tick checks the
-pipeline grant's caps (R15) against today's UTC counts:
+Before each stage that would start a new plan or run, the tick checks the pipeline
+grant's caps (R15) against today's UTC counts. Autopick, plan and derive-grant (and each
+plan after the first inside derive-grant) check all three caps: that is where a plan or
+an open run gets counted. Build checks only max_dispatches_per_day, and only when it has
+grants to build: a grant that derive-grant already derived was counted then, so building
+it starts no new counted plan or open run, but a build spends dispatches. The counts:
 
   max_plans_per_day, max_open_runs  spec-first-planning `write_grant.py --pipeline-caps
                    <grant> --root R`, the counter that `--under-pipeline` refuses with, so
@@ -55,11 +58,16 @@ stage=<stage>`. When a count cannot be made (the counter refused or is missing, 
 state.json or a derived run's dispatch log cannot be read), it fails closed and prints
 `STOP: cap uncounted source=<what> reason=<why> stage=<stage>`. Either way the tick
 appends one JSON line with the reason to .skill-contract/pipeline/cap-stops.jsonl, keeps
-it for the digest, and prints `STAGE: <name> skipped cap=<name>` for every later
-autopick, plan, derive-grant or build stage, so it starts no new plan or run. The stages
-that only read, sweep or report still run in their places: sweep, growth-review and
-idea-follow-up before the gates, and release-stage and digest after them. A cap stop is
-not an error: the tick still exits 0 and ends `TICK: done stages=9 cap=<name>`.
+it for the digest, and prints `STAGE: <name> skipped cap=<name>` for every later stage
+that the cap gates: a plans or open-runs stop skips autopick, plan and derive-grant, so
+no new plan starts, but the grants already derived still reach build; a dispatches stop
+also skips build; `uncounted` skips all four. A build that starts below the dispatch cap
+is not cut off by the tick: the conductor's own per-run max_dispatches budget bounds it,
+so one tick can pass the daily cap by at most that budget, and the next build (or the
+next tick) stops. The stages that only read, sweep or report still run in their places:
+sweep, growth-review and idea-follow-up before the gates, and release-stage and digest
+after them. A cap stop is not an error: the tick still exits 0 and ends
+`TICK: done stages=9 cap=<name>[,<name>]`.
 
 Result words: ok, attention (the tool exited 3, or some plans were refused), refused (the
 tool exited 2, or 1 for write_grant), failed (another exit, or the tool could not start),
@@ -101,9 +109,13 @@ CHECK_TIMEOUT = 120  # seconds; the checker reads local files and asks git
 # The pipeline lock (R14): one tick at a time per repository. Not ops-intake's lock file.
 PIPELINE_DIR = ".skill-contract/pipeline"
 LOCK_FILE = ".lock"
-# The caps (R15). GATED stages start a new plan or run, so a cap stop skips them.
-GATED = ("autopick", "plan", "derive-grant", "build")
+# The caps (R15). Each gated stage checks the caps that count what it starts. Building a
+# grant that derive-grant already derived (and counted) starts no new counted plan or open
+# run, so build checks only the dispatch cap.
 CAPS = ("max_plans_per_day", "max_open_runs", "max_dispatches_per_day")
+STAGE_CAPS = {"autopick": CAPS, "plan": CAPS, "derive-grant": CAPS,
+              "build": ("max_dispatches_per_day",)}
+GATED = tuple(STAGE_CAPS)
 CAP_STOPS = "cap-stops.jsonl"
 RUNS_DIR = ".skill-contract/runs"   # factory-conductor's run directories
 RUN_ID = re.compile(r"^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\Z")  # conductor's RUN_ID_RE
@@ -138,7 +150,7 @@ class Tick:
         self.plans = []     # task-plan envelopes the plan stage hands on (R17 fills it)
         self.grants = []    # (plan, derived grant) pairs for the build stage (R18)
         self.waiting = []   # (kind, what, next command) for the digest (R21)
-        self.capped = None  # the cap name once a cap stopped the tick (R15)
+        self.stops = []     # the caps that stopped this tick, in order (R15)
         self.gate = None    # run_tick sets it: gate(stage) -> cap name or None (R15)
 
 
@@ -450,9 +462,12 @@ def _count(v):
 
 def dispatches_today(root, derived, date):
     """The `dispatch` events dated `date` (UTC, YYYY-MM-DD) in the autonomy logs of the runs
-    whose grant is one of `derived`. A run directory with no state.json yet is not a run
-    (factory-conductor's current_run skips it too). Raises Uncounted on a state.json or a
-    derived run's log that cannot be read, or on a log line that is not a JSON object."""
+    whose grant is one of `derived`. A run directory with neither state.json nor a log is
+    a run that factory-conductor is still creating (it writes state.json, then the log), so
+    it is skipped. Raises Uncounted on a run directory with a log but no state.json (its
+    dispatches cannot be tied to a grant), on a state.json or a derived run's log that
+    cannot be read, and on a log line that is not a JSON object. A derived run with no log
+    yet counts 0 only while its state.json says it has made no dispatch."""
     base = os.path.join(root, *RUNS_DIR.split("/"))
     try:
         names = sorted(n for n in os.listdir(base) if RUN_ID.match(n))
@@ -464,19 +479,25 @@ def dispatches_today(root, derived, date):
     for name in names:
         rel = "%s/%s" % (RUNS_DIR, name)
         state = os.path.join(base, name, RUN_STATE)
+        log = os.path.join(base, name, RUN_LOG)
         if not os.path.lexists(state):
+            if os.path.lexists(log):
+                raise Uncounted("%s/%s" % (rel, RUN_STATE), "missing")
             continue
         try:
             with open(state, "rb") as f:
-                gid = json.loads(f.read().decode("utf-8")).get("grant_id")
+                data = json.loads(f.read().decode("utf-8"))
+            gid = data.get("grant_id")
         except (OSError, ValueError, AttributeError):
             raise Uncounted("%s/%s" % (rel, RUN_STATE), "unreadable")
         if gid not in derived:
             continue
         try:
-            with open(os.path.join(base, name, RUN_LOG), "rb") as f:
+            with open(log, "rb") as f:
                 lines = f.read().decode("utf-8").splitlines()
         except FileNotFoundError:
+            if data.get("dispatches") == 0:
+                continue  # state.json saved, `init` not logged yet: no dispatch so far
             raise Uncounted("%s/%s" % (rel, RUN_LOG), "missing")
         except (OSError, ValueError):
             raise Uncounted("%s/%s" % (rel, RUN_LOG), "unreadable")
@@ -496,18 +517,25 @@ def dispatches_today(root, derived, date):
     return total
 
 
+def blocked_by(tick, stage):
+    """The earlier stop of this tick that also gates `stage`, or None."""
+    return next((c for c in tick.stops if c == "uncounted" or c in STAGE_CAPS[stage]), None)
+
+
 def cap_gate(tick, stage):
-    """Check the caps before `stage` starts a new plan or run. Return the name of the cap
-    that stops the tick (or `uncounted`), or None when every count is under its cap. The
-    first stop prints `STOP: cap ...`, records why and holds for the rest of the tick."""
-    if tick.capped:
-        return tick.capped
+    """Check the caps of STAGE_CAPS[stage] before `stage` starts a new plan or run. Return
+    the name of the cap that stops it (or `uncounted`), or None when every count is under
+    its cap. A stop prints `STOP: cap ...`, records why and holds for the rest of the tick
+    for every stage that the same cap gates."""
+    hit = blocked_by(tick, stage)
+    if hit:
+        return hit
     try:
         counts = count_caps(tick)
     except Uncounted as e:
         source, reason = e.args
         return cap_stop(tick, stage, "uncounted", {"source": source, "reason": reason})
-    for cap in CAPS:
+    for cap in STAGE_CAPS[stage]:
         count, limit = counts[cap]
         if count >= limit:
             return cap_stop(tick, stage, cap, {"count": count, "limit": limit})
@@ -515,7 +543,7 @@ def cap_gate(tick, stage):
 
 
 def cap_stop(tick, stage, cap, facts):
-    tick.capped = cap
+    tick.stops.append(cap)
     detail = " ".join("%s=%s" % (k, facts[k]) for k in facts)
     print("STOP: cap %s %s stage=%s" % (cap, detail, stage))
     sys.stdout.flush()
@@ -633,17 +661,26 @@ def run_tick(a):
         return 2
     tick.grant = gid
     print("TICK: grant %s expires_at %s" % (gid, tick.grant_expires))
-    # R15: a cap checks before each stage that starts a new plan or run (GATED), and
-    # derive-grant asks again between plans through tick.gate. Once a cap stops the tick,
-    # the GATED stages are skipped; the stages that only read, sweep or report still run.
+    # R15: a cap checks before each stage that starts a new plan or run (STAGE_CAPS), and
+    # derive-grant asks again between plans through tick.gate (R18's build will ask before
+    # each conductor run after the first). A stopped stage is skipped; the stages that only
+    # read, sweep or report still run. Build is checked only when it has grants to build.
     tick.gate = lambda stage: cap_gate(tick, stage)
     ran = 0
     for name, fn in STAGES:
-        if name in GATED and (tick.capped or cap_gate(tick, name)):
-            print("STAGE: %s skipped cap=%s" % (name, tick.capped))
-            sys.stdout.flush()
-            ran += 1
-            continue
+        if name in STAGE_CAPS:
+            hit = blocked_by(tick, name)
+            if hit is None and (name != "build" or tick.grants):
+                hit = cap_gate(tick, name)
+            if hit:
+                if name == "build":
+                    for plan, grant in tick.grants:
+                        tick.waiting.append(("cap", grant, "build waits for %s to fall "
+                                             "below its cap" % hit))
+                print("STAGE: %s skipped cap=%s" % (name, hit))
+                sys.stdout.flush()
+                ran += 1
+                continue
         try:
             word, detail = fn(tick)
         except Exception as e:  # one broken stage reports and the tick goes on
@@ -653,7 +690,7 @@ def run_tick(a):
         sys.stdout.flush()
         ran += 1
     print("TICK: done %s" % join("stages=%d" % ran,
-                                 "cap=%s" % tick.capped if tick.capped else ""))
+                                 "cap=%s" % ",".join(tick.stops) if tick.stops else ""))
     return 0
 
 

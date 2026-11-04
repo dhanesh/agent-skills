@@ -19,13 +19,14 @@ What runs today:
   `contract_check.py check-pipeline-grant` (R13). With no live grant (none, revoked,
   expired, stale or tracked by git), it runs no stage, prints
   `STOP: no-grant reason=<reason>` and exits 2.
-- Before each stage that would start a plan or run (autopick, plan, derive grant and
-  build), the tick checks the pipeline grant's caps against today's UTC counts (R15). The
+- Before autopick, plan and derive grant, the tick checks the pipeline grant's caps
+  against today's UTC counts (R15). Before build, it checks only the dispatch cap, so a
+  grant that it already derived is never blocked by its own count. The
   caps are `max_plans_per_day`, `max_open_runs` and `max_dispatches_per_day`. Plans and
   open runs are counted by spec-first-planning `write_grant.py --pipeline-caps`, the same
   counter that refuses a derivation. Dispatches are counted from factory-conductor's run
   logs. At a cap, the tick prints `STOP: cap <name>`, records why in
-  `.skill-contract/pipeline/cap-stops.jsonl` and skips those stages. A count that it cannot
+  `.skill-contract/pipeline/cap-stops.jsonl` and skips the stages that the cap gates. A count that it cannot
   make is also a stop. The stages that only read, sweep or report still run.
 - `sweep` runs ops-intake `intake sweep`.
 - `growth-review` runs growth-review `growth auto` and imports its breaches with ops-intake

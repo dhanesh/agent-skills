@@ -15,15 +15,17 @@ standing pipeline grant with spec-first-planning's `contract_check.py check-pipe
 exits 2. It runs the factory stages in this
 order: sweep, growth review, idea follow-up, autopick, plan, derive grant, build, release
 stage and digest. It prints one `STAGE: <name> <result>` line per stage and exits 0 when
-every stage ran. Before each stage that would start a new plan or run (autopick, plan,
-derive grant and build), and between plans in derive grant, it checks the pipeline
-grant's caps against today's UTC counts (R15). spec-first-planning
+every stage ran. Before autopick, plan and derive grant, and between plans in derive
+grant, it checks the pipeline grant's three caps against today's UTC counts (R15). Before
+build, when it has grants to build, it checks only `max_dispatches_per_day`: a grant that
+derive grant already derived was counted then, so building it starts no new counted plan
+or open run. spec-first-planning
 `write_grant.py --pipeline-caps` counts plans and open runs with the same counter that
 `--under-pipeline` refuses with. The tick counts today's `dispatch` events in the
 `autonomy-log.jsonl` of each factory-conductor run whose grant derives from the pipeline
 grant. At a cap it prints `STOP: cap <name> count=<n> limit=<m> stage=<stage>`, appends
-the reason to `.skill-contract/pipeline/cap-stops.jsonl`, and skips every later gated
-stage. A count source that it cannot read gives `STOP: cap uncounted source=<what>
+the reason to `.skill-contract/pipeline/cap-stops.jsonl`, and skips every later stage
+that the same cap gates. A count source that it cannot read gives `STOP: cap uncounted source=<what>
 reason=<why>`, never a zero. Sweep, growth review and autopick call ops-intake and growth-review for
 real. Derive grant calls spec-first-planning `write_grant.py --under-pipeline` for each plan
 that the plan stage hands on. The other five stages print `pending-R<n>`. The design is
@@ -55,8 +57,9 @@ Shipped:
   whole tick and is released when its holder exits or is killed.
 - The caps (R15): when a cap is reached, `STOP: cap <name>` (for example
   `STOP: cap max_plans_per_day`), one record in `cap-stops.jsonl`, and every later
-  autopick, plan, derive-grant and build stage says `skipped cap=<name>`. No new plan or
-  run starts after it. Sweep, growth review and idea follow-up run before the gates;
+  autopick, plan and derive-grant stage says `skipped cap=<name>`, so no new plan starts.
+  The grants derived before the stop still reach build. A dispatches cap also skips build,
+  and `uncounted` skips all four. Sweep, growth review and idea follow-up run before the gates;
   release stage and digest still run after them. The tick exits 0 and ends
   `TICK: done stages=9 cap=<name>`.
 
@@ -107,11 +110,12 @@ python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-revok
   `plan pending-R17 picked=1`, `derive-grant idle plans=0`, `build pending-R18 grants=0`,
   `release-stage pending-R19`, `digest pending-R21 waiting=0`. The last line is
   `TICK: done stages=9`.
-- `pt-calls.jsonl`: eight lines, in order: ops-intake `sweep`, growth-review `auto`,
+- `pt-calls.jsonl`: seven lines, in order: ops-intake `sweep`, growth-review `auto`,
   ops-intake `import` (its `stdin` is the growth signal line, and its argv holds
   `--format intake-signals-jsonl --source growth -`), spec-first-planning
-  `pipeline-caps`, ops-intake `autopick`, then spec-first-planning `pipeline-caps` three
-  times (one cap check before each of autopick, plan, derive-grant and build).
+  `pipeline-caps`, ops-intake `autopick`, then spec-first-planning `pipeline-caps` twice
+  (one cap check before each of autopick, plan and derive-grant; build has no grant to
+  build, so it checks nothing).
 - `pt-missing`: exit 0, nine `STAGE:` lines, and `STAGE: growth-review unavailable growth-review`.
 - `revoke-grant` (the kill switch) prints one `REVOKED: <id>` line and exits 0.
 - `pt-revoked`: exit 2, `STOP: no-grant reason=revoked`, and no `STAGE:` line.
@@ -162,7 +166,8 @@ cp "$CR/repo/.skill-contract/pipeline/cap-stops.jsonl" "$WT/.verify-run/$INSTANC
 - `derived` prints `DERIVED: <path>` (the testkit grant has `max_open_runs` 1).
 - `pt-cap`: exit 0. The output holds
   `STOP: cap max_open_runs count=1 limit=1 stage=autopick` before the `STAGE: autopick`
-  line. `autopick`, `plan`, `derive-grant` and `build` each say `skipped cap=max_open_runs`.
+  line. `autopick`, `plan` and `derive-grant` each say `skipped cap=max_open_runs`, and
+  `build` says `pending-R18 grants=0` (that cap does not gate build).
   `sweep` and `growth-review` say `ok`, and `release-stage` and `digest` say `pending-R<n>`.
   The last line is `TICK: done stages=9 cap=max_open_runs`.
 - `pt-cap-calls.jsonl` holds no ops-intake `autopick` line and no `under-pipeline` line.

@@ -11,7 +11,8 @@ that is not built yet says `pending-R<n>`, never `ok`, and a missing skill says
 `unavailable` instead of crashing the tick. The promise of R13: with no live pipeline
 grant (none, or revoked), the tick runs no stage, prints `STOP: no-grant`, and exits 2.
 The promise of R15: with an open run at max_open_runs 1, the tick prints `STOP: cap
-max_open_runs`, skips every stage that would start a plan or run, and still runs the rest.
+max_open_runs`, skips autopick, plan and derive-grant (no new plan starts), does not
+gate build on that cap, and still runs the rest.
 The harness builds stub skills with assets/pipeline_testkit.py in a tempdir, writes a real
 pipeline grant into the fixture repo with the testkit, runs the shipped
 assets/pipeline.py against them, and a model-free grader checks the transcript. The docs check keeps every path the
@@ -20,7 +21,7 @@ docs name real, and keeps the old skeleton line out.
 Negative fixtures feed the grader known-bad transcripts (order swapped, a stage missing,
 a fake `ok` for an unbuilt stage, a non-zero exit, a no-grant tick that ran a stage or
 exited 0, a cap stop with no STOP line, a stage that ran after a cap stop, a reporting
-stage skipped by a cap) and a docs copy that names a missing
+stage skipped by a cap, a build skipped by an open-runs cap) and a docs copy that names a missing
 script, and require the grader to reject each one.
 """
 import os
@@ -111,13 +112,15 @@ def tick_errors(stdout, code, missing=()):
     return errors
 
 
-GATED = ("autopick", "plan", "derive-grant", "build")
+GATED = ("autopick", "plan", "derive-grant")  # what a plans or open-runs cap skips
 
 
 def cap_errors(stdout, code, cap):
-    """Model-free grader for a tick that a cap stops before autopick (R15): exit 0, one
-    `STOP: cap <cap>` line before the autopick line, every stage that starts a plan or run
-    skipped, and the stages that only read, sweep or report still in their places."""
+    """Model-free grader for a tick that a plans or open-runs cap stops before autopick
+    (R15): exit 0, one `STOP: cap <cap>` line before the autopick line, autopick, plan and
+    derive-grant skipped, build not skipped (it checks only the dispatch cap, so a grant
+    already derived is never blocked by its own count), and the stages that only read,
+    sweep or report still in their places."""
     errors = []
     if code != 0:
         errors.append("exit %s, want 0" % code)
@@ -135,6 +138,9 @@ def cap_errors(stdout, code, cap):
                 errors.append("%s says %s after a cap stop" % (s[0], " ".join(s[1:])))
             if stops and i < stops[0]:
                 errors.append("%s ran before the STOP line" % s[0])
+        elif s[0] == "build" and s[1:2] != ["pending-R18"]:
+            errors.append("build says %s, but a plans or open-runs cap does not gate it"
+                          % " ".join(s[1:]))
         elif len(s) > 1 and s[1] == "skipped":
             errors.append("%s was skipped, but it starts no plan or run" % s[0])
     return errors
@@ -284,7 +290,8 @@ def main():
             ["STAGE: sweep ok", "STAGE: growth-review ok", "STAGE: idea-follow-up pending-R20",
              "STOP: cap max_open_runs count=1 limit=1 stage=autopick"]
             + ["STAGE: %s skipped cap=max_open_runs" % s for s in GATED]
-            + ["STAGE: release-stage pending-R19", "STAGE: digest pending-R21"])
+            + ["STAGE: build pending-R18 grants=0", "STAGE: release-stage pending-R19",
+               "STAGE: digest pending-R21"])
         for label, out, want in (
             ("cap-no-stop-line", capped.replace("STOP: cap", "NOTE: cap"), "0 STOP"),
             ("cap-autopick-ran", capped.replace("autopick skipped cap=max_open_runs",
@@ -292,6 +299,9 @@ def main():
             ("cap-digest-skipped", capped.replace("digest pending-R21",
                                                   "digest skipped cap=max_open_runs"),
              "digest was skipped"),
+            ("cap-build-deadlock", capped.replace("build pending-R18 grants=0",
+                                                  "build skipped cap=max_open_runs"),
+             "does not gate it"),
         ):
             bad = cap_errors(out, 0, "max_open_runs")
             check("grader rejects negative fixture %s" % label,

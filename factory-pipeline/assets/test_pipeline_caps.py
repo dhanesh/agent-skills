@@ -2,8 +2,10 @@
 """`pipeline tick` caps (R15): when a pipeline-grant cap is reached, the tick prints
 `STOP: cap <name>`, records why, and starts no new plan or run after it. With
 max_plans_per_day 1 and two picked items, the tick derives one plan's grant, prints
-`STOP: cap max_plans_per_day` and starts no second plan. max_open_runs and
-max_dispatches_per_day stop it the same way, and a count source it cannot read is a stop
+`STOP: cap max_plans_per_day` and starts no second plan, while the grant it derived still
+reaches the build hand-off. max_open_runs and max_dispatches_per_day stop it the same way
+(build checks only the dispatch cap: building a grant that was already derived starts no
+new counted plan or open run), and a count source it cannot read is a stop
 (`STOP: cap uncounted`), never a zero.
 
 The plan stage is R17 and not built yet. These tests put a stand-in plan stage into the
@@ -34,7 +36,9 @@ RUN_RESULT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/run-re
 TWO_PICKS = ("NEXT: run spec-first-planning with .skill-contract/intake/envelopes/item-1.json\n"
              "NEXT: run spec-first-planning with .skill-contract/intake/envelopes/item-2.json\n"
              "AUTOPICK: matched 2 picked 2\n")
-GATED = ("autopick", "plan", "derive-grant", "build")
+PLANNING = ("autopick", "plan", "derive-grant")
+ONE_PICK = ("NEXT: run spec-first-planning with .skill-contract/intake/envelopes/item-1.json\n"
+            "AUTOPICK: matched 1 picked 1\n")
 
 
 def utc(days=0):
@@ -91,12 +95,23 @@ class CapFixture(unittest.TestCase):
         K.write_rel(self.repo, ".skill-contract/envelopes/run-result-v1-%s.json" % gid[-6:],
                     json.dumps(st))
 
-    def assertStoppedBeforeAutopick(self, text, res, cap):
+    def derive_writes_a_grant(self):
+        rel, text = K.derived_grant(self.pid)
+        K.behave(self.skills, "spec-first-planning", "under-pipeline",
+                 stdout="GRANT: %s\n" % rel, write={rel: text})
+
+    def assertStoppedBeforeAutopick(self, text, res, cap, since=0):
         self.assertIn("STOP: cap %s " % cap, text)
-        for stage in GATED:
+        for stage in PLANNING:
             self.assertEqual(res[stage], ["skipped", "cap=%s" % cap], stage)
-        self.assertEqual(self.keys("autopick"), [])
-        self.assertEqual(self.keys("under-pipeline"), [])
+        # Build checks only the dispatch cap, and only when it has grants to build.
+        if cap in ("max_dispatches_per_day", "uncounted"):
+            self.assertEqual(res["build"], ["skipped", "cap=%s" % cap])
+        else:
+            self.assertEqual(res["build"], ["pending-R18", "grants=0"])
+        new = [c["key"] for c in K.calls(self.skills)[since:]]
+        self.assertNotIn("autopick", new)
+        self.assertNotIn("under-pipeline", new)
         # The stages that only read, sweep or report still run, in their places.
         self.assertEqual(res["sweep"][0], "ok")
         self.assertEqual(res["growth-review"][0], "ok")
@@ -111,9 +126,7 @@ class TestMaxPlansPerDay(CapFixture):
     def setUp(self):
         super().setUp()
         K.behave(self.skills, "ops-intake", "autopick", stdout=TWO_PICKS)
-        rel, text = K.derived_grant(self.pid)
-        K.behave(self.skills, "spec-first-planning", "under-pipeline",
-                 stdout="GRANT: %s\n" % rel, write={rel: text})
+        self.derive_writes_a_grant()
 
     def test_two_picks_plan_one_then_stop(self):
         code, text, res = self.tick()
@@ -126,17 +139,19 @@ class TestMaxPlansPerDay(CapFixture):
         self.assertIn("STOP: cap max_plans_per_day count=1 limit=1 stage=derive-grant", text)
         self.assertEqual(res["derive-grant"],
                          ["ok", "derived=1", "refused=0", "cap=max_plans_per_day"])
-        self.assertEqual(res["build"], ["skipped", "cap=max_plans_per_day"])
+        # The one plan the cap allowed reaches the build hand-off: no deadlock.
+        self.assertEqual(res["build"], ["pending-R18", "grants=1"])
         self.assertEqual(res["digest"][0], "pending-R21")
+        self.assertEqual(text.count("STOP: cap"), 1)
         rec = self.stops()
         self.assertEqual([(r["cap"], r["count"], r["limit"], r["stage"], r["grant"])
                           for r in rec],
                          [("max_plans_per_day", 1, 1, "derive-grant", self.pid)])
-        # The STOP line comes before any later gated stage's line.
+        # The STOP line comes before the derive-grant line that reports it.
         lines = text.splitlines()
         stop = next(i for i, ln in enumerate(lines) if ln.startswith("STOP: cap"))
-        build = next(i for i, ln in enumerate(lines) if ln.startswith("STAGE: build"))
-        self.assertLess(stop, build)
+        derive = next(i for i, ln in enumerate(lines) if ln.startswith("STAGE: derive-grant"))
+        self.assertLess(stop, derive)
 
     def test_next_tick_the_same_day_starts_nothing(self):
         self.tick()
@@ -167,6 +182,20 @@ class TestMaxOpenRuns(CapFixture):
         self.assertStoppedBeforeAutopick(text, res, "max_open_runs")
         self.assertEqual(self.stops()[0]["cap"], "max_open_runs")
 
+    def test_one_item_reaches_build_then_next_tick_stops(self):
+        K.behave(self.skills, "ops-intake", "autopick", stdout=ONE_PICK)
+        self.derive_writes_a_grant()
+        code, text, res = self.tick()
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("STOP:", text)  # the derived grant is not blocked by its own count
+        self.assertEqual(res["derive-grant"], ["ok", "derived=1", "refused=0"])
+        self.assertEqual(res["build"], ["pending-R18", "grants=1"])
+        before = len(K.calls(self.skills))
+        code, text, res = self.tick()
+        self.assertEqual(code, 0, text)
+        self.assertIn("STOP: cap max_open_runs count=1 limit=1 stage=autopick", text)
+        self.assertStoppedBeforeAutopick(text, res, "max_open_runs", since=before)
+
     def test_run_result_closes_the_run(self):
         self.close_run(self.derived(at=utc(-1)))
         code, text, res = self.tick()
@@ -185,6 +214,22 @@ class TestMaxDispatchesPerDay(CapFixture):
         self.assertEqual(code, 0, text)
         self.assertIn("STOP: cap max_dispatches_per_day count=2 limit=2 stage=autopick", text)
         self.assertStoppedBeforeAutopick(text, res, "max_dispatches_per_day")
+
+    def test_dispatch_cap_skips_build_of_a_derived_grant(self):
+        gid = self.derived(at=utc(-1), n=7)
+        self.close_run(gid)
+        K.conductor_run(self.repo, gid, dispatch_at=[utc()])
+        K.behave(self.skills, "ops-intake", "autopick", stdout=ONE_PICK)
+        self.derive_writes_a_grant()
+        # One dispatch so far, cap 2: planning runs, then the build check sees 1 < 2.
+        code, text, res = self.tick()
+        self.assertNotIn("STOP:", text)
+        self.assertEqual(res["build"], ["pending-R18", "grants=1"])
+        K.conductor_run(self.repo, gid, dispatch_at=[utc(), utc()], n=2)
+        before = len(K.calls(self.skills))
+        code, text, res = self.tick()
+        self.assertIn("STOP: cap max_dispatches_per_day count=3 limit=2 stage=autopick", text)
+        self.assertStoppedBeforeAutopick(text, res, "max_dispatches_per_day", since=before)
 
     def test_other_runs_and_other_days_do_not_count(self):
         gid = self.derived(at=utc(-1))
@@ -222,12 +267,31 @@ class TestUncounted(CapFixture):
         gid = self.derived(at=utc(-1))
         d = K.conductor_run(self.repo, gid)
         os.unlink(os.path.join(d, "autonomy-log.jsonl"))
+        with open(os.path.join(d, "state.json"), "w", encoding="utf-8") as f:
+            json.dump({"grant_id": gid, "dispatches": 2}, f)
         self.assertUncounted(self.run_rel() + "/autonomy-log.jsonl", "missing")
 
     def test_dispatch_with_no_time(self):
         gid = self.derived(at=utc(-1))
         K.conductor_run(self.repo, gid, log='{"event": "dispatch", "task": "T1"}\n')
         self.assertUncounted(self.run_rel() + "/autonomy-log.jsonl:1", "no-time")
+
+    def test_run_dir_with_a_log_but_no_state(self):
+        d = K.conductor_run(self.repo, "autonomy-grant-v1-20261101T000000Z-aaaaaa")
+        os.unlink(os.path.join(d, "state.json"))
+        self.assertUncounted(self.run_rel() + "/state.json", "missing")
+
+    def test_run_still_being_created_is_skipped(self):
+        os.makedirs(os.path.join(self.repo, *self.run_rel().split("/")))
+        code, text, res = self.tick()
+        self.assertNotIn("STOP:", text)
+
+    def test_derived_run_before_its_first_log_line_counts_zero(self):
+        gid = self.derived(at=utc(-1))
+        d = K.conductor_run(self.repo, gid)
+        os.unlink(os.path.join(d, "autonomy-log.jsonl"))  # state.json says dispatches 0
+        code, text, res = self.tick()
+        self.assertNotIn("STOP:", text)
 
     def test_unreadable_run_state(self):
         d = K.conductor_run(self.repo, "autonomy-grant-v1-20261101T000000Z-aaaaaa")

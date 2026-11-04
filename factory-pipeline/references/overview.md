@@ -91,9 +91,13 @@ per UTC calendar day:
 refuses a derivation past a cap. The tick and the derivation thus never disagree.
 
 Four stages can start a new plan or run: `autopick`, `plan`, `derive-grant` and `build`.
-The tick checks all three caps before each of these stages. In `derive-grant` it checks
-them again before each plan after the first, because the grant it just derived can reach
-a cap. The other stages only read, sweep or report. They run in this order, with or
+The tick checks all three caps before `autopick`, `plan` and `derive-grant`, because that
+is where a plan or an open run gets counted. In `derive-grant` it checks them again before
+each plan after the first, because the grant it just derived can reach a cap. Before
+`build`, and only when there are grants to build, it checks only
+`max_dispatches_per_day`. A grant that `derive-grant` already derived was counted then,
+so building it starts no new counted plan or open run. If build were gated on those caps,
+the grant would never run, never get a run result, and stay open for ever. The other stages only read, sweep or report. They run in this order, with or
 without a cap stop: `sweep`, `growth-review` and `idea-follow-up` before the gates, and
 `release-stage` and `digest` after them.
 
@@ -102,18 +106,28 @@ When a count is equal to or more than its cap, the tick:
 1. prints `STOP: cap <name> count=<n> limit=<m> stage=<stage>`;
 2. appends one JSON line with the same facts to `.skill-contract/pipeline/cap-stops.jsonl`
    (git-ignored), and keeps the stop for the digest;
-3. prints `STAGE: <name> skipped cap=<name>` for each later gated stage, so it starts no
-   new plan or run;
-4. runs the stages that only read, sweep or report, and ends `TICK: done stages=9 cap=<name>`
-   with exit 0.
+3. prints `STAGE: <name> skipped cap=<name>` for each later stage that the same cap
+   gates. A plans or open-runs stop skips `autopick`, `plan` and `derive-grant`, so no new
+   plan starts, and the grants already derived still reach `build`. A dispatches stop
+   also skips `build`. An `uncounted` stop skips all four;
+4. runs the stages that only read, sweep or report, and ends
+   `TICK: done stages=9 cap=<name>[,<name>]` with exit 0.
+
+The tick checks the dispatch cap before a build starts. It does not stop a build that is
+already running. A build that starts below the cap can thus pass it: factory-conductor's
+own per-run `max_dispatches` budget bounds that run. So one tick passes the daily cap by
+at most that budget, and the next build, or the next tick, stops.
 
 A count that the tick cannot make is a stop, not a zero. The tick prints
 `STOP: cap uncounted source=<what> reason=<why> stage=<stage>` when:
 
 - `--pipeline-caps` refuses (for example, an envelope it cannot read), fails or is not
   installed (`source=write_grant`);
-- a run's `state.json` cannot be read (`reason=unreadable`);
-- a derived run's `autonomy-log.jsonl` is missing or cannot be read, has a line that is
+- a run's `state.json` cannot be read (`reason=unreadable`), or a run directory has an
+  `autonomy-log.jsonl` but no `state.json` (`reason=missing`). A run directory with
+  neither file is a run that factory-conductor is still making, and the tick skips it;
+- a derived run's `autonomy-log.jsonl` is missing while its `state.json` shows
+  dispatches, or the log cannot be read, has a line that is
   not a JSON object (`reason=not-json`), or has a `dispatch` event with no time
   (`reason=no-time`).
 
