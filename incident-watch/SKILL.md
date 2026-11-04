@@ -6,8 +6,8 @@ description: >-
   (incident.py, stdlib) loads the release recipe with release-conductor's own loader, runs
   only its read-only `health`, `version_probe` and `prod_smoke` commands (argv lists, no
   shell, a timeout each), records each result in a git-ignored state directory and prints
-  one `PROBE:` line per command and a `PROBE_RESULT:` summary. Partly built: refusing other
-  commands, opening an incident record after 2 or more consecutive failed probes, the
+  one `PROBE:` line per command and a `PROBE_RESULT:` summary. Any other command is refused
+  with exit 2 and nothing runs. Partly built: opening an incident record after 2 or more consecutive failed probes, the
   `incident` signal for ops-intake, the rollback command shown word for word and
   `incident close` are not built yet. It never runs a rollback or deploy: the owner
   mitigates. Not for a post-mortem (use bug-autopsy), not for a deploy or rollback (use
@@ -29,8 +29,9 @@ mitigates (spec decision D1). A probe runs only the commands the release recipe 
 read-only: `health`, `version_probe` and each `prod_smoke` entry (spec constraint S4).
 
 **Status: partly built.** `incident probe` ships (R22): it runs the three read-only lists,
-records each result and prints one line per command. Not built yet: refusing a requested
-command outside the three lists with exit 2 (R23), opening one incident record and writing
+records each result and prints one line per command. It refuses, with exit 2 and before
+anything runs, any requested command outside the three lists (R23). Not built yet: opening
+one incident record and writing
 an `incident` signal into ops-intake after 2 or more consecutive failed probes (R24), the
 record's rollback command shown word for word (R25), and `incident close --by <name>`
 (R26). The probe already keeps the consecutive-failure count, but today nothing opens a
@@ -68,7 +69,11 @@ and its checks are release-conductor's (its release protocol reference describes
 `{env}` in a probe command is release-conductor's production value. Pass
 `--version <v>` and `--commit <sha>` when a probe command carries `{version}` or
 `{commit}`; without them the probe refuses and runs nothing. `--timeout <seconds>` sets the
-limit per command (default 60). `--skills-dir <dir>` (before `probe`, repeatable) makes the
+limit per command (default 60). `--only <list>` (repeatable) runs only that list; the name
+is exactly `health`, `version_probe` or `prod_smoke`. Any other name (`rollback`,
+`deploy_prod`, a path, a command), any extra argument after `probe`, and any probe entry
+whose program word holds a `{token}` exit 2 with `PROBE: refused: <reason>`, and nothing
+runs, not even the allowed lists (R23). `--skills-dir <dir>` (before `probe`, repeatable) makes the
 tool look for release-conductor only in that directory; it is for tests.
 
 ## When to use
@@ -85,7 +90,8 @@ is `ops-intake`.
 1. **Run one probe.** Run `python3 "$SKILL_DIR/assets/incident.py" --root <repo> probe`.
    Exit 2 with `PROBE: refused: <reason>` means nothing ran: report the reason (no
    release-conductor, an invalid or missing recipe, a missing `--version` or `--commit`, a
-   state directory that is not git-ignored).
+   state directory that is not git-ignored, a name or argument outside the three probe
+   lists).
 2. **Read each PROBE: line.** There is one per command, in order: `health`,
    `version_probe`, then `prod_smoke[0]` and on. The word is `pass`, `fail` or `timeout`,
    with the exit code. The last line is

@@ -15,6 +15,8 @@ local stub scripts (no real endpoint), and checks:
     one recorded pass, no incident record, the state directory git-ignored;
   - a failing health stub: exit 3, the failure recorded and counted;
   - in both, no non-probe stub (build, deploy, rollback, staging check) was called;
+  - R23: `probe --only rollback` and `probe rollback` exit 2 with `PROBE: refused:` and
+    call no stub at all, not even the allowed ones;
   - SKILL.md and README.md say "partly built", not the old skeleton line, and every
     skill-relative path they name exists.
 
@@ -100,10 +102,22 @@ def doc_errors(skill_dir):
     return errors
 
 
-def run_probe(root):
+def run_probe(root, *extra):
     cp = subprocess.run([sys.executable, TOOL, "--root", root, "--skills-dir", SKILLS_ROOT,
-                         "probe"], capture_output=True, text=True, timeout=60)
+                         "probe"] + list(extra), capture_output=True, text=True, timeout=60)
     return cp.returncode, cp.stdout
+
+
+def grade_refusal(root, rc, out):
+    """Model-free grader for one R23 refusal: exit 2, one refusal line, no stub call."""
+    errors = []
+    if rc != 2:
+        errors.append("exit %s, not 2" % rc)
+    if not out.startswith("PROBE: refused: "):
+        errors.append("no PROBE: refused: line")
+    if kit.calls(root):
+        errors.append("a command ran: %s" % kit.calls(root))
+    return errors
 
 
 def grade_probe(root, rc, out, expect):
@@ -174,7 +188,18 @@ def main():
         check("failing health: failure recorded, nothing else run", not errs,
               "; ".join(errs)[:120])
 
+        ref = kit.fixture(os.path.join(tmp, "refuse"))
+        errs = []
+        for extra in (["--only", "rollback"], ["rollback"], ["--only", "health",
+                                                             "--only", "deploy_prod"]):
+            rrc, rout = run_probe(ref, *extra)
+            errs += grade_refusal(ref, rrc, rout)
+        check("unlisted command: refused with exit 2, nothing run (R23)", not errs,
+              "; ".join(errs)[:120])
+
         # Negative fixtures: each must be rejected.
+        check("grader rejects negative fixture refusal-that-ran-a-command",
+              grade_refusal(good, 2, "PROBE: refused: x\n"))
         check("grader rejects negative fixture failing-run-as-pass",
               grade_probe(bad, brc, bout, "pass"))
         no_summary = "\n".join(ln for ln in out.splitlines()

@@ -1,7 +1,7 @@
 # incident-watch
 
 **Status: partly built.** `incident probe` ships. The incident record, the `incident`
-signal, the refusal of other commands and `incident close` are not built yet.
+signal and `incident close` are not built yet.
 
 This skill finds and triages live incidents for the software factory. The factory
 detects, and the owner fixes (decision D1).
@@ -15,10 +15,13 @@ What ships now:
   output) in `.skill-contract/incidents/`, which is git-ignored. It prints one `PROBE:`
   line per command and one `PROBE_RESULT:` line. It also counts the consecutive failed
   probes.
+- The probe refuses any command that is not in the three lists, with exit 2, and then
+  runs nothing (R23). `--only health|version_probe|prod_smoke` runs one list. Any other
+  name, an extra argument after `probe`, or a probe entry whose program word holds a
+  `{token}` is refused.
 
 What is pending:
 
-- Refuse any command that is not in the three lists, with exit 2 (R23).
 - After 2 or more consecutive failed probes, open one incident record with evidence and
   write one `incident` signal into ops-intake (R24).
 - Show the recipe's rollback command word for word in the record (R25).
