@@ -27,7 +27,7 @@ import adapters
 import contract_check as CC  # the vendored skill-contract checker, same dir
 
 SKILL_NAME = "ops-intake"
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 _KIND_BASE = "https://github.com/dhanesh/agent-skills/skill-contract/"
 INTAKE_ITEM_KIND = _KIND_BASE + "intake-item/v1"
 PLAN_KIND = _KIND_BASE + "task-plan/v1"
@@ -375,13 +375,22 @@ _RUN_RE = re.compile(r"^[0-9]{1,20}\Z")
 _ITEM_ID_RE = re.compile(r"^I[0-9a-f]{10}\Z")
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}\Z")
 MAX_HISTORY_SHAS = 20000  # per release commit: ~0.9 MB of queue; git lists newest first
+# R29: the NEXT line imports each subject too, so a squash merge's `(#<n>)` can resolve.
+REV_LIST_FLAGS = "--no-commit-header --format=%H%x20%s"
 MAX_HISTORIES = 5         # unneeded histories kept; the oldest unneeded import goes first
 
 
+def _is_pr(v):
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
 def _valid_history(commit, h):
+    """`prs` (R29) is optional: the PR numbers that end a subject in the history. A history
+    imported without subjects has none."""
     return (isinstance(commit, str) and _SHA40_RE.match(commit) and isinstance(h, dict)
             and isinstance(h.get("imported_at"), str) and isinstance(h.get("shas"), list)
-            and all(isinstance(x, str) and _SHA40_RE.match(x) for x in h["shas"]))
+            and all(isinstance(x, str) and _SHA40_RE.match(x) for x in h["shas"])
+            and isinstance(h.get("prs", []), list) and all(_is_pr(x) for x in h.get("prs", [])))
 
 
 _RUN_STRS = ("workflowName", "headBranch", "headSha", "url", "createdAt", "updatedAt")
@@ -1423,6 +1432,7 @@ def _import_history(a):
     ctx = {"source": None, "now": now}
     _, problems = adapters.ADAPTERS["git-rev-list"](raw, ctx)
     shas = ctx["history_out"]
+    squash = ctx["squash_out"]
     unavailable = not shas and not problems  # git rev-list printed nothing: not in this clone
     if unavailable:
         problems.append("no commits: the release commit is not in this clone; git fetch, "
@@ -1445,6 +1455,9 @@ def _import_history(a):
                 else:
                     q.unavailable.pop(a.commit, None)
                     q.histories[a.commit] = {"imported_at": now, "shas": shas}
+                    prs = sorted({squash[s] for s in shas if s in squash})
+                    if prs:  # R29: only kept shas count, so a cut never adds a PR
+                        q.histories[a.commit]["prs"] = prs
                 # Over the cap, drop the oldest history no planned item still needs.
                 spare = sorted((h["imported_at"], c) for c, h in q.histories.items()
                                if c not in q.needed and c != a.commit)
@@ -1547,7 +1560,12 @@ def _envelope_record(kind, p):
     if not all(t.get("merge_commit") is None or (isinstance(t["merge_commit"], str)
                and _MERGE_RE.match(t["merge_commit"])) for t in tasks):
         raise ValueError("run-result merge_commit must be null or a 40- or 64-hex sha")
-    return {"plan_id": plan["id"], "tasks": tasks}
+    # R29, by addition: `pr` names the pull request the run opened, {"number": n}. It is
+    # optional; null or absent means the run names no PR.
+    pr = p.get("pr")
+    if pr is not None and not (isinstance(pr, dict) and _is_pr(pr.get("number"))):
+        raise ValueError("run-result pr must be null or an object with a positive number")
+    return {"plan_id": plan["id"], "tasks": tasks, "pr": pr["number"] if pr else None}
 
 
 def _plan_ref(e):
@@ -1578,8 +1596,9 @@ def _close_loop(q, envs, now):
     - The latest run-result pinning the plan (digest and id) decides. Every task must be
       proven with a merge commit, else needs-resolve (a partial or stopped run).
     - Each verified release made at or after that run is checked once per item: its
-      history holds every merge (resolved, by release:<version>, closed_at = the
-      release's time, R25), or it lacks one (kept in `checked`, never asked for again),
+      history holds every merge, or (R29) a subject that ends with `(#<n>)` where n is the
+      PR the run-result names (resolved, by release:<version>, closed_at = the release's
+      time, R25), or it lacks one (kept in `checked`, never asked for again),
       or its commit is not in the clone or is not 40-hex. When every such release is
       settled and none resolves: needs-resolve. When there is no such release yet:
       needs-release."""
@@ -1633,18 +1652,21 @@ def _close_loop(q, envs, now):
             if c in checked or not _SHA40_RE.match(c):
                 settled = True  # lacked a merge before, or a sha256 repo git-rev-list can't take
             elif h is not None:
-                if set(merges) <= set(h["shas"]):
+                merged = set(merges) <= set(h["shas"])
+                squashed = not merged and run["pr"] is not None and run["pr"] in h.get("prs", [])
+                if merged or squashed:
                     transition(it, "resolved", by="release:%s" % rel["version"], now=now)
                     # R25: the fix shipped when the release was made, not when sync ran, so
                     # recurrence compares against the release time. A signal that can
                     # recur, seen after it, means the fix failed: the item recurs at once.
                     it["closed_at"] = rel["at"]
-                    q.log("resolved", id=iid, by="release:%s" % rel["version"])
+                    q.log("resolved", id=iid, by="release:%s" % rel["version"],
+                          **({"pr": run["pr"]} if squashed else {}))
                     if (it.get("recur_seen") or "") > rel["at"]:
                         transition(it, "new", now=now)
                         q.log("recurred", id=iid)
                     break
-                checked.append(c)  # a squash or rebase merge: never ask for it again
+                checked.append(c)  # a squash merge with no PR match, or a rebase: never ask again
                 settled = True
             elif c in q.unavailable:
                 settled = True
@@ -1758,10 +1780,11 @@ def cmd_sync(a):
                   "gh-run-jobs-json --source %s --run %s"
                   % (rid, _jobs_source(cfg, r), rid))
     for c in sorted(wanted):
-        print("NEXT: git rev-list %s | intake import --format git-rev-list --commit %s" % (c, c))
+        print("NEXT: git rev-list %s %s | intake import --format git-rev-list --commit %s"
+              % (c, REV_LIST_FLAGS, c))
     for c in sorted(fetch):  # printed once per commit: the item is needs-resolve meanwhile
-        print("NEXT: git fetch, then re-import: git rev-list %s | intake import --format "
-              "git-rev-list --commit %s" % (c, c))
+        print("NEXT: git fetch, then re-import: git rev-list %s %s | intake import --format "
+              "git-rev-list --commit %s" % (c, REV_LIST_FLAGS, c))
     return 3 if problems else 0
 
 

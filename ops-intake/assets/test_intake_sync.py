@@ -84,8 +84,9 @@ def plan_env(root, items, now="2026-10-07T00:00:00Z", rev=None):
 
 
 def run_env(root, plan_path, plan_st, tasks, now="2026-10-08T00:00:00Z", pin_plan=True,
-            stopped=None, skill="factory-conductor"):
-    """A run-result payload with every field run-result.v1.json requires (RunSchemaTest)."""
+            stopped=None, skill="factory-conductor", extra=None):
+    """A run-result payload with every field run-result.v1.json requires (RunSchemaTest).
+    `extra` adds payload fields (R29: the `pr` the run opened)."""
     rel = os.path.relpath(plan_path, root).replace(os.sep, "/")
     grant = subject_file(root, ".skill-contract/envelopes-grant/grant.json")
     subjects = [rel, grant] if pin_plan else [subject_file(root), grant]
@@ -107,6 +108,7 @@ def run_env(root, plan_path, plan_st, tasks, now="2026-10-08T00:00:00Z", pin_pla
                "tasks": [dict({"verify": [], "review": None,
                                "park_reason": None if t["status"] == "proven" else "budget"}, **t)
                          for t in tasks]}
+    payload.update(extra or {})
     return envelope(root, RUN_KIND, payload, subjects, now, skill=skill)
 
 
@@ -458,8 +460,8 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(items(self.root)[self.iid]["state"], "planned")
         self.assertEqual(self.flag(), "planned+needs-history")
-        nxt = "NEXT: git rev-list %s | intake import --format git-rev-list --commit %s" % (
-            self.r, self.r)
+        nxt = ("NEXT: git rev-list %s --no-commit-header --format=%%H%%x20%%s | intake import "
+               "--format git-rev-list --commit %s" % (self.r, self.r))
         self.assertIn(nxt, out)
         # The NEXT line runs as printed: the left side in a shell, the right side into intake.
         left, right = nxt[len("NEXT: "):].split(" | intake ")
@@ -576,7 +578,8 @@ class LoopTests(unittest.TestCase):
         rc, out = intake(self.root, "sync")
         self.assertEqual(self.flag(), "planned+needs-resolve")
         nxt = [l for l in out.splitlines() if l.startswith("NEXT:")]
-        self.assertEqual(nxt, ["NEXT: git fetch, then re-import: git rev-list %s | intake import "
+        self.assertEqual(nxt, ["NEXT: git fetch, then re-import: git rev-list %s --no-commit-header "
+                               "--format=%%H%%x20%%s | intake import "
                                "--format git-rev-list --commit %s" % (gone, gone)])
         rc, out = intake(self.root, "sync")
         self.assertNotIn("NEXT:", out)

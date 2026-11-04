@@ -77,8 +77,11 @@ agent runs.
 4. **resolved.** factory-conductor proves every task. Then a verified release-conductor release
    holds every merge commit in its history.
 
-If you squash-merge, a run is partial, or the release commit is not in your clone, the item
-stops at `needs-resolve`. You then close it with `resolve`. The tool does not guess.
+A squash merge also counts when the run-result names the run's pull request and a commit
+subject in the release ends with that number, as in `Add X (#42)`.
+
+If you rebase-merge, a squash subject does not match, a run is partial, or the release commit
+is not in your clone, the item stops at `needs-resolve`. You then close it with `resolve`. The tool does not guess.
 
 You can also dismiss an item with a reason. A dismissed item comes back, marked `regressed`,
 only when its source sees it again after the dismissal.
@@ -121,6 +124,11 @@ only when its source sees it again after the dismissal.
 
 ## Changes
 
+- **0.6.0.** A squash merge can resolve an item. Sync's `NEXT:` line now imports each commit
+  subject with the release history. When a run-result names its pull request
+  (`"pr": {"number": 42}`) and a verified release holds a commit whose subject ends with
+  `(#42)`, the item becomes `resolved`. The number must match exactly, and a body line does
+  not count. Plain `git rev-list` output still imports, but it cannot match a squash merge.
 - **0.5.0.** `intake autopick` picks. It picks the matching items highest rank first (ties
   by id), up to the policy's `max_picks_per_day` per UTC day, counted across runs. Each pick
   writes the same intake-item envelope as `pick` and prints its `NEXT:` line. The intake log

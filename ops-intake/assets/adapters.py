@@ -599,21 +599,49 @@ def adapt_release_envelope(raw, ctx):
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}\Z")
 
 
+# A squash merge's subject as GitHub writes it: `Add X (#42)`. The number ends the subject.
+_SQUASH_PR_RE = re.compile(r"\(#([1-9][0-9]{0,9})\)\Z")
+_SHA_SUBJECT_RE = re.compile(r"^([0-9a-f]{40})[ \t](.*)\Z")
+_COMMIT_HEADER_RE = re.compile(r"^commit [0-9a-f]{40}\Z")
+
+
+def squash_pr(subject):
+    """The pull request number that ends a commit subject, as `(#<n>)`, or None. Only the
+    first line counts, and only at its end: `Add X (#42)` gives 42; `Fix (#42) again` and a
+    body line give nothing."""
+    first = subject.split("\n", 1)[0].rstrip()
+    m = _SQUASH_PR_RE.search(first)
+    return int(m.group(1)) if m else None
+
+
 def adapt_git_rev_list(raw, ctx):
     """`git rev-list <commit>` output, one 40-hex sha per line. It gives no signal: the
     shas, in git's order (newest first) and without repeats, go to ctx["history_out"]
-    for loop closing. A bad line is a problem."""
-    shas, problems, seen = [], [], set()
+    for loop closing. A bad line is a problem.
+
+    By addition, a line may also carry the commit subject after the sha and one space or
+    tab (`git rev-list <commit> --no-commit-header --format=%H%x20%s`). A subject that ends
+    with `(#<n>)` maps that sha to PR n in ctx["squash_out"]; no subject text is kept. A
+    `commit <sha>` header line, which git before 2.33 prints without --no-commit-header,
+    is skipped."""
+    shas, problems, seen, squash = [], [], set(), {}
     for n, line in enumerate(raw.splitlines(), 1):
         line = line.strip()
-        if not line:
+        if not line or _COMMIT_HEADER_RE.match(line):
             continue
-        if not _SHA40_RE.match(line):
+        m = _SHA_SUBJECT_RE.match(line)
+        sha = line if _SHA40_RE.match(line) else (m.group(1) if m else None)
+        if sha is None:
             problems.append("line %d: not a 40-hex sha" % n)
-        elif line not in seen:
-            seen.add(line)
-            shas.append(line)
+            continue
+        if sha not in seen:
+            seen.add(sha)
+            shas.append(sha)
+            pr = squash_pr(m.group(2)) if m else None
+            if pr is not None:
+                squash[sha] = pr
     ctx["history_out"] = shas
+    ctx["squash_out"] = squash
     return [], problems
 
 

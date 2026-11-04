@@ -16,7 +16,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only. The tool itself needs no network and no credentials; the agent runs gh, git, acli or MCP tools with the user's own logins.
 metadata:
   author: dhanesh
-  version: "0.5.0"
+  version: "0.6.0"
   skill-contract: "1"
   tags: "factory,operations,intake,skill-contract"
 ---
@@ -131,8 +131,9 @@ Read each command's output lines, not only its exit code.
    `.skill-contract/envelopes/`, adds failed releases, closes the loop (step 7) and ranks the
    queue. It prints `SYNC: <n> items new=… picked=… planned=… resolved=… dismissed=… envelopes
    <e> problems <p>`, a `PROBLEM:` line per bad envelope (exit 3), and `NEXT:` lines. Run each
-   `NEXT:` line (a CI jobs import, `git rev-list <commit> | intake import --format git-rev-list
-   --commit <commit>`, or a `git fetch` first), piped as printed, then sync again. Stop when a
+   `NEXT:` line (a CI jobs import, `git rev-list <commit> --no-commit-header --format=%H%x20%s |
+   intake import --format git-rev-list --commit <commit>`, or a `git fetch` first), piped as
+   printed, then sync again. Stop when a
    sync prints no `NEXT:` line that asks for an import, or after three rounds; report what is
    left. When the jobs import of a run fails three times (the run was deleted on GitHub, say),
    that import prints one `PROBLEM:` line and sync stops printing the run's `NEXT:` line.
@@ -183,8 +184,8 @@ Read each command's output lines, not only its exit code.
    | `planned+plan-superseded` | A revision of its plan dropped the item. | Tell the human; they plan it again or resolve it. |
    | `planned+needs-history` | A verified release since the run needs its git history. | Run the `NEXT: git rev-list …` line. |
    | `planned+needs-release` | Every task of the latest run is proven, and no verified release was made at or after the run yet. | Wait for release-conductor to ship it. |
-   | `planned+needs-resolve` | A squash or rebase merge, a partial or stopped run, or a release commit not in this clone. | Tell the human; only their `resolve` closes it. |
-   | `resolved` | A verified release's history holds every merge commit of the latest run of the plan, and every task in that run was proven. Its close time is the release's time. | Report it. |
+   | `planned+needs-resolve` | A rebase merge, a squash merge whose subject does not end with the run's PR number, a partial or stopped run, or a release commit not in this clone. | Tell the human; only their `resolve` closes it. |
+   | `resolved` | Every task in the latest run of the plan was proven, and a verified release's history holds every merge commit of that run, or a commit whose subject ends with `(#<n>)`, where n is the PR number the run-result names (a squash merge). Its close time is the release's time. | Report it. |
    | `new+regressed` | A dismissed or resolved item came back: a signal seen after its close time, including one seen after the release that resolved it. A release-status line and a closed issue never count. | Show it first. |
 
    Only the plan's own producer counts: task-plans from spec-first-planning, run-results from
@@ -326,12 +327,15 @@ A failure there, or counts that disagree, is a tool bug: report it, and do not e
 - **Attribution is self-declared.** Sync accepts a task-plan, run-result or release-result only
   from its producer skill, but that name is what the envelope says, not a signature.
 - **Loop closing needs the history and can stop at needs-resolve.** Intake runs no git, so a
-  release's history arrives only through `git-rev-list`. A squash or rebase merge, a partial or
-  stopped run, or a release commit missing from the clone never resolves an item: it waits for
-  the human's `resolve`. Intake does not guess.
+  release's history arrives only through `git-rev-list`. A rebase merge, a partial or stopped
+  run, or a release commit missing from the clone never resolves an item: it waits for the
+  human's `resolve`. A squash merge resolves only when the run-result names its PR (`pr.number`)
+  and a subject in the history ends with exactly `(#<that number>)`; a body line never counts.
+  Intake does not guess.
 - **The history is what you pipe in.** Intake checks only that each `git-rev-list` line is a
   40-hex sha and that the first line is the release commit. It cannot tell a real history from
-  a made-up one, so a fabricated history could resolve an item.
+  a made-up one, so a fabricated history could resolve an item. Anyone can type `(#42)` into a
+  subject, so a squash match counts only on a verified release made at or after the run.
 - **On demand only.** Nothing sweeps the sources on a schedule; a session has to run the flow
   or `intake sweep`.
 - **A sweep command is trusted code.** Intake runs only the argv lists in the committed
