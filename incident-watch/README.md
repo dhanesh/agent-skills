@@ -1,7 +1,7 @@
 # incident-watch
 
 **Status: partly built.** `incident probe` ships. It opens an incident record and writes
-an `incident` signal. The rollback command in the record and `incident close` are not
+an `incident` signal. The record shows the rollback command. `incident close` is not
 built yet.
 
 This skill finds and triages live incidents for the software factory. The factory
@@ -27,13 +27,20 @@ What ships now:
   `.skill-contract/incidents/signals.jsonl`. ops-intake imports that file with
   `intake import --format intake-signals-jsonl --source incident-watch`. A third failure
   opens no second record. It adds the probe to the open record.
+- The record shows the recipe's rollback command word for word (R25). Its `rollback`
+  field holds the argv list as the recipe holds it, with `{version}` and `{commit}`
+  unfilled, and a display form with control characters escaped. It also holds the
+  release-conductor command that asks the owner: `release rollback` shows the rollback
+  and waits, and `release rollback --approved-by "<their name>"` runs it after the
+  owner's yes. The probe that opens the record prints a `ROLLBACK:` line and a
+  `NEXT: ask the owner to roll back: ...` line. If the recipe has no valid `rollback`
+  field, the record says so, and the probe goes on.
 - The probe never calls `gh` or the network. When the CI runs are not on disk, the record
   says so. The probe then prints the `NEXT: gh run list ...` line that you run to get
   them.
 
 What is pending:
 
-- Show the recipe's rollback command word for word in the record (R25).
 - `incident close --by <name>` hands the record to bug-autopsy (R26).
 
 The skill never runs a rollback or a deploy. The owner fixes the problem through
@@ -75,7 +82,7 @@ python3 incident-watch/assets/incident.py --root <repo> probe [--version V] [--c
 ```
 
 After the second consecutive failure, the output also has `INCIDENT: opened <id> <path>`,
-`SIGNAL: ...` and `NEXT:` lines. `references/overview.md` lists the record fields.
+`SIGNAL: ...`, `ROLLBACK: ...` and `NEXT:` lines. `references/overview.md` lists the record fields.
 
 Exit 0 means every command passed. Exit 3 means a command failed or timed out. Exit 2
 means the tool refused and ran nothing.

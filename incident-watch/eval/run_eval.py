@@ -19,6 +19,9 @@ local stub scripts (no real endpoint), and checks:
     call no stub at all, not even the allowed ones;
   - R24: a failing health stub probed twice opens one incident record (with the probe
     output) and writes one `incident` signal line; a third failure opens no second record;
+  - R25: that record holds the recipe's rollback argv word for word and the
+    release-conductor command that asks the owner, the probe that opened it printed the
+    `ROLLBACK:` and `NEXT: ask the owner` lines, and the rollback stub never ran;
   - SKILL.md and README.md say "partly built", not the old skeleton line, and every
     skill-relative path they name exists.
 
@@ -187,6 +190,16 @@ def grade_incident(root, out):
         for key in ("last_release", "ci_runs"):
             if key not in rec:
                 errors.append("record lacks %s" % key)
+        rb = rec.get("rollback") or {}
+        try:
+            with open(os.path.join(root, ".release", "recipe.json"), encoding="utf-8") as f:
+                want = json.load(f).get("rollback")
+        except (OSError, ValueError):
+            want = None
+        if not rb.get("available") or rb.get("argv") != want:
+            errors.append("record lacks the recipe's rollback argv word for word")
+        if (rb.get("ask_owner") or {}).get("command") != "release rollback":
+            errors.append("record lacks the release-conductor command that asks the owner")
     try:
         with open(os.path.join(d, "signals.jsonl"), encoding="utf-8") as f:
             sigs = [json.loads(ln) for ln in f if ln.strip()]
@@ -199,8 +212,22 @@ def grade_incident(root, out):
     if not any(ln.startswith("INCIDENT: ") for ln in out.splitlines()):
         errors.append("no INCIDENT: line")
     bad = [c[0] for c in kit.calls(root) if c[0] in kit.NON_PROBE]
+    bad += [n for n in kit.ran(root) if n in kit.NON_PROBE]
     if bad:
         errors.append("non-probe command ran: %s" % bad)
+    return errors
+
+
+def grade_opening(out):
+    """R25: the output of the probe that opened the record shows the rollback and the
+    command that asks the owner."""
+    lines = out.splitlines()
+    errors = []
+    if not any(ln.startswith("ROLLBACK: ") and ln.endswith(" rollback") for ln in lines):
+        errors.append("no ROLLBACK: line with the recipe's rollback")
+    if not any(ln.startswith("NEXT: ask the owner to roll back: release rollback ")
+               for ln in lines):
+        errors.append("no NEXT: line with the release-conductor command")
     return errors
 
 
@@ -237,11 +264,14 @@ def main():
         errs = []
         if os.path.isdir(os.path.join(inc, ".skill-contract", "incidents", "records")):
             errs.append("a record after one failure")
-        run_probe(inc)
+        _, oout = run_probe(inc)
         _, iout = run_probe(inc)
         errs += grade_incident(inc, iout)
         check("two failed probes: one record and one incident signal; a third adds none "
               "(R24)", not errs, "; ".join(errs)[:120])
+        errs = grade_opening(oout)
+        check("opened record shows the rollback argv and the owner's command; the rollback "
+              "stub never ran (R25)", not errs, "; ".join(errs)[:120])
 
         ref = kit.fixture(os.path.join(tmp, "refuse"))
         errs = []
@@ -280,6 +310,25 @@ def main():
         check("grader rejects negative fixture second-record-opened",
               any("2 incident records" in e for e in grade_incident(inc, iout)))
         os.remove(dup)
+        check("grader rejects negative fixture rollback-not-shown",
+              grade_opening(iout))
+        rpath = os.path.join(rdir, sorted(os.listdir(rdir))[0])
+        with open(rpath, encoding="utf-8") as f:
+            saved = f.read()
+        tampered = json.loads(saved)
+        tampered["rollback"]["argv"] = tampered["rollback"]["argv"][:-1] + ["--all"]
+        with open(rpath, "w", encoding="utf-8") as f:
+            json.dump(tampered, f)
+        check("grader rejects negative fixture rollback-argv-changed",
+              any("word for word" in e for e in grade_incident(inc, iout)))
+        with open(rpath, "w", encoding="utf-8") as f:
+            f.write(saved)
+        os.makedirs(os.path.join(inc, "stubs", "ran"), exist_ok=True)
+        with open(os.path.join(inc, "stubs", "ran", "rollback"), "w") as f:
+            f.write("ran\n")
+        check("grader rejects negative fixture rollback-marker-written",
+              any("non-probe" in e for e in grade_incident(inc, iout)))
+        os.remove(os.path.join(inc, "stubs", "ran", "rollback"))
         sig = os.path.join(inc, ".skill-contract", "incidents", "signals.jsonl")
         with open(sig, encoding="utf-8") as f:
             first_sig = f.read()

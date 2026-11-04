@@ -6,6 +6,8 @@ fixture(dir) makes <dir> a git repo that holds a valid release-conductor recipe
 (.release/recipe.json). Every command in the recipe runs one local stub script,
 <dir>/stubs/stub.py, with the command's name as its argument. The stub:
   - appends its name as one line to <dir>/stubs/calls.log;
+  - writes the marker file <dir>/stubs/ran/<name>, so a test can prove by a missing file
+    that a stub (such as `rollback` or `deploy_prod`) never ran;
   - exits with the code in <dir>/stubs/behave/<name> (default 0).
 So a test can make `health` fail with behave(dir, "health", 1), and can prove that
 `rollback`, `deploy_prod` and the other non-probe commands were never called.
@@ -24,6 +26,9 @@ HOME = os.path.dirname(os.path.abspath(__file__))
 name = sys.argv[1] if len(sys.argv) > 1 else "?"
 with open(os.path.join(HOME, "calls.log"), "a", encoding="utf-8") as f:
     f.write(" ".join(sys.argv[1:]) + "\n")
+os.makedirs(os.path.join(HOME, "ran"), exist_ok=True)
+with open(os.path.join(HOME, "ran", os.path.basename(name) or "_"), "a", encoding="utf-8") as f:
+    f.write("ran\n")
 try:
     with open(os.path.join(HOME, "behave", name), encoding="utf-8") as f:
         code = int(f.read().strip() or 0)
@@ -62,6 +67,14 @@ def behave(d, name, code):
     os.makedirs(os.path.join(d, "stubs", "behave"), exist_ok=True)
     with open(os.path.join(d, "stubs", "behave", name), "w", encoding="utf-8") as f:
         f.write("%d\n" % code)
+
+
+def ran(d):
+    """The names of the stubs that wrote a marker file, sorted."""
+    try:
+        return sorted(os.listdir(os.path.join(d, "stubs", "ran")))
+    except OSError:
+        return []
 
 
 def calls(d):

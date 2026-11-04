@@ -2,7 +2,7 @@
 
 - id: incident-probe
 - proven: no
-- anchors: incident-watch/assets/incident.py:cmd_probe, incident-watch/assets/incident.py:probe_commands, incident-watch/assets/incident.py:run_probe, incident-watch/assets/incident.py:ensure_dir, incident-watch/assets/incident.py:after_probe, incident-watch/assets/incident.py:check_only, incident-watch/assets/incident.py:open_record, incident-watch/assets/incident.py:signal_line
+- anchors: incident-watch/assets/incident.py:cmd_probe, incident-watch/assets/incident.py:probe_commands, incident-watch/assets/incident.py:run_probe, incident-watch/assets/incident.py:ensure_dir, incident-watch/assets/incident.py:after_probe, incident-watch/assets/incident.py:check_only, incident-watch/assets/incident.py:open_record, incident-watch/assets/incident.py:signal_line, incident-watch/assets/incident.py:rollback_view, incident-watch/assets/incident.py:safe_display
 
 ## What it is
 
@@ -16,7 +16,9 @@ out of git. It keeps the consecutive-failure count in `state.json`. It refuses a
 command with exit 2 before anything runs (R23). After 2 or more consecutive failed probes
 it opens one incident record, `.skill-contract/incidents/records/<id>.json`, and appends one
 `intake-signals-jsonl` line of kind `incident` to `.skill-contract/incidents/signals.jsonl`
-(R24). The design is
+(R24). The opened record shows the recipe's `rollback` argv word for word and the
+release-conductor command that asks the owner, and the tool never runs either (R25). The
+design is
 `docs/factory/2026-11-04-autonomous-factory-spec.md` (R22 to R26, D1, S4).
 
 ## How to reach it
@@ -26,7 +28,8 @@ it opens one incident record, `.skill-contract/incidents/records/<id>.json`, and
 release-conductor only in that directory. `python3 incident-watch/assets/incident_testkit.py
 fixture <dir> [--fail NAME]` makes `<dir>` a git repo with a valid recipe whose every
 command runs a local stub (`<dir>/stubs/stub.py <name>`). Each stub call is logged to
-`<dir>/stubs/calls.log`, and a stub named in `--fail` exits 1.
+`<dir>/stubs/calls.log` and writes the marker file `<dir>/stubs/ran/<name>`, and a stub
+named in `--fail` exits 1.
 
 Shipped:
 
@@ -48,11 +51,14 @@ Shipped:
   output, the last release record and the recent default-branch CI runs, one `incident`
   line in the signals file, and `INCIDENT: opened <id> <path>`. A third failure opens no
   second record: `INCIDENT: open <id> <path> probes=3` (R24).
+- The probe that opens the record also prints `ROLLBACK: <the recipe's rollback argv>`
+  and `NEXT: ask the owner to roll back: release rollback (shows the rollback and
+  waits); on their yes: release rollback --approved-by "<their name>"`. The record's
+  `rollback.argv` is the recipe's `rollback` list word for word. The rollback stub never
+  runs, so `<dir>/stubs/ran/rollback` never exists (R25).
 
 Planned (not yet shipped):
 
-- The open record: the recipe's rollback argv word for word. The rollback is shown, never
-  run (R25).
 - `incident close --by <name>`: closes the record and prints
   `NEXT: run bug-autopsy with <record path>`. Without `--by` it exits 2 (R26).
 
@@ -91,6 +97,8 @@ done
 cp "$IP/inc/.skill-contract/incidents/signals.jsonl" "$WT/.verify-run/$INSTANCE/ip-inc-signals.jsonl"
 cp "$IP/inc/.skill-contract/incidents/records/"*.json "$WT/.verify-run/$INSTANCE/ip-inc-record.json"
 cp "$IP/inc/stubs/calls.log" "$WT/.verify-run/$INSTANCE/ip-inc-calls.log"
+cp "$IP/inc/.release/recipe.json" "$WT/.verify-run/$INSTANCE/ip-inc-recipe.json"
+ls -A "$IP/inc/stubs/ran" > "$WT/.verify-run/$INSTANCE/ip-inc-ran.txt"
 ```
 
 - `ip-pass`: exit 0. The lines are `PROBE: health pass rc=0`,
@@ -119,18 +127,25 @@ cp "$IP/inc/stubs/calls.log" "$WT/.verify-run/$INSTANCE/ip-inc-calls.log"
   `ip-inc-1-records.txt` says that the records directory does not exist.
 - `ip-inc-2`: exit 3, `consecutive_failures=2`, `INCIDENT: opened <id> <path>`,
   `SIGNAL: .skill-contract/incidents/signals.jsonl kind incident`, the
-  `NEXT: intake import ...` line and the `NEXT: gh run list ...` line (the fixture has
-  no CI runs on disk). `ip-inc-2-records.txt` holds one `<id>.json`.
+  `NEXT: intake import ...` line, the `ROLLBACK: ... stubs/stub.py rollback` line, the
+  `NEXT: ask the owner to roll back: release rollback ...` line and the
+  `NEXT: gh run list ...` line (the fixture has no CI runs on disk).
+  `ip-inc-2-records.txt` holds one `<id>.json`.
 - `ip-inc-3`: exit 3, `INCIDENT: open <id> <path> probes=3` with the same id, and no
   `INCIDENT: opened` line. `ip-inc-3-records.txt` still holds one file.
 - `ip-inc-signals.jsonl`: one line, `"kind": "incident"`, `"source": "incident-watch"`,
   `"source_id"` equal to the record id.
 - `ip-inc-record.json`: `"status": "open"`, three `probes` whose `health` command has
   `stub health production exit 1` in its `out_tail`, and the `last_release` and
-  `ci_runs` fields (each with `"available": false` in the fixture).
+  `ci_runs` fields (each with `"available": false` in the fixture). Its `rollback` has
+  `"available": true`, an `argv` equal to the `rollback` list in `ip-inc-recipe.json`,
+  word for word, `ask_owner.command` `release rollback` and
+  `ask_owner.run_by_incident_watch` `false`.
 - `ip-inc-calls.log`: only probe stubs. No `rollback` line.
+- `ip-inc-ran.txt`: only `health`, `prod_smoke_0`, `prod_smoke_1` and `version_probe`.
+  No `rollback` and no `deploy_prod` marker: the rollback stub was never called (R25).
 
-The R25 and R26 recipes join this section as each ships.
+The R26 recipe joins this section when it ships.
 
 ## Proof
 
@@ -139,8 +154,10 @@ codes), `ip-pass-probes.jsonl`, `ip-pass-state.txt`, `ip-pass-ignored.txt` and b
 `calls.log` copies. The `ip-refuse-only` and `ip-refuse-argv` captures (exit 2 and the
 `PROBE: refused:` line) and `ip-refuse-stubs.txt` with no `calls.log` (R23). The `ip-inc-1` to `ip-inc-3` captures,
 their records listings, `ip-inc-signals.jsonl`, `ip-inc-record.json` and `ip-inc-calls.log`
-(R24). After the planned parts ship: the record's rollback argv, the `NEXT:` line from
-`incident close`, and a rollback stub that was never called.
+(R24). The `ROLLBACK:` and `NEXT: ask the owner` lines in `ip-inc-2`, the `rollback`
+field of `ip-inc-record.json` against `ip-inc-recipe.json`, and `ip-inc-ran.txt` with no
+`rollback` or `deploy_prod` marker (R25). After R26 ships: the `NEXT:` line from
+`incident close`.
 
 ## Gotchas
 

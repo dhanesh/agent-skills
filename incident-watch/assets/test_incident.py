@@ -3,15 +3,18 @@
 
 Every probe runs against a fixture repo from incident_testkit.py: each recipe command is a
 local stub script, so no test touches a real endpoint. R23's refusals are in TestOnlyProbeLists.
-R24's incident record and signal are in TestIncidentRecord. Later requirements (R25, R26)
-add their tests to this file.
+R24's incident record and signal are in TestIncidentRecord. R25's rollback view (shown,
+never run) is in TestRollbackShown, TestRollbackNeverRuns and TestNoRollbackPath. R26 adds
+its tests to this file.
 Run:  python3 test_incident.py
 """
+import ast
 import datetime
 import glob
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -475,14 +478,330 @@ class TestIncidentRecord(Base):
         self.assertIn("no release-result/v1 envelope", last["reason"])
 
 
+# The recipe fields incident.py MUST never run (D1, B1, S4).
+NEVER_RUN = ("build", "deploy_staging", "deploy_prod", "rollback", "staging_checks")
+NEVER_RUN_STUBS = ("build", "deploy_staging", "deploy_prod", "rollback", "staging_check")
+
+
+class RollbackBase(Base):
+    """A fixture whose rollback carries {version} and {commit}, and whose health fails."""
+
+    def setUp(self):
+        super().setUp()
+        r = kit.recipe(self.root)
+        r["rollback"] = r["rollback"] + ["--to", "{version}", "--commit={commit}"]
+        kit.write_recipe(self.root, r)
+        kit.behave(self.root, "health", 1)
+
+    def recipe_on_disk(self):
+        with open(os.path.join(self.root, ".release", "recipe.json"), encoding="utf-8") as f:
+            return json.load(f)
+
+    def assert_never_ran(self):
+        self.assertEqual([n for n in kit.ran(self.root) if n in NEVER_RUN_STUBS], [])
+        self.assertEqual(self.non_probe_calls(), [])
+
+
+class TestRollbackShown(RollbackBase):
+    """R25: the opened record holds the recipe's rollback argv word for word and the
+    release-conductor command that asks the owner, and the probe prints both."""
+
+    def test_open_record_holds_rollback_argv_word_for_word(self):
+        probe(self.root)
+        rc, out, _ = probe(self.root)
+        self.assertEqual(rc, 3, out)
+        rb = records(self.root)[0][1]["rollback"]
+        want = self.recipe_on_disk()["rollback"]
+        self.assertTrue(rb["available"])
+        self.assertEqual(rb["field"], "rollback")
+        self.assertEqual(rb["argv"], want)  # word for word, {tokens} unfilled
+        self.assertIn("{version}", rb["argv"])
+        self.assertEqual(rb["display"], shlex.join(want))
+        self.assertEqual(rb["tokens"], ["commit", "version"])
+        ask = rb["ask_owner"]
+        self.assertEqual(ask["command"], "release rollback")
+        self.assertEqual(ask["on_owner_yes"], 'release rollback --approved-by "<their name>"')
+        self.assertIs(ask["run_by_incident_watch"], False)
+        lines = out.splitlines()
+        self.assertIn("ROLLBACK: %s" % shlex.join(want), lines)
+        self.assertIn('NEXT: ask the owner to roll back: release rollback (shows the rollback '
+                      'and waits); on their yes: release rollback --approved-by '
+                      '"<their name>"', lines)
+        self.assert_never_ran()
+
+    def test_rollback_lines_print_only_when_the_record_opens(self):
+        rc, out, _ = probe(self.root)
+        self.assertNotIn("ROLLBACK:", out)
+        probe(self.root)
+        rc, out, _ = probe(self.root)
+        self.assertIn("INCIDENT: open ", out)
+        self.assertNotIn("ROLLBACK:", out)
+        self.assertNotIn("NEXT: ask the owner", out)
+        self.assertEqual(records(self.root)[0][1]["rollback"]["argv"],
+                         self.recipe_on_disk()["rollback"])
+        self.assert_never_ran()
+
+    def test_release_conductor_documents_the_owner_command(self):
+        # The command is release-conductor's, not invented here: its SKILL.md step 7
+        # names both forms, and release.py has the `rollback` subcommand.
+        with open(os.path.join(SKILLS, "release-conductor", "SKILL.md"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("`release rollback` without `--approved-by`", text)
+        self.assertIn('`release rollback --approved-by "<their name>"`', text)
+        with open(os.path.join(SKILLS, "release-conductor", "assets", "release.py"),
+                  encoding="utf-8") as f:
+            self.assertIn('"rollback"', f.read())
+
+    def test_display_escapes_control_characters(self):
+        argv = ["/bin/roll", "a\nb", "\x1b[31mred", "x‮y", "two words", "$(id)"]
+        shown = incident.safe_display(argv)
+        self.assertNotRegex(shown, "[\x00-\x1f\x7f‮]")
+        self.assertIn("\\x0a", shown)
+        self.assertIn("\\x1b", shown)
+        self.assertIn("\\u202e", shown)
+        self.assertIn("'two words'", shown)
+        self.assertIn("'$(id)'", shown)
+        view = incident.rollback_view({"rollback": argv})
+        self.assertEqual(view["argv"], argv)  # the record keeps the words as they are
+        self.assertEqual(view["display"], shown)
+        for line in incident.rollback_lines(view):
+            self.assertNotRegex(line, "[\x00-\x1f\x7f\u202e]")
+
+    def test_view_is_a_copy_not_the_recipe_list(self):
+        recipe = {"rollback": ["/bin/roll", "{version}"]}
+        view = incident.rollback_view(recipe)
+        view["argv"].append("x")
+        self.assertEqual(recipe["rollback"], ["/bin/roll", "{version}"])
+
+    def test_no_rollback_field_is_recorded_and_the_probe_goes_on(self):
+        r = self.recipe_on_disk()
+        del r["rollback"]
+        kit.write_recipe(self.root, r)
+        rc, out, _ = probe(self.root)
+        self.assertEqual(rc, 3, out)
+        rc, out, _ = probe(self.root)
+        self.assertEqual(rc, 3, out)
+        self.assertIn("INCIDENT: opened", out)
+        self.assertIn("ROLLBACK: none: the release recipe has no rollback field; the owner "
+                      "mitigates by hand", out.splitlines())
+        self.assertNotIn("NEXT: ask the owner", out)
+        rb = records(self.root)[0][1]["rollback"]
+        self.assertFalse(rb["available"])
+        self.assertIsNone(rb["argv"])
+        self.assertEqual(rb["reason"], "the release recipe has no rollback field")
+        self.assert_never_ran()
+
+    def test_invalid_rollback_is_recorded_not_shown(self):
+        r = self.recipe_on_disk()
+        r["rollback"] = "./rollback.sh && echo done"  # a shell string, not an argv
+        kit.write_recipe(self.root, r)
+        probe(self.root)
+        rc, out, _ = probe(self.root)
+        self.assertEqual(rc, 3, out)
+        rb = records(self.root)[0][1]["rollback"]
+        self.assertFalse(rb["available"])
+        self.assertIsNone(rb["argv"])
+        self.assertIn("rollback field is invalid", rb["reason"])
+        self.assertIn("ROLLBACK: none: ", out)
+
+    def test_other_invalid_fields_still_refuse(self):
+        r = self.recipe_on_disk()
+        del r["rollback"]
+        r["deploy_prod"] = "deploy.sh | sh"
+        kit.write_recipe(self.root, r)
+        rc, out, _ = probe(self.root)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("deploy_prod", out)
+        self.assertEqual(kit.calls(self.root), [])
+
+    def test_releases_rollback_acts_on_are_named(self):
+        view = incident.rollback_view(
+            {"rollback": ["/bin/roll"]},
+            [{"version": "1.0.0", "status": "verified"},
+             {"version": "1.1.0", "status": "prod_failed"}])
+        self.assertEqual(view["ask_owner"]["releases_it_acts_on"], ["1.1.0"])
+        self.assertEqual(view["ask_owner"]["acts_on"], ["prod_failed", "outcome_unknown"])
+
+
+class TestRollbackNeverRuns(RollbackBase):
+    """R25 (a): the rollback and deploy stubs write a marker file when they run. Across
+    the pass, fail, open-record and repeated-failure paths, and the refusals, no marker
+    for them appears."""
+
+    def test_no_marker_across_every_probe_path(self):
+        kit.behave(self.root, "health", 0)
+        steps = [("pass", 0, None), ("fail", 3, 1), ("fail-opens-record", 3, 1),
+                 ("repeat-1", 3, 1), ("repeat-2", 3, 1), ("repeat-3", 3, 1),
+                 ("pass-again", 0, 0), ("fail-after-pass", 3, 1)]
+        for name, want_rc, health in steps:
+            with self.subTest(step=name):
+                if health is not None:
+                    kit.behave(self.root, "health", health)
+                rc, out, _ = probe(self.root)
+                self.assertEqual(rc, want_rc, out)
+                self.assert_never_ran()
+        for extra in (["--only", "rollback"], ["--only", "deploy_prod"], ["rollback"]):
+            with self.subTest(refusal=extra):
+                rc, out, _ = probe(self.root, *extra)
+                self.assertEqual(rc, 2, out)
+                self.assert_never_ran()
+        # The probe stubs did run, so the marker files work.
+        self.assertIn("health", kit.ran(self.root))
+        self.assertEqual(len(records(self.root)), 1)
+        self.assertEqual(records(self.root)[0][1]["rollback"]["argv"],
+                         self.recipe_on_disk()["rollback"])
+
+    def test_run_cmd_never_sees_a_rollback_or_deploy_argv(self):
+        """In-process: wrap release-conductor's run_cmd and record every argv the probe
+        passes to it, across a pass, the record opening and a repeated failure."""
+        real = incident.load_release_module
+        seen = []
+
+        def spy_loader(path):
+            mod = real(path)
+            orig = mod.run_cmd
+
+            def run_cmd(argv, cwd, timeout, *a, **k):
+                seen.append(list(argv))
+                return orig(argv, cwd, timeout, *a, **k)
+            mod.run_cmd = run_cmd
+            return mod
+        incident.load_release_module = spy_loader
+        self.addCleanup(setattr, incident, "load_release_module", real)
+        import contextlib
+        import io
+        for health in (0, 1, 1, 1):
+            kit.behave(self.root, "health", health)
+            with contextlib.redirect_stdout(io.StringIO()):
+                incident.main(["--root", self.root, "--skills-dir", SKILLS, "probe"])
+        recipe = self.recipe_on_disk()
+        stub = os.path.join(self.root, "stubs", "stub.py")
+        self.assertTrue(seen)
+        for argv in seen:
+            self.assertEqual(argv[:2], [sys.executable, stub])
+            self.assertIn(argv[2], ("health", "version_probe", "prod_smoke_0", "prod_smoke_1"))
+        for key in ("build", "deploy_staging", "deploy_prod", "rollback"):
+            self.assertNotIn(recipe[key][:3], [a[:3] for a in seen])
+        self.assertEqual(len(records(self.root)), 1)
+        self.assert_never_ran()
+
+
+def _parse_tool():
+    with open(TOOL, encoding="utf-8") as f:
+        src = f.read()
+    return src, ast.parse(src)
+
+
+def _functions(tree):
+    return {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+
+def _enclosing(tree):
+    """{id(node): name of the top-level function that holds it, or None}."""
+    out = {}
+    for top in tree.body:
+        name = top.name if isinstance(top, ast.FunctionDef) else None
+        for n in ast.walk(top):
+            out[id(n)] = name
+    return out
+
+
+def _calls_named(tree, name):
+    """Every Call whose callee is `name` or `<anything>.name`."""
+    out = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            f = n.func
+            if (isinstance(f, ast.Name) and f.id == name) or \
+                    (isinstance(f, ast.Attribute) and f.attr == name):
+                out.append(n)
+    return out
+
+
 class TestNoRollbackPath(unittest.TestCase):
-    def test_tool_never_reads_a_non_probe_key(self):
-        with open(TOOL, encoding="utf-8") as f:
-            src = f.read()
-        for key in ("deploy_prod", "deploy_staging", "rollback", "staging_checks", "build"):
-            self.assertNotIn('recipe["%s"]' % key, src)
-            self.assertNotIn("recipe.get(\"%s\"" % key, src)
-        self.assertNotIn("shell=True", src)
+    """R25 (b): a source-level proof that incident.py can run only the probe lists. Reading
+    `rollback` is allowed in rollback_view() alone, for display, and no execution path
+    reaches what it returns."""
+
+    def setUp(self):
+        self.src, self.tree = _parse_tool()
+        self.where = _enclosing(self.tree)
+        self.funcs = _functions(self.tree)
+
+    def test_no_shell_and_no_other_process_api(self):
+        self.assertNotIn("shell=True", self.src)
+        names = {n.id for n in ast.walk(self.tree) if isinstance(n, ast.Name)}
+        attrs = {n.attr for n in ast.walk(self.tree) if isinstance(n, ast.Attribute)}
+        imported = set()
+        for n in ast.walk(self.tree):
+            if isinstance(n, ast.Import):
+                imported |= {a.name.split(".")[0] for a in n.names}
+            elif isinstance(n, ast.ImportFrom):
+                imported.add((n.module or "").split(".")[0])
+        for mod in ("subprocess", "pty", "multiprocessing", "asyncio"):
+            self.assertNotIn(mod, imported)
+            self.assertNotIn(mod, names)
+        for bad in ("system", "popen", "Popen", "execv", "execve", "execvp", "execl",
+                    "spawnv", "spawnl", "posix_spawn", "startfile", "check_output",
+                    "check_call", "call"):
+            self.assertNotIn(bad, attrs, bad)
+
+    def test_run_cmd_is_called_once_in_run_probe_with_probe_argv(self):
+        calls = _calls_named(self.tree, "run_cmd")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.where[id(calls[0])], "run_probe")
+        self.assertEqual(ast.unparse(calls[0].args[0]), "argv")
+        rp = _calls_named(self.tree, "run_probe")
+        self.assertEqual(len(rp), 1)
+        self.assertEqual(self.where[id(rp[0])], "cmd_probe")
+        self.assertEqual(ast.unparse(rp[0].args[2]), "commands")
+        # `commands` in cmd_probe is assigned once, from the probe lists only.
+        assigns = [n for n in ast.walk(self.funcs["cmd_probe"]) if isinstance(n, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == "commands" for t in n.targets)]
+        self.assertEqual(len(assigns), 1)
+        self.assertRegex(ast.unparse(assigns[0].value),
+                         r"^expand_all\(release, probe_commands\(recipe, keys\), ")
+        # probe_commands reads only the PROBE_KEYS entries.
+        subs = [ast.unparse(n.slice) for n in ast.walk(self.funcs["probe_commands"])
+                if isinstance(n, ast.Subscript)]
+        self.assertEqual(subs, ["key", "key"])
+
+    def test_non_probe_keys_are_read_only_in_rollback_view(self):
+        hits = {}
+        for n in ast.walk(self.tree):
+            if isinstance(n, ast.Constant) and n.value in NEVER_RUN:
+                hits.setdefault(n.value, set()).add(self.where.get(id(n)))
+        # `rollback` appears only in rollback_view (the read) and in open_record (the
+        # record key it is stored under); no other non-probe key appears at all.
+        self.assertEqual(set(hits), {"rollback"}, hits)
+        self.assertEqual(hits["rollback"], {"rollback_view", "open_record"}, hits)
+        reads = [n for n in ast.walk(self.tree)
+                 if (isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant)
+                     and n.slice.value == "rollback")
+                 or (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                     and n.func.attr == "get" and n.args
+                     and isinstance(n.args[0], ast.Constant) and n.args[0].value == "rollback")]
+        self.assertEqual([self.where[id(n)] for n in reads], ["rollback_view"])
+
+    def test_rollback_view_runs_nothing_and_feeds_no_runner(self):
+        rv = self.funcs["rollback_view"]
+        called = {ast.unparse(n.func) for n in ast.walk(rv) if isinstance(n, ast.Call)}
+        for bad in ("run_cmd", "run_probe", "expand_all", "release.expand", "expand"):
+            self.assertNotIn(bad, called)
+        for fn in ("safe_display", "rollback_lines"):
+            inner = {ast.unparse(n.func) for n in ast.walk(self.funcs[fn])
+                     if isinstance(n, ast.Call)}
+            self.assertFalse(inner & {"run_cmd", "run_probe", "expand_all", "expand"}, fn)
+        uses = _calls_named(self.tree, "rollback_view")
+        self.assertEqual([self.where[id(n)] for n in uses], ["open_record"])
+        # Its result is stored in the record and returned for printing; no call takes it.
+        orc = self.funcs["open_record"]
+        for n in ast.walk(orc):
+            if isinstance(n, ast.Call) and ast.unparse(n.func) != "rollback_view":
+                self.assertNotIn("rollback", [ast.unparse(a) for a in n.args],
+                                 ast.unparse(n))
+        for n in _calls_named(self.tree, "rollback_lines"):
+            self.assertEqual(self.where[id(n)], "after_probe")
 
 
 if __name__ == "__main__":
