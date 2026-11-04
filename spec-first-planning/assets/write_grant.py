@@ -90,6 +90,14 @@ Exit 2: usage error (an unreadable or malformed --answers file, or one missing a
     Every count and check fails closed: a file it cannot read is a refusal. Exit 0 prints
     REVOKE:/KILL-SWITCH: lines and ends with "GRANT: <path>"; exit 2 on usage.
 
+--pipeline-caps mode (the cap counts, for factory-pipeline's tick; it writes nothing):
+    python3 write_grant.py --pipeline-caps <pipeline grant id or path> --root <repo-root>
+    When check-pipeline-grant answers VALID, it prints one JSON line {"pipeline_grant",
+    "date", "caps", "counts": {"max_plans_per_day", "max_open_runs"}, "derived": [ids]} and
+    exits 0. The counts come from pipeline_cap_counts, the same counter --under-pipeline
+    refuses with, so the two never disagree. Otherwise "REFUSED: <reason>", exit 1: an
+    envelope it cannot read is a refusal, never a zero. Exit 2 on usage.
+
 Stdlib only. contract_check (vendored, same dir) needs Python >= 3.10 and is imported
 lazily, mirroring spec_to_tasks.py's style, so importing this module doesn't force that
 floor on callers that only want GrantRefused or the constants.
@@ -1037,9 +1045,13 @@ def _check_plan_allowlist(root, plan_payload, allow_rel):
                            "the owner's read" % bad)
 
 
-def _check_caps(contract_check, root, pipeline_id, caps, now):
-    """max_plans_per_day (derived grants dated today, UTC) and max_open_runs (derived grants
-    with no run-result/v1 yet). Fails closed: an envelope that cannot be read refuses."""
+def pipeline_cap_counts(contract_check, root, pipeline_id, now):
+    """Count what the pipeline caps limit, from <root>/.skill-contract/envelopes/:
+    {"date": today (UTC), "max_plans_per_day": grants derived from pipeline_id on that
+    date, "max_open_runs": derived grants with no run-result/v1 yet, "derived": the ids of
+    every grant derived from pipeline_id}. The one counter for --under-pipeline and
+    --pipeline-caps (factory-pipeline's tick). Fails closed: an envelope that cannot be
+    read raises GrantRefused."""
     d = contract_check.envelope_dir(root)
     try:
         names = sorted(n for n in os.listdir(d) if n.endswith(".json"))
@@ -1068,11 +1080,22 @@ def _check_caps(contract_check, root, pipeline_id, caps, now):
                     raise GrantRefused("derived grant %s has no valid generatedAtTime" % n)
                 derived.append((pred.get("id"), at))
     today = now.strftime("%Y-%m-%d")
-    per_day = sum(1 for _, at in derived if at[:10] == today)
+    return {"date": today,
+            "max_plans_per_day": sum(1 for _, at in derived if at[:10] == today),
+            "max_open_runs": sum(1 for gid, _ in derived if gid not in closed),
+            "derived": [gid for gid, _ in derived]}
+
+
+def _check_caps(contract_check, root, pipeline_id, caps, now):
+    """max_plans_per_day (derived grants dated today, UTC) and max_open_runs (derived grants
+    with no run-result/v1 yet). Fails closed: an envelope that cannot be read refuses."""
+    counts = pipeline_cap_counts(contract_check, root, pipeline_id, now)
+    today = counts["date"]
+    per_day = counts["max_plans_per_day"]
     if per_day >= caps["max_plans_per_day"]:
         raise GrantRefused("max_plans_per_day reached: %d of %d plans derived on %s"
                            % (per_day, caps["max_plans_per_day"], today))
-    open_runs = sum(1 for gid, _ in derived if gid not in closed)
+    open_runs = counts["max_open_runs"]
     if open_runs >= caps["max_open_runs"]:
         raise GrantRefused("max_open_runs reached: %d of %d runs are open"
                            % (open_runs, caps["max_open_runs"]))
@@ -1206,6 +1229,42 @@ def main_under_pipeline(argv):
     return 0
 
 
+def main_pipeline_caps(argv):
+    """`write_grant.py --pipeline-caps <grant> --root R`: print the cap counts as JSON."""
+    ap = argparse.ArgumentParser(prog="write_grant.py --pipeline-caps",
+                                 description="count what a pipeline grant's caps limit")
+    ap.add_argument("--pipeline-caps", required=True, dest="pipeline",
+                    help="the pipeline grant id, or its envelope path")
+    ap.add_argument("--root", required=True, help="repo root")
+    try:
+        a = ap.parse_args(argv)
+    except SystemExit as exc:
+        return exc.code if exc.code else 0
+    import contract_check  # lazy: needs Python >= 3.10 (see the module docstring)
+    root = os.path.abspath(a.root)
+    now = contract_check.utc_now()
+    try:
+        pid = _pipeline_id(contract_check, root, a.pipeline)
+        rep = contract_check.check_pipeline_grant(root, grant_id=pid, now=now)
+        if rep["status"] != "VALID":
+            raise GrantRefused("the pipeline grant %s is %s (%s)"
+                               % (pid, rep["status"],
+                                  rep["reason"] or "; ".join(rep["violations"])))
+        pst, err = contract_check.load_envelope(rep["path"])
+        if err:
+            raise GrantRefused("cannot read the pipeline grant %s: %s" % (pid, err[0][1]))
+        caps = pst["predicate"]["payload"]["caps"]
+        counts = pipeline_cap_counts(contract_check, root, pid, now)
+    except GrantRefused as exc:
+        print("REFUSED: %s" % exc)
+        return 1
+    print(json.dumps({"pipeline_grant": pid, "date": counts["date"], "caps": caps,
+                      "counts": {k: counts[k] for k in ("max_plans_per_day",
+                                                        "max_open_runs")},
+                      "derived": counts["derived"]}, sort_keys=True))
+    return 0
+
+
 def _contained_rel(root, root_real, given):
     """Root-relative, forward-slash path for `given` (absolute, or relative to root), or
     None when it resolves — after following symlinks — outside root. Used for both --spec
@@ -1243,6 +1302,8 @@ def main(argv=None):
     args = sys.argv[1:] if argv is None else list(argv)
     if any(x == "--under-pipeline" or x.startswith("--under-pipeline=") for x in args):
         return main_under_pipeline(args)
+    if any(x == "--pipeline-caps" or x.startswith("--pipeline-caps=") for x in args):
+        return main_pipeline_caps(args)
     if "--pipeline" in (sys.argv[1:] if argv is None else argv):
         return main_pipeline(sys.argv[1:] if argv is None else list(argv))
     try:

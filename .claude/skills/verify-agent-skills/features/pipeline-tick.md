@@ -2,7 +2,7 @@
 
 - id: pipeline-tick
 - proven: no
-- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock
+- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today
 
 ## What it is
 
@@ -15,7 +15,16 @@ standing pipeline grant with spec-first-planning's `contract_check.py check-pipe
 exits 2. It runs the factory stages in this
 order: sweep, growth review, idea follow-up, autopick, plan, derive grant, build, release
 stage and digest. It prints one `STAGE: <name> <result>` line per stage and exits 0 when
-every stage ran. Sweep, growth review and autopick call ops-intake and growth-review for
+every stage ran. Before each stage that would start a new plan or run (autopick, plan,
+derive grant and build), and between plans in derive grant, it checks the pipeline
+grant's caps against today's UTC counts (R15). spec-first-planning
+`write_grant.py --pipeline-caps` counts plans and open runs with the same counter that
+`--under-pipeline` refuses with. The tick counts today's `dispatch` events in the
+`autonomy-log.jsonl` of each factory-conductor run whose grant derives from the pipeline
+grant. At a cap it prints `STOP: cap <name> count=<n> limit=<m> stage=<stage>`, appends
+the reason to `.skill-contract/pipeline/cap-stops.jsonl`, and skips every later gated
+stage. A count source that it cannot read gives `STOP: cap uncounted source=<what>
+reason=<why>`, never a zero. Sweep, growth review and autopick call ops-intake and growth-review for
 real. Derive grant calls spec-first-planning `write_grant.py --under-pipeline` for each plan
 that the plan stage hands on. The other five stages print `pending-R<n>`. The design is
 `docs/factory/2026-11-04-autonomous-factory-spec.md` (R12 to R21).
@@ -26,7 +35,8 @@ that the plan stage hands on. The other five stages print `pending-R<n>`. The de
 `--skills-dir` makes the tick search only that directory for sibling skills.
 `factory-pipeline/assets/pipeline_testkit.py stubs <dir>` writes stub ops-intake,
 growth-review and spec-first-planning skills that log each call to `<dir>/calls.jsonl`.
-The stub spec-first-planning carries a copy of the real `contract_check.py`.
+The stub spec-first-planning carries a copy of the real `contract_check.py`, and it hands
+`--pipeline-caps` to the real `write_grant.py`, so the cap counts are real.
 `factory-pipeline/assets/pipeline_testkit.py grant <repo>` writes a real pipeline grant
 (and the pick policy and allowlist it pins) into `<repo>` with spec-first-planning's
 writer, and prints `GRANT: <path>`.
@@ -43,11 +53,15 @@ Shipped:
   prints `STOP: locked: another pipeline tick holds .skill-contract/pipeline/.lock`, runs
   no grant check and no stage, and leaves the queue unchanged. The lock is held for the
   whole tick and is released when its holder exits or is killed.
+- The caps (R15): when a cap is reached, `STOP: cap <name>` (for example
+  `STOP: cap max_plans_per_day`), one record in `cap-stops.jsonl`, and every later
+  autopick, plan, derive-grant and build stage says `skipped cap=<name>`. No new plan or
+  run starts after it. Sweep, growth review and idea follow-up run before the gates;
+  release stage and digest still run after them. The tick exits 0 and ends
+  `TICK: done stages=9 cap=<name>`.
 
 Planned (not yet shipped):
 
-- A cap is reached: `STOP: cap <name>` (for example `STOP: cap max_plans_per_day`), and
-  no new plan or run starts after it (R15).
 - `pipeline schedule install`: installs a timer with factory-conductor's timer module at
   an interval of 15 to 1440 minutes. An interval outside that range exits 2 and installs
   nothing (R16).
@@ -93,9 +107,11 @@ python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-revok
   `plan pending-R17 picked=1`, `derive-grant idle plans=0`, `build pending-R18 grants=0`,
   `release-stage pending-R19`, `digest pending-R21 waiting=0`. The last line is
   `TICK: done stages=9`.
-- `pt-calls.jsonl`: four lines, in order: ops-intake `sweep`, growth-review `auto`,
+- `pt-calls.jsonl`: eight lines, in order: ops-intake `sweep`, growth-review `auto`,
   ops-intake `import` (its `stdin` is the growth signal line, and its argv holds
-  `--format intake-signals-jsonl --source growth -`), ops-intake `autopick`.
+  `--format intake-signals-jsonl --source growth -`), spec-first-planning
+  `pipeline-caps`, ops-intake `autopick`, then spec-first-planning `pipeline-caps` three
+  times (one cap check before each of autopick, plan, derive-grant and build).
 - `pt-missing`: exit 0, nine `STAGE:` lines, and `STAGE: growth-review unavailable growth-review`.
 - `revoke-grant` (the kill switch) prints one `REVOKED: <id>` line and exits 0.
 - `pt-revoked`: exit 2, `STOP: no-grant reason=revoked`, and no `STAGE:` line.
@@ -128,14 +144,39 @@ python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-unloc
   `pt-locked-calls.jsonl` is empty (no stage tool ran).
 - `pt-unlocked`: exit 0 and `TICK: done stages=9` (the holder exited, so the lock is free).
 
-The R15 to R21 recipes join this section as each ships.
+The caps (R15). Write a fresh grant whose `max_open_runs` is 1 and one grant derived from
+it with no run result (an open run), then run a tick:
+
+```sh
+CR="$WT/.verify-run/$INSTANCE/cr"
+mkdir -p "$CR/repo"
+python3 factory-pipeline/assets/pipeline_testkit.py stubs "$CR/skills"
+python3 factory-pipeline/assets/pipeline_testkit.py grant "$CR/repo"
+python3 factory-pipeline/assets/pipeline_testkit.py derived "$CR/repo"
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-cap -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$CR/repo" --skills-dir "$CR/skills" tick
+cp "$CR/skills/calls.jsonl" "$WT/.verify-run/$INSTANCE/pt-cap-calls.jsonl"
+cp "$CR/repo/.skill-contract/pipeline/cap-stops.jsonl" "$WT/.verify-run/$INSTANCE/pt-cap-stops.jsonl"
+```
+
+- `derived` prints `DERIVED: <path>` (the testkit grant has `max_open_runs` 1).
+- `pt-cap`: exit 0. The output holds
+  `STOP: cap max_open_runs count=1 limit=1 stage=autopick` before the `STAGE: autopick`
+  line. `autopick`, `plan`, `derive-grant` and `build` each say `skipped cap=max_open_runs`.
+  `sweep` and `growth-review` say `ok`, and `release-stage` and `digest` say `pending-R<n>`.
+  The last line is `TICK: done stages=9 cap=max_open_runs`.
+- `pt-cap-calls.jsonl` holds no ops-intake `autopick` line and no `under-pipeline` line.
+- `pt-cap-stops.jsonl`: one JSON line with `"cap": "max_open_runs"`, `"count": 1`,
+  `"limit": 1` and `"stage": "autopick"`.
+
+The R16 to R21 recipes join this section as each ships.
 
 ## Proof
 
-The `pt-no-grant`, `pt-tick`, `pt-missing`, `pt-revoked`, `pt-locked` and `pt-unlocked`
-captures (their `STOP:` and `STAGE:` lines and exit codes), `pt-calls.jsonl`,
-`pt-locked-calls.jsonl`, and the two queue hashes. After the planned parts ship: the
-`STOP: cap` refusal, the schedule install results, and the content of `.skill-contract/pipeline/digest.md`.
+The `pt-no-grant`, `pt-tick`, `pt-missing`, `pt-revoked`, `pt-locked`, `pt-unlocked` and
+`pt-cap` captures (their `STOP:` and `STAGE:` lines and exit codes), `pt-calls.jsonl`,
+`pt-locked-calls.jsonl`, `pt-cap-calls.jsonl`, `pt-cap-stops.jsonl`, and the two queue
+hashes. After the planned parts ship: the schedule install results, and the content of `.skill-contract/pipeline/digest.md`.
 
 ## Gotchas
 
@@ -144,6 +185,10 @@ captures (their `STOP:` and `STAGE:` lines and exit codes), `pt-calls.jsonl`,
 - Without `--skills-dir`, the tick finds the real sibling skills (the directory beside
   factory-pipeline comes before the project and user roots). In an empty repo they refuse
   with exit 2 (no intake config, no growth plan), so the stages say `refused`.
+- A cap stop is not an error: the tick exits 0. Read the `STOP: cap` line and
+  `cap-stops.jsonl`, not the exit code. `STOP: cap uncounted` means that a count source
+  could not be read (a junk envelope, a torn line in a run's `autonomy-log.jsonl`). The
+  tick stops until the owner fixes that file.
 - `pending-R<n>` is the honest result of a stage that is not built. It is not `ok`.
 - The lock file stays on disk after a tick. That is correct: only a held `flock` blocks a
   tick, and the kernel drops it when the holder dies. Do not delete the file to "unlock".

@@ -7,10 +7,10 @@ description: >-
   autopick, plan, derive grant, build, release stage and digest, and prints one
   `STAGE: <name> <result>` line per stage. It calls each installed sibling skill's own tool
   (ops-intake, growth-review, spec-first-planning) with no shell, and reports a missing one
-  as unavailable. With no live pipeline grant it runs no stage, prints `STOP: no-grant` and
-  exits 2. One tick at a time: a tick that finds the repo's pipeline lock held exits 3 with
-  `STOP: locked`. Partly built: idea follow-up, plan, build, release stage and digest report
-  `pending-R<n>`, and the caps and the schedule are not built yet.
+  as unavailable. With no live pipeline grant it prints `STOP: no-grant` and exits 2; a
+  held repo lock gives `STOP: locked`, exit 3; a pipeline-grant cap gives `STOP: cap
+  <name>` and no new plan or run. Partly built: idea follow-up, plan, build, release stage
+  and digest report `pending-R<n>`, and the schedule is not built yet.
   Every human gate stays with the owner. Not for running one approved plan to a PR (use
   factory-conductor), not for writing a plan (use spec-first-planning).
 license: MIT
@@ -37,9 +37,10 @@ owner.
 pipeline grant (R13, shipped): with no live grant it runs no stage, prints
 `STOP: no-grant reason=<reason>` and exits 2. It runs the sweep, growth review and autopick
 stages for real, and runs derive grant for each plan that the plan stage hands on. The plan
-stage is not built yet, so it hands on no plan today. The idea follow-up, plan, build,
-release stage and digest stages report `pending-R<n>`. The caps and
-`pipeline schedule install` are not built yet. The
+stage is not built yet, so it hands on no plan today. Before each stage that would start
+a plan or run, it checks the grant's caps (R15, shipped): at a cap it prints
+`STOP: cap <name>` and skips those stages. The idea follow-up, plan, build, release stage
+and digest stages report `pending-R<n>`. `pipeline schedule install` is not built yet. The
 design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R12 to R21) in the
 agent-skills repository.
 
@@ -78,7 +79,17 @@ on only when that answers VALID for the newest pipeline grant that no revision s
 and it prints `TICK: grant <id> expires_at <time>`. Derive grant then uses that grant id and
 no other. Options: `tick --grant <pipeline grant id or envelope path>` checks that grant
 instead of the newest, and `tick --growth-source <name>` names the intake source of growth
-signals (default `growth`). `--skills-dir <dir>` (before `tick`, repeatable) makes the
+signals (default `growth`). Before autopick, plan, derive grant and build, and before each
+plan after the first in derive grant, the tick checks the three caps against today's UTC
+counts: plans per day and open runs from spec-first-planning
+`write_grant.py --pipeline-caps <grant> --root <repo>` (the counter `--under-pipeline`
+refuses with), and dispatches per day from the `dispatch` events in factory-conductor's
+`.skill-contract/runs/<run>/autonomy-log.jsonl` of each run under a derived grant. At a cap
+it prints `STOP: cap <name> count=<n> limit=<m> stage=<stage>`; when a source cannot be
+read it prints `STOP: cap uncounted source=<what> reason=<why>`. It appends the reason to
+`.skill-contract/pipeline/cap-stops.jsonl`, prints `STAGE: <name> skipped cap=<name>` for
+each later gated stage, still runs the stages that only read, sweep or report, and exits 0.
+`--skills-dir <dir>` (before `tick`, repeatable) makes the
 tick look for sibling skills only in that directory; it is for tests.
 
 ## When to use
@@ -110,11 +121,15 @@ skill gives `STAGE: <name> unavailable`, and the tick goes on.
    new pipeline grant is theirs to accept (`write_grant.py --pipeline` in
    spec-first-planning). When it prints `STOP: locked: ...` and exits 3, another tick is
    still running in this repo: report that, and do not delete the lock file or start the
-   tick again in a loop. The running tick releases the lock when it exits.
+   tick again in a loop. The running tick releases the lock when it exits. When it prints
+   `STOP: cap <name> ...`, report the cap, its count and limit and the stage it stopped
+   before; for `STOP: cap uncounted`, name the file the tick could not read. The owner
+   decides whether to wait for the next UTC day, close a run or accept a new grant.
 2. **Read every STAGE: line.** There are nine, in order. A result other than `ok` or `idle`
    needs a sentence in your report: `attention` (the tool exited 3), `refused` (exit 2, for
    example no intake config or no registered growth plan), `failed`, `timeout`,
-   `unavailable` (the skill is not installed) or `pending-R<n>` (not built yet).
+   `unavailable` (the skill is not installed), `skipped` (a cap stopped the tick before
+   that stage) or `pending-R<n>` (not built yet).
 3. **Follow the tool lines.** A `NEXT:` or `STOP:` line in a stage's output belongs to that
    stage's skill. Read it in that skill's terms, and give the owner the steps that are theirs.
 4. **Verify the report.** Check it against the success criteria below, then re-check.
@@ -122,6 +137,11 @@ skill gives `STAGE: <name> unavailable`, and the tick goes on.
 You MUST NOT report a stage as done when its line says `pending-R<n>`, `unavailable`,
 `refused`, `failed` or `timeout`, because the owner reads your report to learn which
 stages ran and a false `done` hides work that waits.
+
+You MUST NOT start a plan, derive a grant or run `conductor init` by hand after a
+`STOP: cap` line, and you MUST NOT delete or edit an envelope, a run log or
+`cap-stops.jsonl` to bring a count under its cap, because the caps are the owner's bound on
+unattended work and the tick stops there by design (spec constraint O2).
 
 You MUST NOT merge a pull request, accept a release grant, or write or register the pick
 policy, the intake config or a pipeline grant for the tick, because each one is a human
@@ -131,14 +151,17 @@ gate that the owner keeps (spec constraint B1).
 
 A tick report: the nine `STAGE:` lines as a table (stage, result, detail), a sentence for
 each result that is not `ok` or `idle`, and the owner's next step for each `STOP:` or
-`NEXT:` line a stage printed.
+`NEXT:` line a stage printed, including a `STOP: cap` line.
 
 ## Success criteria
 
 - The report shows nine stages in the order of the tick.
 - Each stage that is not `ok` or `idle` has a plain reason.
 - No stage that says `pending-R<n>` is called done or run.
+- A `STOP: cap` line is reported with its cap and the stage it stopped before, and no
+  `skipped` stage is called done.
 
 The outcome eval (`eval/run_eval.py`) runs the tick on stub skills from
 `assets/pipeline_testkit.py` and grades the nine lines; the unit suites are
-`assets/test_pipeline_tick.py` and `assets/test_pipeline_lock.py`.
+`assets/test_pipeline_tick.py`, `assets/test_pipeline_lock.py` and
+`assets/test_pipeline_caps.py`.
