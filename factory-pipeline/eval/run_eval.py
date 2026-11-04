@@ -12,14 +12,15 @@ that is not built yet says `pending-R<n>`, never `ok`, and a missing skill says
 grant (none, or revoked), the tick runs no stage, prints `STOP: no-grant`, and exits 2.
 The promise of R15: with an open run at max_open_runs 1, the tick prints `STOP: cap
 max_open_runs`, skips autopick, plan and derive-grant (no new plan starts), does not
-gate build on that cap, and still runs the rest.
+gate build on that cap, and still runs the rest. The promise of R17: with no planner in
+the grant, the plan stage says `unavailable no-planner` and hands on no plan.
 The harness builds stub skills with assets/pipeline_testkit.py in a tempdir, writes a real
 pipeline grant into the fixture repo with the testkit, runs the shipped
 assets/pipeline.py against them, and a model-free grader checks the transcript. The docs check keeps every path the
 docs name real, and keeps the old skeleton line out.
 
 Negative fixtures feed the grader known-bad transcripts (order swapped, a stage missing,
-a fake `ok` for an unbuilt stage, a non-zero exit, a no-grant tick that ran a stage or
+a fake `ok` for an unbuilt stage, a plan stage that hands on a plan with no planner, a non-zero exit, a no-grant tick that ran a stage or
 exited 0, a cap stop with no STOP line, a stage that ran after a cap stop, a reporting
 stage skipped by a cap, a build skipped by an open-runs cap) and a docs copy that names a missing
 script, and require the grader to reject each one.
@@ -42,7 +43,7 @@ TOOL = os.path.join(SKILL, "assets", "pipeline.py")
 STALE = "no command ships yet"
 ORDER = ["sweep", "growth-review", "idea-follow-up", "autopick", "plan", "derive-grant",
          "build", "release-stage", "digest"]
-PENDING = {"idea-follow-up": "pending-R20", "plan": "pending-R17", "build": "pending-R18",
+PENDING = {"idea-follow-up": "pending-R20", "build": "pending-R18",
            "release-stage": "pending-R19", "digest": "pending-R21"}
 WORDS = {"ok", "idle", "attention", "refused", "failed", "timeout", "unavailable"}
 PATH_RE = re.compile(r"(?<![\w.-])((?:references|assets|scripts|eval)/[\w./-]*\w)")
@@ -146,6 +147,22 @@ def cap_errors(stdout, code, cap):
     return errors
 
 
+def plan_errors(stdout):
+    """Model-free grader for the plan stage of a tick whose grant names no planner (R17):
+    the stage is `unavailable no-planner`, no `PLAN: ready` line, and derive-grant idle."""
+    errors = []
+    res = {ln.split()[1]: ln.split()[2:] for ln in stdout.splitlines()
+           if ln.startswith("STAGE: ") and len(ln.split()) > 2}
+    if res.get("plan", [])[:2] != ["unavailable", "no-planner"]:
+        errors.append("plan says %s, want unavailable no-planner"
+                      % " ".join(res.get("plan", [])))
+    if any(ln.startswith("PLAN: ready") for ln in stdout.splitlines()):
+        errors.append("a plan was handed on with no planner")
+    if res.get("derive-grant", [])[:1] != ["idle"]:
+        errors.append("derive-grant says %s, want idle" % " ".join(res.get("derive-grant", [])))
+    return errors
+
+
 def stop_errors(stdout, code):
     """Model-free grader for a tick with no live pipeline grant (R13)."""
     errors = []
@@ -214,6 +231,9 @@ def main():
         errs = tick_errors(cp.stdout, cp.returncode)
         check("tick on stub skills: nine STAGE lines in order, exit 0", not errs,
               "; ".join(errs)[:120])
+        errs = plan_errors(cp.stdout)
+        check("no planner in the grant: plan unavailable no-planner, no plan handed on",
+              not errs, "; ".join(errs)[:120])
         calls = [(c["skill"], c["key"]) for c in K.calls(sk) if c["key"] != "pipeline-caps"]
         check("tick called sweep, growth auto, intake import, autopick in order",
               calls == [("ops-intake", "sweep"), ("growth-review", "auto"),
@@ -268,8 +288,8 @@ def main():
         for label, out, code, want in (
             ("order-swapped", swapped, 0, "stages"),
             ("digest-missing", good.rsplit("\n", 1)[0], 0, "stages"),
-            ("fake-ok-plan", good.replace("plan pending-R17", "plan ok"), 0,
-             "plan says ok"),
+            ("fake-ok-build", good.replace("build pending-R18", "build ok"), 0,
+             "build says ok"),
             ("non-zero-exit", good, 1, "exit 1"),
         ):
             bad = tick_errors(out, code)
@@ -308,6 +328,21 @@ def main():
                   any(want in e for e in bad), "; ".join(bad)[:100])
         check("grader accepts the known-good cap-stop transcript",
               not cap_errors(capped, 0, "max_open_runs"))
+        noplan = ("STAGE: autopick ok picked=1\nPLAN: waiting x reason=no-planner\n"
+                  "STAGE: plan unavailable no-planner picked=1\nSTAGE: derive-grant idle plans=0")
+        for label, out, want in (
+            ("plan-ok-without-planner", noplan.replace("plan unavailable no-planner",
+                                                       "plan ok ready=1"), "plan says"),
+            ("plan-handed-on-without-planner",
+             noplan + "\nPLAN: ready .skill-contract/envelopes/p.json spec=s", "handed on"),
+            ("derive-without-planner", noplan.replace("derive-grant idle plans=0",
+                                                      "derive-grant ok derived=1"),
+             "derive-grant says"),
+        ):
+            bad = plan_errors(out)
+            check("grader rejects negative fixture %s" % label,
+                  any(want in e for e in bad), "; ".join(bad)[:100])
+        check("grader accepts the known-good no-planner transcript", not plan_errors(noplan))
         bad = tick_errors(good, 0, missing=[("growth-review", ["growth-review"])])
         check("grader rejects ok for a stage whose skill is missing",
               any("missing" in e for e in bad), "; ".join(bad)[:100])

@@ -394,6 +394,11 @@ The answers file for `--pipeline` accepts exactly these keys and refuses any oth
   is an integer of 1 or more.
 - `budget`, `stop_on`, `reentry` (optional): the same keys as for an autonomy grant.
   The budget is the ceiling for each derived grant.
+- `planner` (optional): the argv list of the agent that factory-pipeline's plan stage
+  starts to draft a spec from a picked item. It holds `{prompt}` once and may hold
+  `{root}`. The checker refuses a shell as the first element and a permission-bypass
+  flag, because the agent reads untrusted text. Without it, the pipeline plans nothing.
+  A derived grant does not copy it.
 - `pick_policy_path`, `allowlist_path` (optional): a different path, relative to `--root`,
   for one of the two pinned files.
 

@@ -210,6 +210,24 @@ class TestPipelineWrite(PipelineBase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("PIPELINE-GRANT: VALID", p.stdout)
 
+    def test_planner_answer_is_written_and_checked(self):
+        planner = ["/usr/local/bin/claude", "-p", "{prompt}"]
+        rc, out, _ = self.run_cli(dict(good_answers(), planner=planner))
+        self.assertEqual(rc, 0, out)
+        path = out.strip().splitlines()[-1][len("GRANT: "):]
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["predicate"]["payload"]["planner"], planner)
+        self.assertEqual(contract_check.check_pipeline_grant(self.root)["status"], "VALID")
+
+    def test_bad_planner_refused(self):
+        for planner in (["sh", "-c", "{prompt}"], ["claude", "-p"], "claude -p {prompt}",
+                        ["claude", "--dangerously-skip-permissions", "-p", "{prompt}"]):
+            with self.subTest(planner=planner):
+                rc, out, _ = self.run_cli(dict(good_answers(), planner=planner))
+                self.assertEqual(rc, 1, out)
+                self.assertIn("payload.planner", out)
+        self.assertEqual(self.envelopes(), [])
+
     def test_grant_pins_policy_and_allowlist(self):
         rc, out, _ = self.run_cli(good_answers())
         self.assertEqual(rc, 0, out)

@@ -1,0 +1,107 @@
+{
+  "description": "An optional planner argv with {prompt} once is VALID.",
+  "expect": {
+    "exit": 0,
+    "status": "VALID"
+  },
+  "input": {
+    "files": {
+      ".factory/check-commands.txt": "make gate\nmake gate-skill SKILL=*\n",
+      ".factory/pick-policy.json": "{\"formats\": [\"intake-item/v1\"], \"min_trust\": \"high\"}\n"
+    },
+    "grant": {
+      "_type": "https://in-toto.io/Statement/v1",
+      "predicate": {
+        "assertions": [
+          {
+            "assertedBy": {
+              "human": "Dana"
+            },
+            "command": [
+              "{python}",
+              "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+              "--unattended",
+              "docs/spec.md"
+            ],
+            "result": {
+              "outcome": "passed"
+            },
+            "subject": [
+              {
+                "digest": {
+                  "sha256": "71b581c37de8842f3327dbe968130d5fd0491cf7497dadef5f20c7d27609ae34"
+                },
+                "name": ".factory/pick-policy.json"
+              }
+            ],
+            "test": "grant-accepted"
+          }
+        ],
+        "generatedAtTime": "2026-11-04T08:00:00Z",
+        "id": "pipeline-grant-v1-20261104T080000Z-a1b2c3",
+        "payload": {
+          "allowlist": {
+            "path": ".factory/check-commands.txt",
+            "sha256": "7abd888a156b4101bf0819ce430fd87a5eea610cdd4a70916c454ed50ab6cbef"
+          },
+          "budget": {
+            "max_parallel": 2,
+            "max_repairs_per_task": 2,
+            "wall_clock_min": 1440
+          },
+          "caps": {
+            "max_dispatches_per_day": 40,
+            "max_open_runs": 2,
+            "max_plans_per_day": 3
+          },
+          "expires_at": "2026-11-07T08:00:00Z",
+          "gate_policy": {
+            "local_reversible": "auto",
+            "open_pr": "grant",
+            "push_branch": "grant",
+            "read_only": "auto"
+          },
+          "pick_policy": {
+            "path": ".factory/pick-policy.json",
+            "sha256": "71b581c37de8842f3327dbe968130d5fd0491cf7497dadef5f20c7d27609ae34"
+          },
+          "planner": [
+            "/usr/local/bin/claude",
+            "-p",
+            "{prompt}"
+          ],
+          "revoked": false,
+          "scope": {
+            "branch_pattern": "factory/*",
+            "repo": "."
+          },
+          "stop_on": [
+            "new_human_decision"
+          ]
+        },
+        "skillContract": "1",
+        "wasAttributedTo": {
+          "skill": "spec-first-planning",
+          "version": "2.0.0"
+        },
+        "wasRevisionOf": null
+      },
+      "predicateType": "https://github.com/dhanesh/agent-skills/skill-contract/pipeline-grant/v1",
+      "subject": [
+        {
+          "digest": {
+            "sha256": "71b581c37de8842f3327dbe968130d5fd0491cf7497dadef5f20c7d27609ae34"
+          },
+          "name": ".factory/pick-policy.json"
+        },
+        {
+          "digest": {
+            "sha256": "7abd888a156b4101bf0819ce430fd87a5eea610cdd4a70916c454ed50ab6cbef"
+          },
+          "name": ".factory/check-commands.txt"
+        }
+      ]
+    },
+    "now": "2026-11-04T09:00:00Z"
+  }
+}

@@ -47,7 +47,7 @@ def _sha(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _grant(expires_at="2026-11-07T08:00:00Z", gate_policy=None, caps=None):
+def _grant(expires_at="2026-11-07T08:00:00Z", gate_policy=None, caps=None, planner=None):
     pins = [{"name": n, "digest": {"sha256": _sha(FILES[n])}} for n in (PICK, ALLOW)]
     payload = {
         "scope": {"repo": ".", "branch_pattern": "factory/*"},
@@ -62,6 +62,8 @@ def _grant(expires_at="2026-11-07T08:00:00Z", gate_policy=None, caps=None):
         "expires_at": expires_at,
         "revoked": False,
     }
+    if planner is not None:
+        payload["planner"] = planner
     return {
         "_type": cc.STATEMENT_TYPE,
         "subject": pins,
@@ -111,6 +113,14 @@ def build():
             "caps without max_open_runs is not exactly the three caps: INVALID.",
             _grant(caps={"max_plans_per_day": 3, "max_dispatches_per_day": 40}),
             dict(invalid, violation_contains="payload.caps must be exactly")),
+        "planner-valid.json": _vector(
+            "An optional planner argv with {prompt} once is VALID.",
+            _grant(planner=["/usr/local/bin/claude", "-p", "{prompt}"]),
+            {"status": "VALID", "exit": 0}),
+        "planner-bypass-invalid.json": _vector(
+            "A planner reads untrusted text, so a permission-bypass flag on it is INVALID.",
+            _grant(planner=["claude", "--dangerously-skip-permissions", "-p", "{prompt}"]),
+            dict(invalid, violation_contains="permission-bypass flag")),
         "tracked-asks.json": _vector(
             "A valid pipeline grant committed to git covers nothing: ASK tracked.",
             _grant(), {"status": "ASK", "reason": "tracked", "exit": 3}, git="tracked"),
