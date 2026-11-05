@@ -118,7 +118,7 @@ class CapFixture(unittest.TestCase):
         self.assertEqual(res["sweep"][0], "ok")
         self.assertEqual(res["growth-review"][0], "ok")
         self.assertEqual(res["release-stage"][0], "idle")
-        self.assertEqual(res["digest"][0], "pending-R21")
+        self.assertEqual(res["digest"][0], "ok")
         self.assertIn("TICK: done stages=9 cap=%s" % cap, text)
 
 
@@ -143,7 +143,7 @@ class TestMaxPlansPerDay(CapFixture):
                          ["ok", "derived=1", "refused=0", "cap=max_plans_per_day"])
         # The one plan the cap allowed reaches the build hand-off: no deadlock.
         self.assertEqual(res["build"], ["unavailable", "factory-conductor", "grants=1"])
-        self.assertEqual(res["digest"][0], "pending-R21")
+        self.assertEqual(res["digest"][0], "ok")
         self.assertEqual(text.count("STOP: cap"), 1)
         rec = self.stops()
         self.assertEqual([(r["cap"], r["count"], r["limit"], r["stage"], r["grant"])

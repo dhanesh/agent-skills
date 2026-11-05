@@ -59,7 +59,12 @@ per stage, optionally followed by a detail such as `exit=3` or `picked=2`:
                   release grant the owner accepted at prep covers it; otherwise it runs
                   nothing and waits (`release-merge`, `release-grant`) for the digest. It
                   runs no other release command (R19, D19; see stage_release_stage())
-  digest          not built yet (R21): `pending-R21`
+  digest          writes .skill-contract/pipeline/digest.md (git-ignored, temp file and
+                  rename): each human gate that waits (a pull request to merge, a release
+                  grant, a production deploy, a rollback, a plan to read, an idea decision,
+                  the tamper marker, a cap stop) with the command the owner runs next, and
+                  prints `DIGEST: <path> waiting=<n>`. It runs none of those commands (R21;
+                  see stage_digest())
 
 Before each stage that would start a new plan or run, the tick checks the pipeline
 grant's caps (R15) against today's UTC counts. Autopick, plan and derive-grant (and each
@@ -172,9 +177,11 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 
 SKILL_NAME = "factory-pipeline"
 VERSION = "0.1.0"
@@ -304,6 +311,9 @@ class Tick:
         self.pathdir = None   # the private PATH directory of wrappers to the pins
         self.sealed = False   # True from the first planner on: tools get only that PATH
         self.tampered = None  # what a planner changed: the tick trusts nothing after it
+        self.idea_list = None  # the stdout of the idea stage's `ideas list` (R20, R21)
+        self.release_checked = set()  # the releases the release stage probed (R21)
+        self.stop_facts = []  # (cap, stage, facts) of each cap stop of this tick (R21)
 
 
 # ── finding the sibling skills ──────────────────────────────────────────────────────────
@@ -571,6 +581,7 @@ def ideas_due(tick, tool):
                                echo_stdout=False)
     if code != 0:
         return 0, word
+    tick.idea_list = out  # the digest reads the idea decisions from it (R21)
     today = datetime.date.today()  # the same clock ideas.py reads without --today
     n = 0
     for line in out.decode("utf-8", "replace").splitlines():
@@ -2039,6 +2050,8 @@ def stage_release_stage(tick):
         return "failed", "probe"
     state, version = ans.get("state"), str(ans.get("version") or "")
     cmd = "%s %s" % (shlex.quote(PYTHON), shlex.quote(tool))
+    if state in ("checked", "stop"):
+        tick.release_checked.add(version)  # the digest lists what this probe found
     if state == "none":
         return "idle", ""
     if state == "started":
@@ -2084,8 +2097,533 @@ def stage_release_stage(tick):
     return word, join("staged=1 release=%s" % shown(version), exit_detail(code))
 
 
+# ── the digest (R21) ────────────────────────────────────────────────────────────────────
+# The digest stage writes DIGEST_FILE in the git-ignored pipeline state directory on every
+# tick that reaches it: one entry for each human gate that waits, each with the command
+# the owner runs next. It only SHOWS commands; it never runs one (B1). It runs no
+# spec-first-planning, factory-conductor or release-conductor tool. It reads:
+#   - tick.waiting, what the earlier stages of this tick left (plan reads, cap waits,
+#     build waits, idea due dates, release merge and grant waits);
+#   - factory-conductor's run state (RUNS_DIR/<run>/state.json `finished`): a run that
+#     opened a pull request that is not merged into its base branch. The run result does
+#     not carry the pull request number, so the digest uses the URL that the PR command
+#     printed, or a `gh pr list --head <run branch>` command that finds it. It asks the
+#     local git only (is the run head an ancestor of the local base branch, does the run
+#     branch still exist), never the forge, and not at all after a planner tamper;
+#   - release-conductor's release state (RELEASES_DIR/<version>/state.json): a prepared
+#     release that waits for its merge or its grant, a staged release that waits for the
+#     production deploy, and a failed one that waits for a rollback;
+#   - incident-watch's open incident records (INCIDENTS_DIR/records/<id>.json), whose
+#     `rollback` field already holds the owner's rollback commands word for word;
+#   - the `ideas list` output of the idea stage (read-only, never --today): an idea whose
+#     computed verdict is final (IDEA_FINAL) and that has no decision waits for
+#     `ideas decide`. Only when the idea stage did not list, and no planner ran in this
+#     tick, does the digest run that same read-only `ideas list` itself;
+#   - the tamper marker and the cap stops of this tick.
+# Gates that outlive a tick (pull requests, releases, incidents, ideas, the tamper marker)
+# come from their own state on every tick, so the digest is whole even when an earlier
+# stage was skipped.
+#
+# Every value that comes from a file, a tool or a stage is untrusted. It is shown only as
+# an inline code span (span()), with backticks, backslashes, control, format, bidi and
+# line-separator characters escaped as \uXXXX, so it cannot end the span, start a line,
+# forge an entry or a heading, or reorder the text. Each line starts with fixed text, and
+# each command is a fixed template with its arguments shlex-quoted (command()).
+DIGEST_FILE = "digest.md"
+DIGEST_SHOWN = 50        # entries shown per section; the rest are counted
+DIGEST_VALUE_MAX = 300   # characters shown of one untrusted value
+DIGEST_COMMAND_MAX = 8000  # characters shown of one command (never cut in practice)
+STATE_MAX = 4 * 1024 * 1024  # bytes of one state file the digest reads
+DIGEST_SECTIONS = (
+    ("pr-merge", "Pull requests to merge"),
+    ("release-grant", "Release grants to accept"),
+    ("deploy", "Production deploys"),
+    ("rollback", "Rollbacks"),
+    ("plan-read", "Plans waiting for a read"),
+    ("idea-decision", "Idea decisions"),
+    ("idea-due", "Idea assumptions due"),
+    ("tamper", "Planner tamper"),
+    ("cap", "Cap stops"),
+    ("other", "Other waits"),
+)
+IDEA_FINAL = ("GO", "KILL", "STALLED")
+INCIDENTS_DIR = ".skill-contract/incidents"
+INCIDENT_ID = re.compile(r"^inc-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\Z")
+PR_URL = re.compile(r"^https://[A-Za-z0-9.-]{1,253}(?:/[A-Za-z0-9._~-]{1,100}){1,4}"
+                    r"/pull/[0-9]{1,9}\Z")
+BRANCH = re.compile(r"^(?!-)[A-Za-z0-9._/-]{1,200}\Z")
+SHA = re.compile(r"^[0-9a-f]{7,64}\Z")
+VERSION_NAME = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}\Z")
+CAP_WAIT = re.compile(r"wait(?:s)? for (\S+) to fall below its cap")
+REASON_IN = re.compile(r"reason=(\S+)")
+DUE_IN = re.compile(r"^assumptions due or expired: (\S+);")
+BUILD_IN = re.compile(r"^build waits: (\S+)")
+YOUR_NAME = '"<your name>"'
+
+
+class Hole(str):
+    """A placeholder in a shown command, such as "<your name>": shown as is, not quoted."""
+
+
+def command(*words):
+    """One shown command: a fixed template whose real arguments are shlex-quoted."""
+    return " ".join(w if isinstance(w, Hole) else shlex.quote(str(w)) for w in words)
+
+
+def span(value, limit=DIGEST_VALUE_MAX):
+    """value as one inline code span that cannot end early, break the line or reorder
+    text: backticks, backslashes and every control, format, private-use, unassigned,
+    surrogate, line or paragraph separator character, and every space but U+0020, are
+    shown as \\uXXXX (\\UXXXXXXXX above U+FFFF)."""
+    text = str(value)
+    if len(text) > limit:
+        text = text[:limit] + "..."
+    out = []
+    for ch in text:
+        cat = unicodedata.category(ch)
+        if ch in "`\\" or cat[0] == "C" or cat in ("Zl", "Zp") or (cat == "Zs" and ch != " "):
+            out.append("\\u%04x" % ord(ch) if ord(ch) <= 0xFFFF else "\\U%08x" % ord(ch))
+        else:
+            out.append(ch)
+    return "`%s`" % "".join(out) if out else '`""`'
+
+
+def _read_state(path):
+    """The JSON object in a regular file (no symlink, no FIFO, at most STATE_MAX bytes),
+    or None."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > STATE_MAX:
+            return None
+        chunks = []
+        while True:
+            b = os.read(fd, 65536)
+            if not b:
+                break
+            chunks.append(b)
+        doc = json.loads(b"".join(chunks).decode("utf-8"))
+        return doc if isinstance(doc, dict) else None
+    except (OSError, ValueError):
+        return None
+    finally:
+        os.close(fd)
+
+
+def _listdir(path):
+    try:
+        return sorted(os.listdir(path))
+    except OSError:
+        return []
+
+
+def pr_url(value):
+    """The pull request URL that a PR command printed (the last line that is one), or
+    None."""
+    if not isinstance(value, str):
+        return None
+    for line in reversed(value.splitlines()):
+        if PR_URL.match(line.strip()):
+            return line.strip()
+    return None
+
+
+def entry(section, text, nxt):
+    """One digest entry. `text` is fixed prose with every untrusted value already in
+    span(); `nxt` is [(fixed label, shown command or None)]."""
+    return {"section": section, "text": text, "next": list(nxt)}
+
+
+def _tool_cmd(tick, skill, rel, short):
+    """The words that start a sibling tool's command: [PYTHON, its path], or the skill's
+    short form when it is not installed."""
+    tool = find_tool(tick.roots, skill, rel)
+    return [PYTHON, tool] if tool else [Hole(short)]
+
+
+def _git_ok(tick):
+    """True when the digest may ask the local git: no planner tamper, and the program
+    roots unchanged since the baseline when a planner ran."""
+    return not tick.tampered and (not tick.sealed or tools_trusted(tick))
+
+
+def pr_merged(tick, fin, branch, base):
+    """True when the run's pull request needs no merge any more: the run branch is gone
+    from the local repo, or the run head is an ancestor of the local base branch."""
+    if not (branch and base and BRANCH.match(base)) or not _git_ok(tick):
+        return False
+    cp = git(tick, "rev-parse", "-q", "--verify", "refs/heads/%s^{commit}" % branch)
+    if cp is None:
+        return False
+    if cp.returncode != 0:
+        return True
+    integ = fin.get("integration") if isinstance(fin.get("integration"), dict) else {}
+    head = integ.get("head")
+    head = head if isinstance(head, str) and SHA.match(head) else "refs/heads/" + branch
+    cp = git(tick, "merge-base", "--is-ancestor", head, "refs/heads/" + base)
+    return cp is not None and cp.returncode == 0
+
+
+def merge_steps(url, branch):
+    """The owner's commands for a pull request: merge it by URL, or find it by branch."""
+    if url:
+        return [("review it, then merge", command("gh", "pr", "merge", url))]
+    find = command("gh", "pr", "list", "--head", branch, "--state", "open") if branch \
+        else command("gh", "pr", "list", "--state", "open")
+    return [("find it", find), ("then merge", command("gh", "pr", "merge", Hole("<number>")))]
+
+
+def digest_runs(tick):
+    """A factory-conductor run that opened a pull request that is not merged."""
+    base = os.path.join(tick.root, *RUNS_DIR.split("/"))
+    out = []
+    for name in _listdir(base):
+        if not RUN_ID.match(name):
+            continue
+        st = _read_state(os.path.join(base, name, RUN_STATE))
+        fin = st.get("finished") if st else None
+        if not isinstance(fin, dict) or not fin.get("pr"):
+            continue
+        branch, into = st.get("run_branch"), st.get("base_branch")
+        branch = branch if isinstance(branch, str) and BRANCH.match(branch) else None
+        into = into if isinstance(into, str) else None
+        if pr_merged(tick, fin, branch, into):
+            continue
+        url = pr_url(fin.get("pr"))
+        text = "Run %s opened a pull request%s from branch %s into %s that is not merged." % (
+            span(name), " " + span(url) if url else " (the run records no number)",
+            span(branch or st.get("run_branch")), span(into))
+        out.append(entry("pr-merge", text, merge_steps(url, branch)))
+    return out
+
+
+def digest_releases(tick):
+    """release-conductor's releases that wait for the owner, and the release stage's
+    waits of this tick."""
+    rel = _tool_cmd(tick, RELEASE[0], RELEASE[1], "release")
+    root = tick.root
+    waits = {}
+    for kind, subject, text in tick.waiting:
+        if kind.startswith("release-") and str(subject).startswith("release "):
+            waits.setdefault(str(subject)[len("release "):], []).append((kind, str(text)))
+    out = []
+    base = os.path.join(root, *RELEASES_DIR.split("/"))
+    for version in release_dirs(root):
+        st = _read_state(os.path.join(base, version, "state.json")) or {}
+        status = st.get("status")
+        v = span(version)
+        kinds = waits.pop(version, [])
+        if status == "prepped" and st.get("stage") is None:
+            if not kinds and version in tick.release_checked:
+                continue  # probed in this tick: staged now, or deferred to the next tick
+            prep = st.get("prep") if isinstance(st.get("prep"), dict) else {}
+            url = pr_url(prep.get("pr"))
+            branch = "release/%s" % version if VERSION_NAME.match(version) else None
+            if not kinds or any(k == "release-merge" for k, _ in kinds):
+                note = "" if kinds else " The release stage did not check it in this tick."
+                out.append(entry("pr-merge", "Release %s: the release pull request%s is not "
+                                 "merged into the local default branch.%s"
+                                 % (v, " " + span(url) if url else "", note),
+                                 merge_steps(url, branch) + [
+                                     ("after the merge", command("git", "-C", root, "pull"))]))
+            for kind, text in kinds:
+                if kind == "release-grant":
+                    grant = st.get("grant") if isinstance(st.get("grant"), dict) else {}
+                    out.append(entry("release-grant", "Release %s: the release grant %s does "
+                                     "not cover it. End the release, then accept a new "
+                                     "release grant at prep." % (
+                                         v, span(grant.get("id") or "(none)")),
+                                     [("end it", command(*rel + ["abandon", "--root", root,
+                                                                 "--approved-by",
+                                                                 Hole(YOUR_NAME), "--reason",
+                                                                 Hole('"<why>"')])),
+                                      ("then", command(*rel + ["prep", "--root", root,
+                                                               "--approved-by",
+                                                               Hole(YOUR_NAME), "--driver",
+                                                               Hole("<agent id>")]))]))
+                elif kind != "release-merge":
+                    out.append(entry("other", "Release %s waits: %s %s." % (
+                        v, span(kind), span(text)),
+                        [("next", command(*rel + ["status", "--root", root]))]))
+        elif status in ("staged", "awaiting_deploy"):
+            out.append(entry("deploy", "Release %s is %s and waits for the production deploy, "
+                             "which only the owner approves." % (v, span(status)),
+                             [("show the summary", command(*rel + ["deploy", "--root", root])),
+                              ("on the owner's yes", command(*rel + [
+                                  "deploy", "--root", root, "--approved-by",
+                                  Hole(YOUR_NAME)]))]))
+        elif status in ("prod_failed", "outcome_unknown"):
+            steps = [("check production first", command(*rel + ["verify-prod", "--root",
+                                                                root]))] \
+                if status == "outcome_unknown" else []
+            steps += [("show the rollback", command(*rel + ["rollback", "--root", root])),
+                      ("on the owner's yes", command(*rel + ["rollback", "--root", root,
+                                                             "--approved-by",
+                                                             Hole(YOUR_NAME)]))]
+            out.append(entry("rollback", "Release %s is %s: production may need a rollback, "
+                             "which only the owner approves." % (v, span(status)), steps))
+        else:
+            for kind, text in kinds:
+                out.append(entry("other", "Release %s waits: %s %s." % (
+                    v, span(kind), span(text)),
+                    [("next", command(*rel + ["status", "--root", root]))]))
+    for version, kinds in sorted(waits.items()):  # a wait with no release directory
+        for kind, text in kinds:
+            out.append(entry("other", "Release %s waits: %s %s." % (
+                span(version), span(kind), span(text)),
+                [("next", command(*rel + ["status", "--root", root]))]))
+    return out
+
+
+def digest_incidents(tick):
+    """incident-watch's open incident records: each waits for the owner's rollback."""
+    d = os.path.join(tick.root, *INCIDENTS_DIR.split("/"), "records")
+    out = []
+    for name in _listdir(d):
+        if not name.endswith(".json"):
+            continue
+        rec = _read_state(os.path.join(d, name))
+        if not rec or rec.get("status") != "open":
+            continue
+        rid = rec.get("id") if isinstance(rec.get("id"), str) else name[:-len(".json")]
+        rb = rec.get("rollback") if isinstance(rec.get("rollback"), dict) else {}
+        ask = rb.get("ask_owner") if isinstance(rb.get("ask_owner"), dict) else {}
+        shown_rb = rb.get("display") if isinstance(rb.get("display"), str) else None
+        text = "Incident %s, opened at %s after %s failed production probes." % (
+            span(rid), span(rec.get("opened_at")), span(rec.get("consecutive_failures")))
+        steps = []
+        if rb.get("available") and shown_rb:
+            text += " The recipe's rollback is %s." % span(shown_rb)
+            if ask.get("can_act") and isinstance(ask.get("command"), str):
+                steps.append(("shows the rollback and waits", ask["command"]))
+                if isinstance(ask.get("on_owner_yes"), str):
+                    steps.append(("on the owner's yes", ask["on_owner_yes"]))
+            else:
+                text += " release rollback cannot act: %s." % span(
+                    ask.get("cannot_act_reason"))
+                steps.append(("the owner rolls back by hand", shown_rb))
+        else:
+            text += " There is no rollback to show: %s; the owner mitigates by hand." % span(
+                rb.get("reason"))
+        steps.append(("after the fix", command(Hole("incident"), "close", "--by",
+                                               Hole(YOUR_NAME), "--id", rid)
+                      if INCIDENT_ID.match(rid) else
+                      command(Hole("incident"), "close", "--by", Hole(YOUR_NAME))))
+        out.append(entry("rollback", text, steps))
+    return out
+
+
+def plan_read(tick, subject, text):
+    """The entry for one plan that waits for the owner's read."""
+    root, subject = tick.root, str(subject)
+    m = REASON_IN.search(str(text))
+    why = m.group(1) if m else str(text)
+    shown_text = "Plan %s waits for the owner's read: %s." % (span(subject), span(why))
+    if "planner-tamper" in str(text) or "planner-changed" in str(text):
+        return entry("plan-read", shown_text, [
+            ("read what changed", command("cat", "%s/%s" % (PIPELINE_DIR, TAMPER_MARKER))),
+            ("then", command(PYTHON, os.path.abspath(__file__), "--root", root,
+                             "tamper-clear", "--by", Hole(YOUR_NAME)))])
+    name = os.path.basename(subject)
+    if subject.endswith(".md"):
+        tool = _tool_cmd(tick, PLANNING, PLAN_TOOLS["tasks"], "spec_to_tasks.py")
+        steps = [("read and finish the spec, then",
+                  command(*tool + [subject, "--envelope", root]))]
+    elif name.startswith("task-plan-v1-"):
+        tool = _tool_cmd(tick, PLANNING, TOOLS[PLANNING], "write_grant.py")
+        steps = [("read the plan, then", command(*tool + [
+            "--under-pipeline", tick.grant or Hole("<pipeline grant id>"), "--root", root,
+            "--plan", subject]))]
+    else:
+        key = "idea" if subject.startswith(SPEC_DIRS["idea"].rsplit("/", 1)[0] + "/") \
+            else "intake"
+        tool = _tool_cmd(tick, PLANNING, PLAN_TOOLS[key], os.path.basename(PLAN_TOOLS[key]))
+        steps = [("plan it with spec-first-planning", command(*tool + [subject]))]
+    return entry("plan-read", shown_text, steps)
+
+
+def digest_waiting(tick):
+    """The entries of tick.waiting, except the release waits (digest_releases) and the
+    cap waits (digest_caps). Returns (entries, {cap: [subjects that wait for it]})."""
+    out, caps = [], {}
+    root = tick.root
+    for kind, subject, text in tick.waiting:
+        kind, subject, text = str(kind), str(subject), str(text)
+        if kind.startswith("release-"):
+            continue
+        if kind == "plan-read":
+            out.append(plan_read(tick, subject, text))
+        elif kind == "cap":
+            m = CAP_WAIT.search(text)
+            if m:
+                caps.setdefault(m.group(1), []).append(subject)
+            else:
+                caps.setdefault(subject, [])
+        elif kind == "idea":
+            m = DUE_IN.match(text)
+            nxt = [("next", command(Hole("ideas"), "status", subject))] \
+                if IDEA_SLUG.match(subject) else []
+            out.append(entry("idea-due", "Idea %s has assumptions due or expired: %s." % (
+                span(subject), span(m.group(1) if m else text)), nxt))
+        elif kind == "idea-envelope":
+            tool = _tool_cmd(tick, CHECKER[0], CHECKER[1], "contract_check.py")
+            out.append(entry("other", "Idea envelope %s waits: %s." % (
+                span(subject), span(text)),
+                [("see why", command(*tool + ["check-envelope", subject, "--root", root]))]))
+        elif kind == "build":
+            m = BUILD_IN.match(text)
+            why = m.group(1) if m else text
+            nxt = [("see the changes", command("git", "-C", root, "status", "--short"))] \
+                if why == "root-dirty" else [("next", None)]
+            out.append(entry("other", "Build of grant %s waits: %s. A later tick builds it "
+                             "when the reason is gone." % (span(subject), span(why)), nxt))
+        else:
+            out.append(entry("other", "%s %s waits: %s." % (span(kind), span(subject),
+                                                            span(text)), [("next", None)]))
+    return out, caps
+
+
+def digest_caps(tick, caps):
+    """One entry per cap that stopped this tick, with what waits for it."""
+    facts = {}
+    for cap, stage, f in tick.stop_facts:
+        facts.setdefault(cap, (stage, f))
+    out = []
+    grant_tool = _tool_cmd(tick, PLANNING, TOOLS[PLANNING], "write_grant.py")
+    for cap in list(dict.fromkeys(list(tick.stops) + list(caps))):
+        stage, f = facts.get(cap, (None, {}))
+        shown_facts = " ".join("%s=%s" % (k, f[k]) for k in sorted(f))
+        text = "Cap %s stopped the tick%s%s." % (
+            span(cap), " at stage %s" % span(stage) if stage else "",
+            ": %s" % span(shown_facts) if shown_facts else "")
+        held = caps.get(cap) or []
+        if held:
+            text += " Waiting for it: %s." % ", ".join(span(s) for s in held[:10])
+            if len(held) > 10:
+                text += " (%d more)" % (len(held) - 10)
+        if cap == "uncounted":
+            steps = [("read the stop, then fix the file it names",
+                      command("tail", "-n", "1", "%s/%s" % (PIPELINE_DIR, CAP_STOPS)))]
+        else:
+            text += (" Wait for the next UTC day, or" if cap.endswith("_per_day")
+                     else " Finish an open run, or")
+            text += " accept a new pipeline grant with a higher cap."
+            steps = [("a new pipeline grant", command(*grant_tool + [
+                "--pipeline", "--root", tick.root, "--answers", Hole("<answers.json>"),
+                "--accepted-by", Hole(YOUR_NAME)]))]
+        out.append(entry("cap", text, steps))
+    return out
+
+
+def digest_tamper(tick):
+    """The persistent tamper marker: every later tick stops until the owner clears it."""
+    marked = read_marker(tick.root)
+    if marked is None:
+        return []
+    reason, rec = marked
+    changed = (rec or {}).get("changed")
+    changed = [str(c) for c in changed[:5]] if isinstance(changed, list) else []
+    text = "A planner changed %s. No stage runs until the owner reads what changed%s and " \
+           "clears the marker." % (span(reason), " (%s)" % ", ".join(span(c) for c in changed)
+                                   if changed else "")
+    return [entry("tamper", text, [
+        ("read what changed", command("cat", "%s/%s" % (PIPELINE_DIR, TAMPER_MARKER))),
+        ("then", command(PYTHON, os.path.abspath(__file__), "--root", tick.root,
+                         "tamper-clear", "--by", Hole(YOUR_NAME)))])]
+
+
+def digest_ideas(tick):
+    """Each idea whose computed verdict is final and that has no decision yet."""
+    data = tick.idea_list
+    if data is None and not (tick.sealed or tick.tampered):
+        tool = find_tool(tick.roots, IDEAS[0], IDEAS[1])
+        if tool is not None:  # the same read-only `ideas list` as the idea stage
+            _w, rc, out = run_tool(tick, "digest", py(tool, "--root", tick.root, "list"),
+                                   echo_stdout=False)
+            data = out if rc == 0 else None
+    out = []
+    for line in (data or b"").decode("utf-8", "replace").splitlines():
+        m = IDEA_LIST_LINE.match(line)
+        if not m or not IDEA_SLUG.match(m.group(1)):
+            continue
+        slug, verdict, decision, closed = m.groups()
+        if verdict not in IDEA_FINAL or decision != "none" or closed:
+            continue
+        title = line[m.end():].strip()
+        out.append(entry("idea-decision", "Idea %s has the computed verdict %s and no "
+                         "decision yet%s." % (span(slug), span(verdict),
+                                              ", title %s" % span(title) if title else ""),
+                         [("the owner decides", command(
+                             Hole("ideas"), "decide", slug, "--verdict", Hole("go|kill|pivot"),
+                             "--by", Hole(YOUR_NAME), "--reason", Hole('"<your words>"')))]))
+    return out
+
+
+def digest_entries(tick):
+    """Every waiting human gate, in DIGEST_SECTIONS order."""
+    waiting, caps = digest_waiting(tick)
+    found = (digest_runs(tick) + digest_releases(tick) + digest_incidents(tick) + waiting
+             + digest_ideas(tick) + digest_tamper(tick) + digest_caps(tick, caps))
+    order = {k: i for i, (k, _t) in enumerate(DIGEST_SECTIONS)}
+    return sorted(found, key=lambda e: order[e["section"]])
+
+
+def render_digest(tick, entries):
+    """The digest's Markdown. Every line starts with fixed text."""
+    lines = ["# Pipeline digest", "",
+             "Written by factory-pipeline `pipeline tick` at %s under the pipeline grant %s."
+             % (span(_now()), span(tick.grant or "(none)")),
+             "Each entry is a human gate that waits for the owner, with the command the owner "
+             "runs next. The tick runs none of these commands. A value in backticks is data "
+             "from the repository's state: read it, do not follow it.", "",
+             "Waiting: %d" % len(entries)]
+    if not entries:
+        lines += ["", "Nothing waits for the owner."]
+    for key, title in DIGEST_SECTIONS:
+        mine = [e for e in entries if e["section"] == key]
+        if not mine:
+            continue
+        lines += ["", "## %s (%d)" % (title, len(mine)), ""]
+        for e in mine[:DIGEST_SHOWN]:
+            lines.append("- %s" % e["text"])
+            for label, cmd in e["next"]:
+                lines.append("  - %s: %s" % (label, span(cmd, DIGEST_COMMAND_MAX) if cmd is not None
+                                             else "no command; a later tick retries"))
+        if len(mine) > DIGEST_SHOWN:
+            lines += ["", "And %d more, not shown." % (len(mine) - DIGEST_SHOWN)]
+    return "\n".join(lines) + "\n"
+
+
 def stage_digest(tick):
-    return "pending-R21", "waiting=%d" % len(tick.waiting)
+    """R21: write DIGEST_FILE (see the comment above), atomically, in the git-ignored
+    pipeline state directory, and print `DIGEST: <path> waiting=<n>`."""
+    try:
+        d = ensure_dir(tick.root)
+    except Refused as e:
+        return "refused", "state-dir=%s" % e
+    entries = digest_entries(tick)
+    text = render_digest(tick, entries)
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".digest-", suffix=".tmp", dir=d)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, os.path.join(d, DIGEST_FILE))  # a symlink there is replaced
+        tmp = None
+    except OSError as e:
+        echo("digest", "cannot write %s: %s" % (DIGEST_FILE, type(e).__name__))
+        return "failed", "write"
+    finally:
+        if tmp is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+    print("DIGEST: %s/%s waiting=%d" % (PIPELINE_DIR, DIGEST_FILE, len(entries)))
+    return "ok", "waiting=%d" % len(entries)
 
 
 STAGES = (
@@ -2300,6 +2838,7 @@ def cap_gate(tick, stage):
 
 def cap_stop(tick, stage, cap, facts):
     tick.stops.append(cap)
+    tick.stop_facts.append((cap, stage, dict(facts)))
     detail = " ".join("%s=%s" % (k, facts[k]) for k in facts)
     print("STOP: cap %s %s stage=%s" % (cap, detail, stage))
     sys.stdout.flush()

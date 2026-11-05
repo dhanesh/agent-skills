@@ -70,6 +70,9 @@ CLI: python3 pipeline_testkit.py stubs <dir>   (prints STUBS: <dir>)
                                                   main; prints MERGED: <commit>)
      python3 pipeline_testkit.py ideafix <dir>  (an idea fixture, R20: prints REPO: and
                                                   SKILLS:)
+     python3 pipeline_testkit.py digestfix <dir>  (a digest fixture, R21: prints REPO:,
+                                                  SKILLS:, GRANT: <revoked release grant>
+                                                  and RUN: <run with an open PR>)
 
 The build stage (R18): conductor_stub(skills) writes a stub factory-conductor
 `assets/conductor.py` that logs its argv, PATH and interpreter flags to
@@ -857,7 +860,52 @@ def idea_fixture(d):
     return repo, skills, agent
 
 
+# ── the digest (R21) ────────────────────────────────────────────────────────────────────
+DIGEST_PR = "https://github.com/acme/app/pull/7"  # a URL a PR command printed; never fetched
+
+
+def finished_run(repo, n, branch, pr, head=None, base="main"):
+    """A finished factory-conductor run whose state.json records a pushed branch and the
+    PR command's output (`finished.pr`), in the fields conductor.py writes. Return its id."""
+    rid = "run-20261104T000000Z-%06x" % n
+    write_rel(repo, ".skill-contract/runs/%s/state.json" % rid, json.dumps({
+        "run_id": rid, "grant_id": "autonomy-grant-v1-20261104T000000Z-%06x" % n,
+        "run_branch": branch, "base_branch": base, "dispatches": 0,
+        "finished": {"envelope": ".skill-contract/envelopes/run-result-v1-x.json",
+                     "pushed": True, "pr": pr, "integration": {"head": head}}}) + "\n")
+    return rid
+
+
+def branch_ahead(repo, name):
+    """A local branch with one commit that main does not have. Return the commit."""
+    sha = release_git(repo, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "run work")
+    release_git(repo, "branch", name, sha)
+    return sha
+
+
+def digest_fixture(d):
+    """(repo, skills, release grant id, run id) for the digest: the release fixture (its
+    release PR is open), with the release grant revoked (a release grant waits), a
+    finished run whose PR is open on factory/demo, and the stub autopick's pick, which
+    waits for a read because the grant names no planner."""
+    repo, skills, gid = release_fixture(d)
+    cp = subprocess.run([sys.executable, CHECKER, "revoke-grant", "--root", repo, "--id", gid],
+                        capture_output=True, text=True, timeout=60)
+    if cp.returncode != 0:
+        raise RuntimeError("revoke-grant failed:\n" + cp.stdout + cp.stderr)
+    rid = finished_run(repo, 1, "factory/demo", DIGEST_PR + "\n",
+                       branch_ahead(repo, "factory/demo"))
+    return repo, skills, gid, rid
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "digestfix":
+        repo, skills, gid, rid = digest_fixture(os.path.abspath(sys.argv[2]))
+        print("REPO: %s" % repo)
+        print("SKILLS: %s" % skills)
+        print("GRANT: %s" % gid)
+        print("RUN: %s" % rid)
+        sys.exit(0)
     if len(sys.argv) == 3 and sys.argv[1] == "ideafix":
         repo, skills, _ = idea_fixture(os.path.abspath(sys.argv[2]))
         print("REPO: %s" % repo)

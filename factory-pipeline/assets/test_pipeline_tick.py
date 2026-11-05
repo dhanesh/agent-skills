@@ -24,7 +24,6 @@ import pipeline_testkit as K  # noqa: E402
 TOOL = os.path.join(HERE, "pipeline.py")
 ORDER = ["sweep", "growth-review", "idea-follow-up", "autopick", "plan", "derive-grant",
          "build", "release-stage", "digest"]
-PENDING = {"digest": "pending-R21"}
 
 
 class Fixture(unittest.TestCase):
@@ -80,10 +79,11 @@ class TestTick(Fixture):
                                 ("ops-intake", "import"), caps, ("ops-intake", "autopick"),
                                 caps, caps])
 
-    def test_unbuilt_stages_say_pending_never_ok(self):
+    def test_every_stage_ships_and_the_digest_lists_the_pick(self):
         _, res, _ = self.tick()
-        for stage, word in PENDING.items():
-            self.assertEqual(res[stage][0], word, stage)
+        self.assertFalse([s for s, w in res.items() if w[0].startswith("pending-")], res)
+        # R21: the digest lists the pick, which waits for the owner's read (no planner).
+        self.assertEqual(res["digest"], ["ok", "waiting=1"])
         # R20: idea follow-up ships; the stubs hold no idea-validation and no idea.
         self.assertEqual(res["idea-follow-up"], ["unavailable", "idea-validation", "due=0",
                                                  "go=0"])

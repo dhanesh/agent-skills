@@ -1,7 +1,6 @@
 # factory-pipeline: the stages of one tick
 
-Status: partly built. `pipeline tick` ships. One of its nine stages (digest) is not built
-yet and reports `pending-R21`. The design is `docs/factory/2026-11-04-autonomous-factory-spec.md`
+Status: built. `pipeline tick` ships with all nine stages. The design is `docs/factory/2026-11-04-autonomous-factory-spec.md`
 in the agent-skills repository (requirements R12 to R21).
 
 ## The lock, before everything else
@@ -71,11 +70,11 @@ A detail can follow the result, for example `exit=3` or `picked=2`.
 | `derive-grant` | For each plan that the plan stage hands on, derives a per-plan grant from the pipeline grant. With no plan, the result is `idle`. | `spec-first-planning`: `write_grant.py --under-pipeline <grant> --root <repo> --plan <plan>` |
 | `build` | Starts one factory-conductor run for the oldest derived grant that no run names yet, while no run in the root is unfinished (R18). See "The build stage". With nothing to build, the result is `idle`. | `factory-conductor`: `conductor init --plan <plan> --root <repo>`, then `conductor reentry install --root <repo>` when the grant has a reentry block; `spec-first-planning`: `contract_check.py check-grant` |
 | `release-stage` | Runs `release stage` once for the release that `release prep` prepared, only after the owner merged its release pull request and while the release grant covers it (R19). See "The release stage". With no release, the result is `idle`. | `release-conductor`: `release stage --root <repo> --unattended`; a read-only probe that asks release-conductor's own merged-check and grant check |
-| `digest` | Not built yet (R21). Result: `pending-R21`. | none |
+| `digest` | Writes `.skill-contract/pipeline/digest.md`: each human gate that waits, with the command the owner runs next (R21). See "The digest". With nothing waiting, the file says so. Result: `ok waiting=<n>`. | none: it reads the state files of factory-conductor, release-conductor, incident-watch and the tick, and the `ideas list` output of the idea stage |
 
 The one-tick lock (R14), the caps (R15), the plan stage (R17), the build stage (R18), the
-release stage (R19), the idea follow-up stage (R20) and the schedule (R16) ship; see their
-sections.
+release stage (R19), the idea follow-up stage (R20), the digest (R21) and the schedule
+(R16) ship; see their sections.
 
 ## The idea follow-up stage
 
@@ -477,6 +476,62 @@ changes `release.py`, or any file beside it, poisons the tick:
 `STAGE: release-stage skipped planner-tamper=tools`, and no release code runs. The stage
 checks the baseline again before the probe and before `release stage`.
 
+## The digest
+
+The digest stage (R21) runs on every tick that reaches it. It also runs after a cap stop
+and after a planner tamper in the same tick. A tick that stops on a persisted tamper runs
+no stage, so the digest of the tick that found the tamper stays on disk.
+
+The stage:
+
+1. proves that `.skill-contract/pipeline/` is git-ignored, with the same check as the lock
+   (`STAGE: digest refused state-dir=<reason>` when it cannot);
+2. collects the entries (see below);
+3. writes them to a temp file in that directory and renames it over `digest.md`. A
+   symlink at `digest.md` is replaced, not followed;
+4. prints `DIGEST: .skill-contract/pipeline/digest.md waiting=<n>` and
+   `STAGE: digest ok waiting=<n>`, where `<n>` is the number of entries.
+
+The file has a title, the time, the pipeline grant id and `Waiting: <n>`. With no entry, it
+says "Nothing waits for the owner." Otherwise it has one `## <section> (<n>)` heading per
+section that has entries. Each entry is one `- ` line, and each command is one `  - <label>:`
+line under it.
+
+| Section | What the digest lists | Source | The owner's command |
+|---|---|---|---|
+| Pull requests to merge | A factory-conductor run that opened a pull request that is not merged. | The run's `state.json` `finished` (`pr`, `integration.head`), `run_branch` and `base_branch`. | `gh pr merge <url>` when the PR command printed a URL; else `gh pr list --head <run branch> --state open`, then `gh pr merge <number>`. |
+| Pull requests to merge | A prepared release whose release pull request is not merged. | The release stage's `release-merge` wait, or the release's `state.json` when the release stage did not check it in this tick. | The same `gh` commands for `release/<version>`, then `git -C <repo> pull`. |
+| Release grants to accept | A prepared release whose release grant does not cover it. | The release stage's `release-grant` wait. | `release abandon --root <repo> --approved-by <name> --reason <why>`, then `release prep --root <repo> --approved-by <name> --driver <agent id>`. |
+| Production deploys | A release that is `staged` or `awaiting_deploy`. | The release's `state.json`. | `release deploy --root <repo>` (it shows the summary and waits), then the same with `--approved-by <name>`. |
+| Rollbacks | A release that is `prod_failed` or `outcome_unknown`. | The release's `state.json`. | `release verify-prod --root <repo>` first for `outcome_unknown`, then `release rollback --root <repo>`, then the same with `--approved-by <name>`. |
+| Rollbacks | An open incident record. | incident-watch's `records/<id>.json`. | The record's `rollback.ask_owner` commands, word for word, or the recipe's rollback when release-conductor cannot act; then `incident close --by <name> --id <id>`. |
+| Plans waiting for a read | A plan that the plan or derive-grant stage left for the owner. | `tick.waiting`. | `spec_to_tasks.py <spec> --envelope <repo>` for a spec, `write_grant.py --under-pipeline <grant> --root <repo> --plan <plan>` for a plan, `intake_request.py` or `idea_request.py` for a picked envelope, and `tamper-clear` after a tamper. |
+| Idea decisions | An idea whose computed verdict is `GO`, `KILL` or `STALLED`, with no decision and not closed. | The idea stage's `ideas list` output. | `ideas decide <slug> --verdict go\|kill\|pivot --by <name> --reason <words>`. |
+| Idea assumptions due | An idea with an assumption due within 3 days or expired. | `tick.waiting`. | `ideas status <slug>`. |
+| Planner tamper | The persisted tamper marker. | `.skill-contract/pipeline/tamper.json`. | `cat .skill-contract/pipeline/tamper.json`, then `pipeline.py --root <repo> tamper-clear --by <name>`. |
+| Cap stops | Each cap that stopped this tick, with what waits for it. | The tick's cap stops. | `write_grant.py --pipeline` for a new grant, or `tail -n 1 .skill-contract/pipeline/cap-stops.jsonl` for `uncounted`. |
+| Other waits | A build that waits, an idea envelope that waits, a release that stopped. | `tick.waiting`. | A command when one helps, for example `git -C <repo> status --short` for `root-dirty`. |
+
+A merged run leaves the digest when its head is an ancestor of the local base branch, or
+when its run branch is gone from the local repository. The digest asks only the local git.
+After a squash merge, the run stays listed until the owner deletes the local run branch.
+
+What the digest does not do:
+
+- It runs none of the commands it lists. Each one is a human gate (B1).
+- It runs no spec-first-planning, factory-conductor or release-conductor tool, calls no
+  forge and opens no network connection. It runs git only to check a merge, and not after
+  a planner tamper.
+- It runs `ideas list` itself only when the idea stage left no output and no planner ran
+  in the tick. That is the same read-only command, never with `--today`.
+
+Every value from a state file, a tool or a stage is data that a person or a planner can
+write. The digest shows each one as an inline code span. Backticks, backslashes, control
+characters, format and bidi characters (such as U+202E) and line separators are escaped
+as `\uXXXX`. So a value cannot end its span, start a line, or forge a heading or an
+entry. Each line starts with the digest's own fixed text. Each command is a fixed
+template, and its real arguments are quoted with `shlex.quote`.
+
 ## The caps, before each stage that starts a plan or run
 
 The pipeline grant has three caps (R15). Each is an integer of 1 or more, and each counts
@@ -599,7 +654,7 @@ them is called.
 | `failed` | The tool exited with another code, or could not start. |
 | `timeout` | The tool ran for more than 3600 seconds. |
 | `unavailable` | The skill is not installed. |
-| `pending-R<n>` | The stage is not built yet. |
+| `pending-R<n>` | The stage is not built yet. No stage says this today. |
 | `waiting` | The release stage waits for a human gate: the merge of the release pull request (`release-merge`) or a live release grant (`release-grant`). |
 | `built=<n> waiting=<n>` | The build stage started `n` runs (0 or 1) and left `n` grants waiting. |
 | `skipped` | A cap stopped the tick before this stage, which would start a plan or run. The detail is `cap=<name>`. |
@@ -635,4 +690,8 @@ The tick removes no human gate. These stay with the owner:
 - A production deploy or a rollback.
 - A plan that waits for the owner's read.
 - An idea decision.
+- The planner-tamper marker (`tamper-clear --by <name>`) and a cap stop.
+
+The digest (`.skill-contract/pipeline/digest.md`) lists each of these that waits, with the
+command the owner runs next.
 - The pick policy, the intake config and the pipeline grant.
