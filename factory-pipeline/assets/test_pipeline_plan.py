@@ -87,7 +87,7 @@ class PlanFixture(unittest.TestCase):
                                             "waiting for owner's read: reason=%s" % reason)])
         self.assertEqual(seen["plans"], [])
         self.assertEqual(res["derive-grant"], ["idle", "plans=0"])
-        self.assertEqual(res["build"], ["pending-R18", "grants=0"])
+        self.assertEqual(res["build"], ["idle", "grants=0"])
         self.assertEqual(res["digest"], ["pending-R21", "waiting=1"])
         self.assertNotIn("under-pipeline", [c["key"] for c in K.calls(self.skills)])
 
@@ -131,7 +131,7 @@ class TestPlanStage(PlanFixture):
         self.assertEqual(st["predicate"]["payload"]["intake_items"], ["I0000000001"])
         # The real write_grant.py --under-pipeline derived its grant: build gets it.
         self.assertEqual(res["derive-grant"], ["ok", "derived=1", "refused=0"], text)
-        self.assertEqual(res["build"], ["pending-R18", "grants=1"])
+        self.assertEqual(res["build"], ["unavailable", "factory-conductor", "grants=1"])
         self.assertEqual([p for p, _ in seen["grants"]], [plan])
         self.assertFalse([w for w in seen["waiting"] if w[0] == "plan-read"])
 
@@ -193,7 +193,7 @@ class TestPlanStage(PlanFixture):
         plan = seen["plans"][0]
         self.assertIn("PLAN: ready %s spec=%s" % (plan, self.spec("I0000000002")), text)
         self.assertEqual(res["derive-grant"], ["ok", "derived=1", "refused=0"], text)
-        self.assertEqual(res["build"], ["pending-R18", "grants=1"])
+        self.assertEqual(res["build"], ["unavailable", "factory-conductor", "grants=1"])
         self.assertEqual([p for p, _ in seen["grants"]], [plan])
         self.assertEqual(len([c for c in K.calls(self.skills)
                               if c["key"] == "under-pipeline"]), 1)
@@ -842,10 +842,12 @@ class TestCapInTick(PlanFixture):
                                r"stage=derive-grant\n")
         self.assertEqual(res["derive-grant"],
                          ["ok", "derived=1", "refused=0", "cap=max_plans_per_day"])
-        self.assertEqual(res["build"], ["pending-R18", "grants=1"])
+        self.assertEqual(res["build"], ["unavailable", "factory-conductor", "grants=1"])
         self.assertEqual(len([c for c in K.calls(self.skills)
                               if c["key"] == "under-pipeline"]), 1)
-        self.assertEqual([w[0] for w in seen["waiting"]], ["cap", "cap"])
+        # The cap stop and the plan it held back, then the derived grant that build
+        # could not start (the stub skills hold no conductor.py).
+        self.assertEqual([w[0] for w in seen["waiting"]], ["cap", "cap", "build"])
         self.assertIn("TICK: done stages=9 cap=max_plans_per_day", text)
 
 

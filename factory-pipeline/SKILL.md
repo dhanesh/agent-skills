@@ -3,19 +3,18 @@ name: factory-pipeline
 description: >-
   The scheduled driver of the software factory. Use when the user asks for factory-pipeline,
   to "tick the pipeline" or to "run the whole factory on a schedule". One `pipeline tick`
-  (stdlib) walks the stages in order: sweep, growth review, idea follow-up,
+  walks the stages in order: sweep, growth review, idea follow-up,
   autopick, plan, derive grant, build, release stage and digest, and prints one
   `STAGE: <name> <result>` line per stage. It calls each installed sibling skill's own tool
-  (ops-intake, growth-review, spec-first-planning) with no shell, and reports a missing one
-  as unavailable. No live pipeline grant gives `STOP: no-grant` (exit 2), a held lock
-  `STOP: locked` (exit 3), a cap `STOP: cap <name>`. Plan runs the grant's planner and
-  hands a plan on only when spec_lint and the allowlist pass. `pipeline schedule install`
-  sets a timer. Partly built: idea follow-up, build, release stage and digest report
-  `pending-R<n>`.
-  Every human gate stays with the owner. Not for running one approved plan to a PR (use
-  factory-conductor), not for writing a plan (use spec-first-planning).
+  (ops-intake, growth-review, spec-first-planning, factory-conductor) with no shell,
+  and reports a missing one as unavailable. No live grant gives `STOP: no-grant`, a held lock `STOP: locked`, a cap
+  `STOP: cap <name>`. Plan runs the grant's planner and hands a plan on only when
+  spec_lint and the allowlist pass. Build runs one `conductor init` per tick.
+  `pipeline schedule install` sets a timer. Partly built: idea follow-up, release stage
+  and digest report `pending-R<n>`. Every human gate stays with the owner. Not for
+  driving one plan to a PR (factory-conductor) or writing a plan (spec-first-planning).
 license: MIT
-compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, offline. The stages call the sibling skills ops-intake, growth-review and spec-first-planning when they are installed.
+compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, offline. The stages call the sibling skills ops-intake, growth-review, spec-first-planning and factory-conductor when they are installed.
 metadata:
   author: dhanesh
   version: "0.1.0"
@@ -42,8 +41,9 @@ owner's planner and hands the plan on only when `spec_lint.py --unattended` and
 `spec_to_tasks.py --allowlist` pass; see "The plan stage" below. Derive grant runs for
 each plan that the plan stage hands on. Before each stage that would start a plan or run,
 it checks the grant's caps (R15, shipped): at a cap it prints `STOP: cap <name>` and skips
-the stages that the cap gates. The idea follow-up, build, release stage and digest stages
-report `pending-R<n>`. `pipeline schedule install` (R16, shipped) puts
+the stages that the cap gates. The build stage (R18, shipped) starts factory-conductor's
+`conductor init` for at most one derived grant per tick; see "The build stage" below. The
+idea follow-up, release stage and digest stages report `pending-R<n>`. `pipeline schedule install` (R16, shipped) puts
 the tick on a timer; see "The schedule" below. The
 design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R12 to R21) in the
 agent-skills repository.
@@ -114,7 +114,8 @@ growth review runs `growth auto --source <name>` and hands its stdout to `intake
 --format intake-signals-jsonl --source <name>` as two separate processes; autopick runs
 `intake autopick`; plan drafts and checks a spec for each picked item (below); derive
 grant runs `write_grant.py --under-pipeline <grant> --root <repo> --plan <plan>` for each
-plan the plan stage hands on. The tick finds each sibling skill
+plan the plan stage hands on; build runs factory-conductor's `conductor init --plan <plan>
+--root <repo>` for one unbuilt grant (below). The tick finds each sibling skill
 by its directory name in the roots that skill-contract `discover` searches. A missing
 skill gives `STAGE: <name> unavailable`, and the tick goes on.
 
@@ -215,6 +216,51 @@ untrusted text and a copied command turns it into code that runs unattended on t
 machine. When a plan waits, report its spec path and reason, and leave the read to the
 owner.
 
+## The build stage
+
+The build stage (R18) hands one derived grant to factory-conductor. It does not drive the
+run: the conductor's own loop, and its re-entry timer, do that.
+
+1. It lists the unbuilt grants: every grant derived from the tick's pipeline grant, in
+   this tick or an earlier one, that no `.skill-contract/runs/<run>/state.json` names
+   (`grant_id`). A crashed tick, a dispatch-cap stop or a busy root leaves such a grant,
+   and a later tick builds it. The oldest goes first, so no grant starves.
+2. When there is one, the tick checks the dispatch cap once (`max_dispatches_per_day`). A
+   dispatches stop prints `STAGE: build skipped cap=max_dispatches_per_day`.
+3. factory-conductor works on one run per repository (its newest run), so the stage
+   builds at most one grant per tick, and only while no conductor run in the root is
+   unfinished. Every other grant prints `BUILD: waiting <grant> <reason>` and goes on the
+   digest list. The reasons are `unfinished-run=<run id>`, `root-dirty` (the work tree
+   has changes or untracked files), `grant-<reason>` (spec-first-planning's
+   `check-grant --action local_reversible --subject <plan>` does not cover it, for
+   example `grant-revoked`, `grant-default-branch` or `grant-branch`), `evidence-gate-off`,
+   `verify-skill-missing`, `no-plan`, `init-exit=<n>` and `no-factory-conductor`.
+4. The evidence gate is the plan's own `verification` block. The derived grant pins the
+   plan's sha256, so the stage never edits the plan. It builds a gated plan only when the
+   block names a verify skill with `SKILL.md` and `features/` in the repo, and a plan
+   with no block only when the repo has no verify skill (`.claude/skills/verify-*` or
+   `.agents/skills/verify-*`). Every plan from the real plan stage is gated in practice,
+   because `spec_lint.py --unattended` needs a `Verify skill:` line.
+5. It runs `conductor init --plan <plan> --root <repo>` and prints
+   `BUILD: started <grant> run=<run id> gate=<on|off>`. init cuts the run branch from the
+   branch the root has checked out; the stage itself never checks out, creates or resets
+   a branch. When the grant carries a `reentry` block, it then runs
+   `conductor reentry install --root <repo>`, as factory-conductor documents for an
+   unattended start.
+
+The result is `STAGE: build ok built=1 waiting=<n> gate=<on|off>`, `attention built=0
+waiting=<n>` when every grant waits, `idle grants=0` when there is nothing to build, or
+the init's result word when init fails. factory-conductor's files are part of the tamper
+baseline: a planner that changes them poisons the tick before any conductor call
+(`STOP: planner-tamper tools`), and every conductor call runs as `python -I -S -B` with
+the pinned interpreter and the private `PATH`. A build that starts below the dispatch cap
+can pass it by at most that run's own `max_dispatches` budget.
+
+You MUST NOT run `conductor init` by hand for a grant that the stage left waiting, or
+check out a branch, edit a plan or finish a run to clear its reason, because each reason
+is a guard: a second run strands the first one, and the plan and the branch are what the
+owner's grant covers.
+
 ## The schedule
 
 `python3 "$SKILL_DIR/assets/pipeline.py" --root <repo> schedule install --every <minutes>`
@@ -309,5 +355,5 @@ each result that is not `ok` or `idle`, and the owner's next step for each `STOP
 The outcome eval (`eval/run_eval.py`) runs the tick on stub skills from
 `assets/pipeline_testkit.py` and grades the nine lines; the unit suites are
 `assets/test_pipeline_tick.py`, `assets/test_pipeline_lock.py`,
-`assets/test_pipeline_caps.py`, `assets/test_pipeline_plan.py` and
-`assets/test_pipeline_schedule.py`.
+`assets/test_pipeline_caps.py`, `assets/test_pipeline_plan.py`,
+`assets/test_pipeline_build.py` and `assets/test_pipeline_schedule.py`.

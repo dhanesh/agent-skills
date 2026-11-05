@@ -42,7 +42,12 @@ per stage, optionally followed by a detail such as `exit=3` or `picked=2`:
                   `spec_lint.py --unattended` and `spec_to_tasks.py --allowlist` pass
   derive-grant    spec-first-planning `write_grant.py --under-pipeline <grant> --plan <p>`
                   for each plan envelope the plan stage hands on
-  build           not built yet (R18): `pending-R18`
+  build           factory-conductor `conductor init --plan <plan> --root R` for at most
+                  one derived grant that no run's state.json names (from this tick or an
+                  earlier one, oldest first), only while no conductor run in the root is
+                  unfinished, the work tree is clean and spec-first-planning's
+                  `check-grant --subject <plan>` covers it; then `conductor reentry
+                  install` when the grant has a reentry block (R18; see stage_build())
   release-stage   not built yet (R19): `pending-R19`
   digest          not built yet (R21): `pending-R21`
 
@@ -50,8 +55,9 @@ Before each stage that would start a new plan or run, the tick checks the pipeli
 grant's caps (R15) against today's UTC counts. Autopick, plan and derive-grant (and each
 plan after the first inside derive-grant) check all three caps: that is where a plan or
 an open run gets counted. Build checks only max_dispatches_per_day, and only when it has
-grants to build: a grant that derive-grant already derived was counted then, so building
-it starts no new counted plan or open run, but a build spends dispatches. The counts:
+grants to build, once before its one init: a grant that derive-grant already derived was
+counted then, so building it starts no new counted plan or open run, but a build spends
+dispatches. The counts:
 
   max_plans_per_day, max_open_runs  spec-first-planning `write_grant.py --pipeline-caps
                    <grant> --root R`, the counter that `--under-pipeline` refuses with, so
@@ -113,7 +119,8 @@ The tick runs every tool with PYTHON (sys.executable) -I -S -B (see LAUNCH), an 
 list and no shell. Stdlib only, Python 3.10+, POSIX. Exits: 0 every stage ran; 2 usage error, a state
 directory that is not git-ignored, or no live pipeline grant; 3 another tick holds the
 pipeline lock; 4 a planner tamper poisoned the tick (`STOP: planner-tamper <what>`: no
-further spec-first-planning tool runs, no grant is derived, no build starts, every plan
+further spec-first-planning or factory-conductor tool runs, no grant is derived, no build
+starts, every plan
 of the tick waits; see poison()), or an earlier tick's tamper is not cleared yet.
 
 A poison outlives its tick (R2): poison() writes .skill-contract/pipeline/tamper.json (the
@@ -196,6 +203,13 @@ RUN_LOG = "autonomy-log.jsonl"
 TIME = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T")
 # The schedule (R16): factory-conductor's timer module, reused in place, never copied.
 TIMER = ("factory-conductor", "assets/reentry_timer.py")
+# The build stage (R18): factory-conductor's own tool, the plan and grant kinds it reads,
+# and where a repository keeps its verify-<app> skill (verification-skill-forge).
+CONDUCTOR = ("factory-conductor", "assets/conductor.py")
+TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
+GRANT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1"
+VERIFY_ROOTS = (".claude/skills", ".agents/skills")
+RUN_LINE = re.compile(r"^RUN: (run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6})\s*$")
 EVERY_MIN, EVERY_MAX = 15, 1440  # minutes
 WHOLE = re.compile(r"^[0-9]{1,6}\Z")
 
@@ -260,6 +274,8 @@ class Tick:
         self.picked = []    # intake-item envelopes autopick wrote (for the plan stage)
         self.plans = []     # task-plan envelopes the plan stage hands on (R17)
         self.grants = []    # (plan, derived grant) pairs for the build stage (R18)
+        self.derived = None  # the derived grant ids of the newest cap count (R18)
+        self.unbuilt = []    # derived grant ids no conductor run names yet, oldest first
         self.waiting = []   # (kind, what, next command) for the digest (R21)
         self.stops = []     # the caps that stopped this tick, in order (R15)
         self.gate = None    # run_tick sets it: gate(stage) -> cap name or None (R15)
@@ -816,13 +832,18 @@ def _walk_real(out, budget, path, seen):
 
 def trusted_tools(tick):
     """{skill: [tool paths]} of every skill whose tools the tick runs after a planner, or
-    None when spec-first-planning is not installed. Today that is spec-first-planning only:
-    the plan stage's tools, write_grant.py (caps and derive-grant) and contract_check.py."""
+    None when spec-first-planning is not installed: spec-first-planning (the plan stage's
+    tools, write_grant.py for caps and derive-grant, and contract_check.py) and, when it
+    is installed, factory-conductor (conductor.py, which the build stage runs, R18)."""
     rels = [TOOLS[PLANNING], CHECKER[1]] + sorted(PLAN_TOOLS.values())
     found = [find_tool(tick.roots, PLANNING, rel) for rel in rels]
     if found[0] is None:
         return None
-    return {PLANNING: [t for t in found if t]}
+    out = {PLANNING: [t for t in found if t]}
+    conductor = find_tool(tick.roots, CONDUCTOR[0], CONDUCTOR[1])
+    if conductor is not None:
+        out[CONDUCTOR[0]] = [conductor]
+    return out
 
 
 def tools_walk(out, budget, tick):
@@ -1401,8 +1422,240 @@ def stage_derive_grant(tick):
                       "cap=%s" % capped if capped else "")
 
 
+# ── the build stage (R18) ───────────────────────────────────────────────────────────────
+# factory-conductor works on one run per repository: every command acts on the newest
+# run directory, and a newer run makes an older unfinished run's timer remove itself
+# (`superseded`). So a tick builds at most one grant, and only while no conductor run
+# in the root is unfinished. Every other grant waits and a later tick builds it: a grant
+# that no run's state.json names is "never built", whichever tick derived it. The oldest
+# unbuilt grant goes first, so no grant starves.
+
+def run_states(root):
+    """[(run id, grant id or None, finished)] of every factory-conductor run directory
+    that holds a state.json, oldest first. A state.json that cannot be read counts as an
+    unfinished run that names no grant: the stage fails closed."""
+    base = os.path.join(root, *RUNS_DIR.split("/"))
+    try:
+        names = sorted(n for n in os.listdir(base) if RUN_ID.match(n))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        state = os.path.join(base, name, RUN_STATE)
+        if not os.path.lexists(state):
+            continue
+        try:
+            with open(state, "rb") as f:
+                data = json.loads(f.read().decode("utf-8"))
+            gid = data.get("grant_id")
+            out.append((name, gid if isinstance(gid, str) else None, bool(data.get("finished"))))
+        except (OSError, ValueError, AttributeError):
+            out.append((name, None, False))
+    return out
+
+
+def unbuilt_grants(tick):
+    """The derived grant ids that no conductor run names yet, oldest first: the ones the
+    newest cap count listed (derived in this tick or an earlier one), plus the ones
+    derive-grant wrote in this tick."""
+    ids = set(tick.derived or [])
+    for _plan, path in tick.grants:
+        name = os.path.basename(path)
+        if name.endswith(".json"):
+            ids.add(name[:-len(".json")])
+    built = {gid for _, gid, _ in run_states(tick.root) if gid}
+    return sorted(g for g in ids if g not in built and PLAIN_ID.match(g))
+
+
+PLAIN_ID = re.compile(r"^[a-z][a-z0-9-]*-v[0-9]+-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\Z")
+
+
+def _load_json(path):
+    try:
+        with open(path, "rb") as f:
+            doc = json.loads(f.read().decode("utf-8"))
+        return doc if isinstance(doc, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def grant_plan(tick, gid):
+    """(plan path relative to the root, grant payload) of a derived grant, or (None,
+    reason). The plan is the grant subject that is a task-plan/v1 envelope."""
+    doc = _load_json(os.path.join(tick.root, ".skill-contract", "envelopes", gid + ".json"))
+    if doc is None or doc.get("predicateType") != GRANT_KIND:
+        return None, "grant-unreadable"
+    pred = doc.get("predicate") if isinstance(doc.get("predicate"), dict) else {}
+    payload = pred.get("payload")
+    if pred.get("id") != gid or not isinstance(payload, dict):
+        return None, "grant-unreadable"
+    for s in doc.get("subject") or []:
+        rel = inside(tick.root, s.get("name")) if isinstance(s, dict) else None
+        if rel is None:
+            continue
+        plan = _load_json(os.path.join(tick.root, *rel.split("/")))
+        if plan is not None and plan.get("predicateType") == TASK_PLAN_KIND:
+            return (rel, payload), None
+    return None, "no-plan"
+
+
+def _verify_skill_ok(root, rel):
+    """True when rel (root-relative) is a verify-<app> skill inside the root with a
+    SKILL.md and a features/ directory, as factory-conductor's init requires."""
+    real = inside(root, rel)
+    if real is None or real != rel.strip("/") or \
+            not os.path.basename(real).startswith("verify-"):
+        return False
+    d = os.path.join(root, *real.split("/"))
+    return os.path.isfile(os.path.join(d, "SKILL.md")) and \
+        os.path.isdir(os.path.join(d, "features"))
+
+
+def verify_skills(root):
+    """The root-relative verify-<app> skills of the repository, in VERIFY_ROOTS."""
+    out = []
+    for base in VERIFY_ROOTS:
+        try:
+            names = sorted(os.listdir(os.path.join(root, *base.split("/"))))
+        except OSError:
+            continue
+        out += ["%s/%s" % (base, n) for n in names
+                if n.startswith("verify-") and _verify_skill_ok(root, "%s/%s" % (base, n))]
+    return out
+
+
+def evidence_gate(tick, plan_rel):
+    """("on" | "off", None), or (None, reason) when the plan cannot be built as it is.
+    factory-conductor turns its evidence gate on only from the plan's own `verification`
+    block, and the derived grant pins the plan's sha256, so the stage never edits the
+    plan. It builds a gated plan only when the block names a verify skill that exists,
+    and a plan with no block only when the repository has no verify skill."""
+    plan = _load_json(os.path.join(tick.root, *plan_rel.split("/")))
+    payload = ((plan or {}).get("predicate") or {}).get("payload")
+    if not isinstance(payload, dict):
+        return None, "plan-unreadable"
+    v = payload.get("verification")
+    if v is None:
+        return (None, "evidence-gate-off") if verify_skills(tick.root) else ("off", None)
+    if not (isinstance(v, dict) and isinstance(v.get("skill"), str)):
+        return None, "verification-invalid"
+    if not _verify_skill_ok(tick.root, v["skill"].strip().rstrip("/")):
+        return None, "verify-skill-missing"
+    return "on", None
+
+
+def grant_covers(tick, gid, plan_rel):
+    """None when spec-first-planning's check-grant says the grant covers local_reversible
+    for this plan on the branch the root has checked out, else the reason it waits
+    (`grant-<revoked|superseded|expired|pipeline|branch|default-branch|...>`)."""
+    checker = find_tool(tick.roots, CHECKER[0], CHECKER[1])
+    if checker is None:
+        return "checker-unavailable"
+    if not tools_trusted(tick):
+        return "planner-tamper"
+    _w, code, out = run_tool(tick, "build", py(checker, "check-grant", "--root", tick.root,
+                                               "--action", "local_reversible", "--subject",
+                                               plan_rel, "--json"), echo_stdout=False)
+    rep = None
+    for line in out.decode("utf-8", "replace").splitlines():
+        if line.startswith("{"):
+            try:
+                rep = json.loads(line)
+            except ValueError:
+                rep = None
+            break
+    if not isinstance(rep, dict):
+        return "grant-unchecked"
+    if code == 0 and rep.get("status") == "COVERED":
+        return None if rep.get("id") == gid else "grant-other"
+    reason = rep.get("reason")
+    return "grant-%s" % (reason if isinstance(reason, str) and REASON.match(reason)
+                         else "invalid")
+
+
+def root_clean(tick):
+    """None when the root's work tree is clean (no change and no untracked file that git
+    sees), else the reason the build waits. Read-only: the stage never checks out, creates
+    or resets a branch. factory-conductor's init cuts the run branch itself."""
+    cp = git(tick, "status", "--porcelain", "--untracked-files=normal")
+    if cp is None or cp.returncode != 0:
+        return "root-unknown"
+    return "root-dirty" if cp.stdout.strip() else None
+
+
+def build_wait(tick, gid, reason):
+    tick.waiting.append(("build", gid, "build waits: %s" % reason))
+    print("BUILD: waiting %s %s" % (gid, reason))
+
+
 def stage_build(tick):
-    return "pending-R18", "grants=%d" % len(tick.grants)
+    """R18: start `conductor init` for at most one unbuilt derived grant (see the comment
+    above), with the evidence gate the plan declares, then `conductor reentry install`
+    when the grant carries a reentry block. The tick never drives the run itself."""
+    todo = list(tick.unbuilt)
+    if not todo:
+        return "idle", "grants=0"
+    conductor = find_tool(tick.roots, CONDUCTOR[0], CONDUCTOR[1])
+    if conductor is None:
+        for gid in todo:
+            build_wait(tick, gid, "no-factory-conductor")
+        return "unavailable", "factory-conductor grants=%d" % len(todo)
+    if not tools_trusted(tick):  # poison() printed STOP: planner-tamper
+        return "refused", "tamper=%s" % tick.tampered
+    busy = next((rid for rid, _g, done in run_states(tick.root) if not done), None)
+    why = "unfinished-run=%s" % busy if busy else root_clean(tick)
+    if why:
+        for gid in todo:
+            build_wait(tick, gid, why)
+        return "attention", "built=0 waiting=%d" % len(todo)
+    chosen = None
+    for i, gid in enumerate(todo):
+        found, why = grant_plan(tick, gid)
+        if found:
+            plan_rel, payload = found
+            why = grant_covers(tick, gid, plan_rel)
+            if tick.tampered:
+                return "refused", "tamper=%s" % tick.tampered
+        if not why:
+            gate, why = evidence_gate(tick, plan_rel)
+        if why:
+            build_wait(tick, gid, why)
+            continue
+        chosen = (gid, plan_rel, payload, gate, todo[i + 1:])
+        break
+    if chosen is None:
+        return "attention", "built=0 waiting=%d" % len(todo)
+    gid, plan_rel, payload, gate, rest = chosen
+    if not tools_trusted(tick):
+        return "refused", "tamper=%s" % tick.tampered
+    word, code, out = run_tool(tick, "build", py(conductor, "init", "--plan",
+                                                 os.path.join(tick.root, *plan_rel.split("/")),
+                                                 "--root", tick.root))
+    run = None
+    for line in out.decode("utf-8", "replace").splitlines():
+        m = RUN_LINE.match(line)
+        if m:
+            run = m.group(1)
+    if code != 0 or run is None:
+        build_wait(tick, gid, "init-%s" % (exit_detail(code) or "no-run"))
+        for g in rest:
+            build_wait(tick, g, "one-build-per-tick")
+        return (word if word != "ok" else "failed"), join(
+            "built=0 waiting=%d" % (len(rest) + 1), "init", exit_detail(code))
+    print("BUILD: started %s run=%s gate=%s plan=%s" % (gid, run, gate, plan_rel))
+    sys.stdout.flush()
+    for g in rest:
+        build_wait(tick, g, "unfinished-run=%s" % run)
+    detail = "built=1 waiting=%d gate=%s" % (len(rest), gate)
+    # factory-conductor's documented unattended start: with a reentry block in the grant,
+    # `reentry install` right after init, so the owner's timer resumes the run.
+    if "reentry" in payload:
+        if not tools_trusted(tick):
+            return "refused", join(detail, "tamper=%s" % tick.tampered)
+        rword, rcode, _ = run_tool(tick, "build", py(conductor, "reentry", "install",
+                                                     "--root", tick.root))
+        detail = join(detail, "reentry=%s" % rword)
+    return "ok", detail
 
 
 def stage_release_stage(tick):
@@ -1530,6 +1783,7 @@ def count_caps(tick):
         ok = False
     if not ok:
         raise Uncounted("write_grant", "unreadable")
+    tick.derived = list(derived)  # R18: the build stage finds unbuilt grants here
     dispatches = dispatches_today(tick.root, set(derived), rep["date"])
     return {"max_plans_per_day": (counts["max_plans_per_day"], caps["max_plans_per_day"]),
             "max_open_runs": (counts["max_open_runs"], caps["max_open_runs"]),
@@ -1771,9 +2025,10 @@ def _run_tick(a, tick):
     tick.pathdir = make_pathdir(tick)
     tick.baseline = tool_digest(tick)
     # R15: a cap checks before each stage that starts a new plan or run (STAGE_CAPS), and
-    # derive-grant asks again between plans through tick.gate (R18's build will ask before
-    # each conductor run after the first). A stopped stage is skipped; the stages that only
-    # read, sweep or report still run. Build is checked only when it has grants to build.
+    # derive-grant asks again between plans through tick.gate. Build starts at most one
+    # conductor run per tick, so its one check comes before that init. A stopped stage is
+    # skipped; the stages that only read, sweep or report still run. Build is checked only
+    # when it has grants to build.
     tick.gate = lambda stage: cap_gate(tick, stage)
     ran = 0
     for name, fn in STAGES:
@@ -1782,14 +2037,19 @@ def _run_tick(a, tick):
             sys.stdout.flush()
             ran += 1
             continue
+        if name == "build":
+            # R18: the derived grants no conductor run names yet, from this tick or an
+            # earlier one. The dispatch cap is checked before the one init, only when
+            # there is something to build.
+            tick.unbuilt = unbuilt_grants(tick)
         if name in STAGE_CAPS:
             hit = blocked_by(tick, name)
-            if hit is None and (name != "build" or tick.grants):
+            if hit is None and (name != "build" or tick.unbuilt):
                 hit = cap_gate(tick, name)
             if hit:
                 if name == "build":
-                    for plan, grant in tick.grants:
-                        tick.waiting.append(("cap", grant, "build waits for %s to fall "
+                    for gid in tick.unbuilt:
+                        tick.waiting.append(("cap", gid, "build waits for %s to fall "
                                              "below its cap" % hit))
                 print("STAGE: %s skipped cap=%s" % (name, hit))
                 sys.stdout.flush()

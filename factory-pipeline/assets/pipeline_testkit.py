@@ -59,6 +59,20 @@ CLI: python3 pipeline_testkit.py stubs <dir>   (prints STUBS: <dir>)
      python3 pipeline_testkit.py hold <repo> <seconds>  (prints HELD: <path>, then sleeps)
      python3 pipeline_testkit.py derived <repo>  (writes a grant derived from the newest
                                                   pipeline grant; prints DERIVED: <path>)
+     python3 pipeline_testkit.py buildfix <dir> gated|plain <n>
+                                    (a build fixture, R18: prints REPO:, SKILLS: and one
+                                     GRANT: <id> per derived grant, oldest first)
+     python3 pipeline_testkit.py finish <repo>  (marks every conductor run finished;
+                                                  prints FINISHED: <run id> for each)
+
+The build stage (R18): conductor_stub(skills) writes a stub factory-conductor
+`assets/conductor.py` that logs its argv, PATH and interpreter flags to
+<skills>/conductor-calls.jsonl, records whether the --plan carries a `verification` block
+(`gate`), and on `init` writes a run whose state.json names the grant and prints
+`RUN: <id>`. build_repo(d, verify) builds a git repo on branch factory/base with one
+commit, a git-ignored .skill-contract/, a pipeline grant, the stubs and the stub
+conductor, and (verify=True) a verify skill. built_grant(repo, pipeline_id, gated) writes
+a spec, a plan and a real grant derived from the pipeline grant that pins both.
 """
 import datetime
 import json
@@ -258,6 +272,151 @@ def conductor_run(repo, grant_id, dispatch_at=(), n=1, log=None):
     return d
 
 
+# ── the build stage (R18) ───────────────────────────────────────────────────────────────
+# The stub conductor (never the real one). It logs {argv, path, exe, isolated, no_site,
+# gate} as one JSON line to <skills dir>/conductor-calls.jsonl. `gate` is "on" when the
+# --plan envelope carries a `verification` block, else "off": the only way the real
+# conductor turns its evidence gate on. On `init` it writes a run directory whose
+# state.json names the newest original grant that pins the plan, and prints `RUN: <id>`.
+# <skills dir>/behave/factory-conductor.<command>.json may set `exit` (then no run).
+CONDUCTOR_STUB = r'''import json, os, secrets, sys, time
+HOME = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+GRANT = %(grant)r
+args = sys.argv[1:]
+root = args[args.index("--root") + 1] if "--root" in args else os.getcwd()
+rec = {"argv": args, "path": os.environ.get("PATH"), "exe": sys.executable,
+       "isolated": sys.flags.isolated, "no_site": sys.flags.no_site}
+try:
+    with open(os.path.join(HOME, "behave", "factory-conductor.%%s.json" %% args[0]),
+              encoding="utf-8") as f:
+        code = json.load(f).get("exit", 0)
+except OSError:
+    code = 0
+if args[0] == "init" and code == 0:
+    plan = args[args.index("--plan") + 1]
+    with open(plan, encoding="utf-8") as f:
+        doc = json.load(f)
+    rec["gate"] = "on" if "verification" in doc["predicate"]["payload"] else "off"
+    rel = os.path.relpath(os.path.realpath(plan), os.path.realpath(root)).replace(os.sep, "/")
+    envs = os.path.join(root, ".skill-contract", "envelopes")
+    gid = None
+    for n in sorted(os.listdir(envs)):
+        with open(os.path.join(envs, n), encoding="utf-8") as f:
+            st = json.load(f)
+        if st.get("predicateType") == GRANT and st["predicate"].get("wasRevisionOf") is None \
+                and rel in [s.get("name") for s in st.get("subject") or []]:
+            gid = st["predicate"]["id"]
+    rid = "run-%%s-%%s" %% (time.strftime("%%Y%%m%%dT%%H%%M%%SZ", time.gmtime()), secrets.token_hex(3))
+    d = os.path.join(root, ".skill-contract", "runs", rid)
+    os.makedirs(d)
+    with open(os.path.join(d, "state.json"), "w", encoding="utf-8") as f:
+        json.dump({"run_id": rid, "grant_id": gid, "dispatches": 0, "finished": None}, f)
+    rec["run"], rec["grant"] = rid, gid
+    print("RUN: %%s" %% rid)
+elif args[0] == "reentry" and code == 0:
+    print("REENTRY: installed every 30 min")
+with open(os.path.join(HOME, "conductor-calls.jsonl"), "a", encoding="utf-8") as f:
+    f.write(json.dumps(rec) + "\n")
+sys.exit(code)
+''' % {"grant": GRANT_KIND}
+TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
+
+
+def conductor_stub(skills):
+    """Write the stub conductor.py into the stub factory-conductor under skills."""
+    d = os.path.join(skills, "factory-conductor", "assets")
+    os.makedirs(d, exist_ok=True)
+    if not os.path.exists(os.path.join(skills, "factory-conductor", "SKILL.md")):
+        with open(os.path.join(skills, "factory-conductor", "SKILL.md"), "w",
+                  encoding="utf-8") as f:
+            f.write("---\nname: factory-conductor\ndescription: stub\n---\n")
+    path = os.path.join(d, "conductor.py")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(CONDUCTOR_STUB)
+    return path
+
+
+def conductor_calls(skills):
+    try:
+        with open(os.path.join(skills, "conductor-calls.jsonl"), encoding="utf-8") as f:
+            return [json.loads(ln) for ln in f if ln.strip()]
+    except OSError:
+        return []
+
+
+def git_quiet(repo, *args):
+    subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                    "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"] + list(args),
+                   check=True, timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def verify_skill(repo, name="verify-app"):
+    """Write a verify-<app> skill (SKILL.md and features/) under repo/.claude/skills."""
+    write_rel(repo, ".claude/skills/%s/SKILL.md" % name, "---\nname: %s\n---\n" % name)
+    write_rel(repo, ".claude/skills/%s/features/app.md" % name, "# app\n")
+    return ".claude/skills/%s" % name
+
+
+def build_repo(d, verify=False, caps=None, planner=None, real=()):
+    """(repo, skills, pipeline grant id) for the build stage: a git repo with one commit on
+    branch factory/base (not a default branch, inside the grant's factory/* pattern), a
+    git-ignored .skill-contract/, a pipeline grant, the stub skills and the stub conductor.
+    verify=True commits a verify skill too."""
+    repo, skills = os.path.join(d, "repo"), os.path.join(d, "skills")
+    os.makedirs(repo, exist_ok=True)
+    git_quiet(repo, "init", "-q")
+    git_quiet(repo, "checkout", "-q", "-b", "factory/base")
+    write_rel(repo, ".gitignore", ".skill-contract/\n")
+    if verify:
+        verify_skill(repo)
+    stubs(skills, real=real)
+    conductor_stub(skills)
+    path = pipeline_grant(repo, caps=dict({"max_open_runs": 9}, **(caps or {})),
+                          planner=planner, allowlist=PLAN_ALLOWLIST)
+    git_quiet(repo, "add", "-A")
+    git_quiet(repo, "commit", "-q", "-m", "fixture")
+    return repo, skills, os.path.basename(path)[:-len(".json")]
+
+
+def built_grant(repo, pipeline_id, gated=True, reentry=False, tag="a", now=None):
+    """Write a spec, a task-plan/v1 envelope (with a `verification` block naming
+    .claude/skills/verify-app when gated) and a real grant derived from pipeline_id that
+    pins both, the way write_grant.py --under-pipeline shapes it. Return the grant id."""
+    if PLANNING_ASSETS not in sys.path:
+        sys.path.insert(0, PLANNING_ASSETS)
+    import contract_check  # noqa: E402
+    now = now or contract_check.utc_now()
+    spec = ".skill-contract/intake/specs/spec-%s.md" % tag
+    write_rel(repo, spec, "# Spec %s\n" % tag)
+    payload = {"title": "plan %s" % tag, "spec": spec, "coverage": {}, "uncovered": [],
+               "tasks": [{"id": "T1", "title": "t", "verify": [{"command": ["make", "test"]}]}]}
+    if gated:
+        payload["verification"] = {"skill": ".claude/skills/verify-app"}
+    plan = contract_check.build_statement(TASK_PLAN_KIND, "spec-first-planning", "0.1.0", repo,
+                                          [spec], payload, now=now)
+    plan_path = contract_check.write_envelope(repo, plan)
+    plan_rel = os.path.relpath(plan_path, repo).replace(os.sep, "/")
+    pipe = os.path.join(repo, ".skill-contract", "envelopes", pipeline_id + ".json")
+    with open(pipe, encoding="utf-8") as f:
+        pp = json.load(f)["predicate"]["payload"]
+    gp = {"scope": {"repo": ".", "branch_pattern": pp["scope"]["branch_pattern"]},
+          "decisions": [], "defaults": [], "gate_policy": dict(pp["gate_policy"]),
+          "budget": dict(pp["budget"]), "stop_on": list(pp["stop_on"]),
+          "expires_at": pp["expires_at"], "system_one": {"allowed": False}, "revoked": False,
+          "derived_from": {"id": pipeline_id, "sha256": contract_check.sha256_file(pipe)}}
+    if reentry:
+        gp["reentry"] = dict(contract_check.REENTRY_DEFAULTS,
+                             agent_cmd=["/usr/bin/true", "-p", "{prompt}"])
+    accepted = {"test": "grant-accepted", "assertedBy": {"human": "Owner"},
+                "result": {"outcome": "passed"}, "subject": [contract_check.pin(repo, spec)],
+                "command": ["{python}", "{skill_dir:spec-first-planning}/assets/contract_check.py",
+                            "check-pipeline-grant", "--root", ".", "--id", pipeline_id]}
+    st = contract_check.build_statement(GRANT_KIND, "spec-first-planning", "0.1.0", repo,
+                                        [spec, plan_rel], gp, [accepted], now=now)
+    contract_check.write_envelope(repo, st)
+    return st["predicate"]["id"]
+
+
 # ── the plan stage (R17) ────────────────────────────────────────────────────────────────
 GOOD_CMD = "{python} -m pytest -k rows"
 EVIL_CMD = "cat .env"
@@ -447,6 +606,30 @@ def calls(d):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 5 and sys.argv[1] == "buildfix" and sys.argv[3] in ("gated", "plain") \
+            and sys.argv[4].isdigit():
+        gated = sys.argv[3] == "gated"
+        repo, skills, pid = build_repo(os.path.abspath(sys.argv[2]), verify=gated)
+        print("REPO: %s" % repo)
+        print("SKILLS: %s" % skills)
+        for i in range(int(sys.argv[4])):
+            print("GRANT: %s" % built_grant(repo, pid, gated=gated, tag=str(i),
+                                            now=datetime.datetime.now(datetime.timezone.utc)
+                                            + datetime.timedelta(seconds=i)))
+        sys.exit(0)
+    if len(sys.argv) == 3 and sys.argv[1] == "finish":
+        runs = os.path.join(os.path.abspath(sys.argv[2]), ".skill-contract", "runs")
+        for rid in sorted(os.listdir(runs)) if os.path.isdir(runs) else []:
+            path = os.path.join(runs, rid, "state.json")
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as f:
+                    st = json.load(f)
+                if not st.get("finished"):
+                    st["finished"] = {"by": "pipeline_testkit finish"}
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(st, f)
+                    print("FINISHED: %s" % rid)
+        sys.exit(0)
     if not ((len(sys.argv) == 3 and sys.argv[1] in ("stubs", "grant", "derived"))
             or (len(sys.argv) == 4 and sys.argv[1] == "hold")
             or (len(sys.argv) >= 6 and sys.argv[1] == "planfix"

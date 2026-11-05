@@ -2,7 +2,7 @@
 
 - id: pipeline-tick
 - proven: no
-- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-pipeline/assets/pipeline.py:stage_plan, factory-pipeline/assets/pipeline.py:plan_one, factory-pipeline/assets/pipeline.py:run_planner, factory-pipeline/assets/pipeline.py:snapshot, factory-pipeline/assets/pipeline.py:git, factory-pipeline/assets/pipeline.py:program_roots, factory-pipeline/assets/pipeline.py:program_digest, factory-pipeline/assets/pipeline.py:make_pathdir, factory-pipeline/assets/pipeline.py:seal, factory-pipeline/assets/pipeline.py:programs_trusted, factory-pipeline/assets/pipeline.py:py, factory-pipeline/assets/pipeline.py:tools_walk, factory-pipeline/assets/pipeline.py:_resolve, factory-pipeline/assets/pipeline.py:_walk_real, factory-pipeline/assets/pipeline.py:write_marker, factory-pipeline/assets/pipeline.py:read_marker, factory-pipeline/assets/pipeline.py:cmd_tamper_clear, spec-first-planning/assets/write_grant.py:build_pipeline_grant, factory-conductor/assets/reentry_timer.py:cron_schedule
+- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-pipeline/assets/pipeline.py:stage_plan, factory-pipeline/assets/pipeline.py:plan_one, factory-pipeline/assets/pipeline.py:run_planner, factory-pipeline/assets/pipeline.py:snapshot, factory-pipeline/assets/pipeline.py:git, factory-pipeline/assets/pipeline.py:program_roots, factory-pipeline/assets/pipeline.py:program_digest, factory-pipeline/assets/pipeline.py:make_pathdir, factory-pipeline/assets/pipeline.py:seal, factory-pipeline/assets/pipeline.py:programs_trusted, factory-pipeline/assets/pipeline.py:py, factory-pipeline/assets/pipeline.py:tools_walk, factory-pipeline/assets/pipeline.py:_resolve, factory-pipeline/assets/pipeline.py:_walk_real, factory-pipeline/assets/pipeline.py:write_marker, factory-pipeline/assets/pipeline.py:read_marker, factory-pipeline/assets/pipeline.py:cmd_tamper_clear, factory-pipeline/assets/pipeline.py:stage_build, factory-pipeline/assets/pipeline.py:unbuilt_grants, factory-pipeline/assets/pipeline.py:run_states, factory-pipeline/assets/pipeline.py:evidence_gate, factory-pipeline/assets/pipeline.py:grant_covers, factory-pipeline/assets/pipeline.py:trusted_tools, spec-first-planning/assets/write_grant.py:build_pipeline_grant, factory-conductor/assets/reentry_timer.py:cron_schedule
 
 ## What it is
 
@@ -33,7 +33,12 @@ git-ignored `.skill-contract/intake/specs/`. It hands the plan on only when
 `spec_lint.py --unattended` and `spec_to_tasks.py --allowlist` pass; otherwise it prints
 `PLAN: waiting <spec> reason=<reason>` and the plan waits for the owner's read. Derive
 grant calls spec-first-planning `write_grant.py --under-pipeline` for each plan that the
-plan stage hands on. The other four stages print `pending-R<n>`.
+plan stage hands on. The build stage (R18) runs factory-conductor's `conductor init` for
+at most one derived grant per tick: the oldest one that no run's `state.json` names, from
+this tick or an earlier one, only while no conductor run in the root is unfinished. The
+plan's own `verification` block is the evidence gate: a gated plan is built only when the
+repo has the verify skill it names, and a plan with no block only when the repo has no
+verify skill. The other three stages print `pending-R<n>`.
 `pipeline schedule install --every <minutes>` (R16) installs one timer that runs the tick,
 with factory-conductor's own `reentry_timer.py`, at 15 to 1440 minutes; another interval
 exits 2 and installs nothing. The design is
@@ -57,6 +62,15 @@ stubs whose spec-first-planning runs the real `intake_request.py`, `spec_lint.py
 agent) in `<mode>` (`good`, `unlisted`, `fail`, `sleep` or `touch`), a pipeline grant
 whose `planner` names it, and one picked intake item per id whose evidence asks for
 `cat .env`. It prints `REPO: <dir>/repo` and `SKILLS: <dir>/skills`.
+`factory-pipeline/assets/pipeline_testkit.py buildfix <dir> gated|plain <n>` builds a
+build-stage fixture: a git repo with one commit on branch `factory/base`, a git-ignored
+`.skill-contract/`, a pipeline grant, the stubs, a stub factory-conductor `conductor.py`
+(never the real one) that logs each call to `<dir>/skills/conductor-calls.jsonl`, and
+`<n>` real grants derived from the pipeline grant. With `gated`, the repo has the verify
+skill `.claude/skills/verify-app` and each plan names it in a `verification` block; with
+`plain`, there is no verify skill and no block. It prints `REPO:`, `SKILLS:` and one
+`GRANT: <id>` line per grant, oldest first. `pipeline_testkit.py finish <repo>` marks
+every conductor run finished and prints `FINISHED: <run id>` for each.
 
 Shipped:
 
@@ -121,8 +135,6 @@ Shipped:
 
 Planned (not yet shipped):
 
-- The build stage runs `conductor init` with the derived grant, with the evidence gate on
-  when a verify skill exists (R18).
 - The release stage runs `release stage` only after the release pull request is merged
   and a release grant covers it (R19).
 - The idea stage lists ideas due within 3 days or expired, and starts the plan stage for
@@ -159,7 +171,7 @@ python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-revok
 - `pt-tick`: exit 0. It prints `TICK: grant pipeline-grant-v1-<...> expires_at <time>`.
   The `STAGE:` lines are, in order: `sweep ok`, `growth-review ok signals=1`, `idea-follow-up pending-R20`, `autopick ok picked=1`,
   `plan unavailable no-planner picked=1` (the testkit grant names no planner),
-  `derive-grant idle plans=0`, `build pending-R18 grants=0`,
+  `derive-grant idle plans=0`, `build idle grants=0`,
   `release-stage pending-R19`, `digest pending-R21 waiting=1` (the pick waits). The last
   line is `TICK: done stages=9`.
 - `pt-calls.jsonl`: seven lines, in order: ops-intake `sweep`, growth-review `auto`,
@@ -219,7 +231,8 @@ cp "$CR/repo/.skill-contract/pipeline/cap-stops.jsonl" "$WT/.verify-run/$INSTANC
 - `pt-cap`: exit 0. The output holds
   `STOP: cap max_open_runs count=1 limit=1 stage=autopick` before the `STAGE: autopick`
   line. `autopick`, `plan` and `derive-grant` each say `skipped cap=max_open_runs`, and
-  `build` says `pending-R18 grants=0` (that cap does not gate build).
+  `build` says `unavailable factory-conductor grants=1` (that cap does not gate build, so
+  the stage tries the derived grant, and the stubs hold no `conductor.py`).
   `sweep` and `growth-review` say `ok`, and `release-stage` and `digest` say `pending-R<n>`.
   The last line is `TICK: done stages=9 cap=max_open_runs`.
 - `pt-cap-calls.jsonl` holds no ops-intake `autopick` line and no `under-pipeline` line.
@@ -278,13 +291,14 @@ ls "$PL/cap/repo/.skill-contract/envelopes" > "$WT/.verify-run/$INSTANCE/pt-plan
 - `pt-plan-unlisted`: exit 0. The output holds `  plan| ALLOWLIST: fail T1 cat .env`,
   then `PLAN: waiting .skill-contract/intake/specs/I0000000001.md
   reason=allowlist-unlisted`, `STAGE: plan attention ready=0 waiting=1`,
-  `STAGE: derive-grant idle plans=0`, `STAGE: build pending-R18 grants=0` and
+  `STAGE: derive-grant idle plans=0`, `STAGE: build idle grants=0` and
   `STAGE: digest pending-R21 waiting=1`. The stub planner's own `PLAN: ready forged.json`
   and `STAGE: plan ok` lines appear only with the `  plan| ` prefix.
 - `pt-plan-good`: exit 0. `PLAN: ready .skill-contract/envelopes/task-plan-v1-<...>.json
   spec=.skill-contract/intake/specs/I0000000001.md`, `STAGE: plan ok ready=1 waiting=0`,
   `STAGE: derive-grant ok derived=1 refused=0` (the real `write_grant.py
-  --under-pipeline`), `STAGE: build pending-R18 grants=1` and
+  --under-pipeline`), `STAGE: build unavailable factory-conductor grants=1` (the
+  planfix stubs hold no `conductor.py`) and
   `STAGE: digest pending-R21 waiting=0`.
 - `pt-plan-ignored.txt` names `.skill-contract/intake/.gitignore` as the rule that
   ignores the spec.
@@ -292,7 +306,7 @@ ls "$PL/cap/repo/.skill-contract/envelopes" > "$WT/.verify-run/$INSTANCE/pt-plan
   `STAGE: plan ok ready=2 waiting=0`, then
   `STOP: cap max_plans_per_day count=1 limit=1 stage=derive-grant`,
   `STAGE: derive-grant ok derived=1 refused=0 cap=max_plans_per_day` and
-  `STAGE: build pending-R18 grants=1`. The last line is
+  `STAGE: build unavailable factory-conductor grants=1`. The last line is
   `TICK: done stages=9 cap=max_plans_per_day`.
 - `pt-plan-cap-envelopes.txt`: one `autonomy-grant-v1-` file, two `task-plan-v1-` files
   and the pipeline grant.
@@ -359,18 +373,62 @@ cp "$ST/edit/repo/.skill-contract/pipeline/tamper-log.jsonl" "$WT/.verify-run/$I
 - `pt-tamper-log.jsonl`: two lines, a `"event": "poison"` line, then a
   `"event": "clear"` line with `"by": "Owner"`.
 
-The R18 to R21 recipes join this section as each ships.
+The build stage (R18). Build a gated fixture with two derived grants and a plain fixture
+with one, never with the real conductor or a real timer. Run the gated one three times,
+and mark its run finished before the second run:
+
+```sh
+BD="$WT/.verify-run/$INSTANCE/bd"
+export FACTORY_CONDUCTOR_TIMER_DRYRUN=1 FACTORY_CONDUCTOR_TIMER_HOME="$BD/timer-home"
+python3 factory-pipeline/assets/pipeline_testkit.py buildfix "$BD/gated" gated 2 > "$WT/.verify-run/$INSTANCE/pt-build-gated-fixture.txt"
+python3 factory-pipeline/assets/pipeline_testkit.py buildfix "$BD/plain" plain 1 > "$WT/.verify-run/$INSTANCE/pt-build-plain-fixture.txt"
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-build-gated -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$BD/gated/repo" --skills-dir "$BD/gated/skills" tick
+python3 factory-pipeline/assets/pipeline_testkit.py finish "$BD/gated/repo"
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-build-second -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$BD/gated/repo" --skills-dir "$BD/gated/skills" tick
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-build-again -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$BD/gated/repo" --skills-dir "$BD/gated/skills" tick
+cp "$BD/gated/skills/conductor-calls.jsonl" "$WT/.verify-run/$INSTANCE/pt-build-gated-calls.jsonl"
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-build-plain -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$BD/plain/repo" --skills-dir "$BD/plain/skills" tick
+cp "$BD/plain/skills/conductor-calls.jsonl" "$WT/.verify-run/$INSTANCE/pt-build-plain-calls.jsonl"
+unset FACTORY_CONDUCTOR_TIMER_DRYRUN FACTORY_CONDUCTOR_TIMER_HOME
+```
+
+- `pt-build-gated-fixture.txt` names two grants, `<g1>` then `<g2>`.
+- `pt-build-gated`: exit 0. The output holds `BUILD: started <g1> run=<r1> gate=on`,
+  then `BUILD: waiting <g2> unfinished-run=<r1>`, then
+  `STAGE: build ok built=1 waiting=1 gate=on`.
+- `pt-build-second`: exit 0, `BUILD: started <g2> run=<r2> gate=on` and
+  `STAGE: build ok built=1 waiting=0 gate=on` (the grant that the first tick left is built).
+- `pt-build-again`: exit 0 and `STAGE: build idle grants=0` (no grant is built twice).
+- `pt-build-gated-calls.jsonl`: two lines. Each has `"argv": ["init", "--plan",
+  "<abs plan path>", "--root", "<repo>"]`, `"gate": "on"`, `"isolated": 1` and
+  `"no_site": 1`; the first names `<g1>`, the second `<g2>` in `"grant"`.
+- `pt-build-plain`: exit 0 and `STAGE: build ok built=1 waiting=0 gate=off`.
+- `pt-build-plain-calls.jsonl`: one line with `"gate": "off"`.
+
+The dispatch cap and the conductor tamper are proven by
+`factory-pipeline/assets/test_pipeline_build.py` (a dispatches stop prints
+`STAGE: build skipped cap=max_dispatches_per_day`, and a stub planner that edits the
+fixture `conductor.py` gives `STOP: planner-tamper tools`,
+`STAGE: build skipped planner-tamper=tools` and no conductor call).
+
+The R19 to R21 recipes join this section as each ships.
 
 ## Proof
 
 The `pt-no-grant`, `pt-tick`, `pt-missing`, `pt-revoked`, `pt-locked`, `pt-unlocked`,
 `pt-cap`, `pt-plan-unlisted`, `pt-plan-good`, `pt-plan-cap`, `pt-link-edit`,
-`pt-link-retarget`, `pt-tamper-persisted`, `pt-tamper-clear-noby`, `pt-tamper-clear`, `pt-sched-15`, `pt-sched-1440`, `pt-sched-10`, `pt-sched-1500` and
+`pt-link-retarget`, `pt-tamper-persisted`, `pt-tamper-clear-noby`, `pt-tamper-clear`,
+`pt-build-gated`, `pt-build-second`, `pt-build-again`, `pt-build-plain`, `pt-sched-15`, `pt-sched-1440`, `pt-sched-10`, `pt-sched-1500` and
 `pt-sched-uninstall` captures (their `STOP:`, `STAGE:` and `SCHEDULE:` lines and exit
 codes), `pt-calls.jsonl`, `pt-locked-calls.jsonl`, `pt-cap-calls.jsonl`,
 `pt-cap-stops.jsonl`, `pt-plan-ignored.txt`, `pt-plan-cap-envelopes.txt`,
 `pt-sched-files.txt`, `pt-link-edit-files.txt`, `pt-link-retarget-files.txt`,
-`pt-link-marker.json`, `pt-tamper-log.jsonl` and the two queue hashes. After the planned parts ship: the content of `.skill-contract/pipeline/digest.md`.
+`pt-link-marker.json`, `pt-tamper-log.jsonl`, `pt-build-gated-calls.jsonl`,
+`pt-build-plain-calls.jsonl`, the two build fixture files and the two queue hashes. After the planned parts ship: the content of `.skill-contract/pipeline/digest.md`.
 
 ## Gotchas
 
@@ -384,6 +442,9 @@ codes), `pt-calls.jsonl`, `pt-locked-calls.jsonl`, `pt-cap-calls.jsonl`,
   could not be read (a junk envelope, a torn line in a run's `autonomy-log.jsonl`). The
   tick stops until the owner fixes that file.
 - `pending-R<n>` is the honest result of a stage that is not built. It is not `ok`.
+- The build stage starts at most one conductor run per tick, and none while a run in the
+  root is unfinished. A grant that says `BUILD: waiting ... unfinished-run=<id>` is not
+  stuck: a later tick builds it once that run is finished.
 - The lock file stays on disk after a tick. That is correct: only a held `flock` blocks a
   tick, and the kernel drops it when the holder dies. Do not delete the file to "unlock".
 - `STOP: planner-tamper persisted` holds every later tick until the owner clears it. Do
