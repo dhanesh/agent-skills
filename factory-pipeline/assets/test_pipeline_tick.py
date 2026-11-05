@@ -24,7 +24,7 @@ import pipeline_testkit as K  # noqa: E402
 TOOL = os.path.join(HERE, "pipeline.py")
 ORDER = ["sweep", "growth-review", "idea-follow-up", "autopick", "plan", "derive-grant",
          "build", "release-stage", "digest"]
-PENDING = {"idea-follow-up": "pending-R20", "digest": "pending-R21"}
+PENDING = {"digest": "pending-R21"}
 
 
 class Fixture(unittest.TestCase):
@@ -84,6 +84,9 @@ class TestTick(Fixture):
         _, res, _ = self.tick()
         for stage, word in PENDING.items():
             self.assertEqual(res[stage][0], word, stage)
+        # R20: idea follow-up ships; the stubs hold no idea-validation and no idea.
+        self.assertEqual(res["idea-follow-up"], ["unavailable", "idea-validation", "due=0",
+                                                 "go=0"])
         # R17: the grant names no planner, so the plan stage plans nothing.
         self.assertEqual(res["plan"], ["unavailable", "no-planner", "picked=1"])
         # R18: build ships; with no derived grant it has nothing to build.

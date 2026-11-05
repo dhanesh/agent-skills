@@ -18,6 +18,9 @@ of R18: a derived grant is built once by a stub `conductor init`, with the evide
 on exactly when the repository has a verify skill, and the next tick does not build it
 again. The promise of R19: `release stage` runs once, only after the owner merged the
 release pull request, while the release grant covers it, and no other release command runs.
+The promise of R20: the idea stage lists the ideas due within 3 days or expired, hands a
+go idea-brief envelope to the plan stage once (never again in a later tick), and runs no
+writing idea-validation command.
 The harness builds stub skills with assets/pipeline_testkit.py in a tempdir, writes a real
 pipeline grant into the fixture repo with the testkit, runs the shipped
 assets/pipeline.py against them, and a model-free grader checks the transcript. The docs check keeps every path the
@@ -27,7 +30,8 @@ Negative fixtures feed the grader known-bad transcripts (order swapped, a stage 
 a fake `ok` for an unbuilt stage, a build with the wrong evidence gate or two inits, a plan stage that hands on a plan with no planner, a non-zero exit, a no-grant tick that ran a stage or
 exited 0, a cap stop with no STOP line, a stage that ran after a cap stop, a reporting
 stage skipped by a cap, a build skipped by an open-runs cap, a release staged before the
-merge, twice, or with a deploy call) and a docs copy that names a missing
+merge, twice, or with a deploy call, an idea due in 10 days listed, a go idea planned
+twice, a writing ideas command or --today) and a docs copy that names a missing
 script, and require the grader to reject each one.
 """
 import os
@@ -48,7 +52,7 @@ TOOL = os.path.join(SKILL, "assets", "pipeline.py")
 STALE = "no command ships yet"
 ORDER = ["sweep", "growth-review", "idea-follow-up", "autopick", "plan", "derive-grant",
          "build", "release-stage", "digest"]
-PENDING = {"idea-follow-up": "pending-R20", "digest": "pending-R21"}
+PENDING = {"digest": "pending-R21"}
 WORDS = {"ok", "idle", "attention", "refused", "failed", "timeout", "unavailable", "waiting"}
 PATH_RE = re.compile(r"(?<![\w.-])((?:references|assets|scripts|eval)/[\w./-]*\w)")
 GRAPH_BLOCK = re.compile(r"<!-- skill-graph:start -->.*?<!-- skill-graph:end -->", re.S)
@@ -294,6 +298,69 @@ def release_checks(tmp):
               any(want in e for e in bad), "; ".join(bad)[:100])
 
 
+IDEA_WRITERS = ("new", "register", "record", "decide", "handoff")
+
+
+def idea_errors(first, second, calls, planned):
+    """Model-free grader for the idea follow-up stage (R20, B1). `first` and `second` are
+    two tick transcripts over the idea fixture: `soon` (due in 2 days), `later` (due in 10)
+    and `late` (expired), and one go envelope `go-list`. `calls` is the stub
+    idea-validation's call log; `planned` the stub planner's call count. Each tick lists
+    soon and late, never later; the first tick plans go-list once, the second never; and
+    no writing ideas command or --today ever runs."""
+    errors = []
+    for i, out in enumerate((first, second), 1):
+        due = sorted(ln.split()[2] for ln in out.splitlines() if ln.startswith("IDEA: due "))
+        if due != ["late", "soon"]:
+            errors.append("tick %d lists %s, want late and soon" % (i, due))
+    if "IDEA: plan go-list " not in first:
+        errors.append("tick 1 did not hand go-list to the plan stage")
+    if "IDEA: plan " in second:
+        errors.append("tick 2 planned an idea again")
+    if planned != 1:
+        errors.append("the planner ran %d times, want 1" % planned)
+    for c in calls:
+        argv = c["argv"][2:] if c["argv"][:1] == ["--root"] else c["argv"]
+        if not argv or argv[0] in IDEA_WRITERS or argv[0] not in ("list", "status") \
+                or any(a.startswith("--today") for a in c["argv"]):
+            errors.append("ideas called with %s" % argv[:2])
+    return errors
+
+
+def idea_checks(tmp):
+    d = os.path.join(tmp, "ideas")
+    os.makedirs(d)
+    repo, sk, agent = K.idea_fixture(d)
+
+    def tick():
+        return subprocess.run([sys.executable, TOOL, "--root", repo, "--skills-dir", sk,
+                               "tick"], capture_output=True, text=True, timeout=60,
+                              stdin=subprocess.DEVNULL).stdout
+
+    first, second = tick(), tick()
+    calls, planned = K.idea_calls(sk), len(K.planner_calls(agent))
+    errs = idea_errors(first, second, calls, planned)
+    check("idea stage: lists the ideas due in 2 days and expired, not the one due in 10; "
+          "plans the go idea once; runs no writing ideas command",
+          not errs and "STAGE: idea-follow-up ok due=2 go=1" in first,
+          "; ".join(errs)[:120])
+    for label, a, b, c, n, want in (
+        ("idea-later-listed", first + "\nIDEA: due later A1", second, calls, planned,
+         "tick 1 lists"),
+        ("idea-planned-twice", first, second + "\nIDEA: plan go-list x", calls, 2,
+         "planned an idea again"),
+        ("idea-writer-called", first, second, calls + [{"argv": ["--root", repo, "decide",
+                                                                 "go-list"]}],
+         planned, "ideas called with"),
+        ("idea-today-passed", first, second, calls + [{"argv": ["--root", repo, "--today",
+                                                                "2026-01-01", "list"]}],
+         planned, "ideas called with"),
+    ):
+        bad = idea_errors(a, b, c, n)
+        check("grader rejects negative fixture %s" % label,
+              any(want in e for e in bad), "; ".join(bad)[:100])
+
+
 def main():
     text = read(os.path.join(SKILL, "SKILL.md"))
     fm = frontmatter_errors(text)
@@ -375,6 +442,7 @@ def main():
                           any(want in e for e in bad), "; ".join(bad)[:100])
 
         release_checks(tmp)
+        idea_checks(tmp)
 
         cp, sk = run_tick(tmp, "no-grant", grant=False)
         errs = stop_errors(cp.stdout, cp.returncode)
@@ -421,7 +489,7 @@ def main():
                   any(want in e for e in bad), "; ".join(bad)[:100])
         check("grader accepts the known-good no-grant transcript", not stop_errors(stop, 2))
         capped = "\n".join(
-            ["STAGE: sweep ok", "STAGE: growth-review ok", "STAGE: idea-follow-up pending-R20",
+            ["STAGE: sweep ok", "STAGE: growth-review ok", "STAGE: idea-follow-up idle",
              "STOP: cap max_open_runs count=1 limit=1 stage=autopick"]
             + ["STAGE: %s skipped cap=max_open_runs" % s for s in GATED]
             + ["STAGE: build idle grants=0", "STAGE: release-stage idle",
