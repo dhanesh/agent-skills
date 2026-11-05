@@ -147,6 +147,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 
 SKILL_NAME = "factory-pipeline"
 VERSION = "0.1.0"
@@ -249,6 +250,9 @@ class Tick:
         self.gate = None    # run_tick sets it: gate(stage) -> cap name or None (R15)
         self.baseline = None  # spec-first-planning's files before any planner ran (R17)
         self.programs = None  # (files, trees) program_roots() found before any planner ran
+        self.pins = {}        # {name: absolute path} of every program run by name (pinned)
+        self.pathdir = None   # the private PATH directory of wrappers to the pins
+        self.sealed = False   # True from the first planner on: tools get only that PATH
         self.tampered = None  # what a planner changed: the tick trusts nothing after it
 
 
@@ -309,27 +313,40 @@ def _safe_config(env):
     return env
 
 
-def tool_env():
+def _sealed(env, tick):
+    """Once the tick is sealed (from the first planner on, see seal()), PATH holds only the
+    tick's private directory of pinned programs, so a program that a planner plants on the
+    owner's PATH is never found by name."""
+    if tick is not None and tick.sealed:
+        env["PATH"] = tick.pathdir
+    return env
+
+
+def tool_env(tick=None):
     """The environment of every tool the tick runs: os.environ without the variables that
-    point git at another repository or add config, plus the GIT_SAFE switches."""
+    point git at another repository or add config, plus the GIT_SAFE switches, and the
+    private PATH once the tick is sealed."""
     env = {k: v for k, v in os.environ.items() if k not in GIT_SCRUB}
-    return _safe_config(env)
+    return _sealed(_safe_config(env), tick)
 
 
-def git_env():
+def git_env(tick=None):
     """The environment of the tick's own git calls: no GIT_* variable at all, plus the
-    GIT_SAFE switches."""
-    return _safe_config({k: v for k, v in os.environ.items() if not k.startswith("GIT_")})
+    GIT_SAFE switches, and the private PATH once the tick is sealed."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return _sealed(_safe_config(env), tick)
 
 
 def git(tick, *args):
     """Run git in the repo root, hardened (GIT_SAFE, no replace objects, no system config,
-    no GIT_* from the caller). Return the CompletedProcess, or None when git cannot run."""
+    no GIT_* from the caller). Once program_roots() pinned git, this is always the pinned
+    absolute path, never a name. Return the CompletedProcess, or None when git cannot run."""
+    exe = tick.pins.get("git") or "git"
     try:
-        return subprocess.run(["git", "--no-replace-objects", "-C", tick.root] + list(GIT_SAFE)
+        return subprocess.run([exe, "--no-replace-objects", "-C", tick.root] + list(GIT_SAFE)
                               + list(args), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               stdin=subprocess.DEVNULL, timeout=CHECK_TIMEOUT, check=False,
-                              env=git_env())
+                              env=git_env(tick))
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -345,7 +362,7 @@ def run_tool(tick, stage, argv, input_bytes=None, echo_stdout=True):
     try:
         cp = subprocess.run(argv, cwd=tick.root, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, timeout=tick.timeout, check=False,
-                            env=tool_env(), **kw)
+                            env=tool_env(tick), **kw)
     except subprocess.TimeoutExpired:
         return "timeout", None, b""
     except OSError as e:
@@ -756,8 +773,16 @@ def changed_reason(before, after):
 #            and zip of its `-I -S` sys.path plus sysconfig's stdlib and platstdlib, as
 #            the launched interpreter itself reports them (its site-packages and
 #            __pycache__ included, since a planted .pth or .pyc lives there);
-#   git:     the git that PATH resolves for the tick and its tools, by sha256, and its
-#            `git --exec-path` directory.
+#   pinned:  every program the tick or a tool it starts runs by name (PINNED: git,
+#            python3, python, and xcode-select on macOS, which contract_check.py may
+#            run), resolved once on the owner's PATH to an absolute path, by sha256, and
+#            git's `git --exec-path` directory; the planner's own argv[0] (by stat
+#            signature, since an agent binary can be large);
+#   private: the tick's private PATH directory (make_pathdir()): one wrapper per pinned
+#            name that execs the pinned absolute path. From the first planner on (seal())
+#            every tool's PATH is that directory only, and the tick's own git calls run
+#            the pinned path, so a program a planner plants anywhere on the owner's PATH
+#            is never run. The planner keeps the owner's PATH: it is the untrusted party.
 # The trees are recorded by _stat_sig(), not sha256, so the check before every tool run
 # stays cheap; the executables are hashed. A path that does not exist is recorded as
 # missing, so a file that appears later counts as a change. Outside this tripwire: shared
@@ -769,10 +794,15 @@ PROBE = ("import json, os, sys, sysconfig; print(json.dumps({'exe': sys.executab
          "'ver': '%d%d' % sys.version_info[:2]}))")
 
 
+PINNED = ("git", "python3", "python", "xcode-select")
+PYTHON_NAMES = ("python3", "python")
+
+
 def program_roots(tick):
-    """(files to hash, trees to stat) that the program baseline watches, found once before
-    any planner runs, or None when the interpreter cannot report its paths. Asks the
-    interpreter the tools run with (PYTHON), never the tick's own."""
+    """(files to hash, trees to stat, files to stat) that the program baseline watches,
+    found once before any planner runs, or None when the interpreter cannot report its
+    paths. Asks the interpreter the tools run with (PYTHON), never the tick's own. Sets
+    tick.pins: {name: absolute path} of every PINNED program found, and `planner`."""
     try:
         cp = subprocess.run([PYTHON, "-I", "-S", "-B", "-c", PROBE], cwd=tick.root,
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -804,11 +834,19 @@ def program_roots(tick):
     for p in info["path"] + [info["stdlib"], info["platstdlib"]]:
         if isinstance(p, str) and p:
             trees.add(os.path.abspath(p))
-    gitexe = shutil.which("git", path=tool_env().get("PATH"))
-    if gitexe:
-        files.update((os.path.abspath(gitexe), os.path.realpath(gitexe)))
+    owner_path = tool_env().get("PATH")
+    pins = {}
+    for name in PINNED:
+        if name in PYTHON_NAMES:
+            pins[name] = os.path.abspath(PYTHON)  # the tools' own interpreter, venv kept
+            continue
+        found = shutil.which(name, path=owner_path)
+        if found:
+            pins[name] = os.path.realpath(found)
+            files.update((os.path.abspath(found), pins[name]))
+    if "git" in pins:
         try:
-            cp = subprocess.run([gitexe, "--exec-path"], stdout=subprocess.PIPE,
+            cp = subprocess.run([pins["git"], "--exec-path"], stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
                                 timeout=CHECK_TIMEOUT, check=False, env=git_env())
             ep = cp.stdout.decode("utf-8", "replace").strip()
@@ -816,27 +854,87 @@ def program_roots(tick):
                 trees.add(ep)
         except (OSError, subprocess.TimeoutExpired):
             return None
+    statfiles = set()
+    if tick.planner and isinstance(tick.planner[0], str):
+        found = shutil.which(tick.planner[0], path=owner_path)
+        if found:
+            pins["planner"] = os.path.abspath(found)
+            statfiles.update((pins["planner"], os.path.realpath(found)))
+    tick.pins = pins
     # A tree inside another is walked once, as part of the outer one.
     trees = sorted(t for t in trees
                    if not any(o != t and t.startswith(o.rstrip(os.sep) + os.sep)
                               for o in trees))
-    return sorted(files), trees
+    return sorted(files), trees, sorted(statfiles)
+
+
+def make_pathdir(tick):
+    """Create the tick's private PATH directory (mkdtemp: mode 0700, outside the
+    repository) with one wrapper per pinned name that execs the pinned absolute path.
+    Returns its path, or None when it cannot be made (then no planner starts)."""
+    try:
+        d = os.path.realpath(tempfile.mkdtemp(prefix="factory-pipeline-path-"))
+    except OSError:
+        return None
+    if inside(tick.root, d) is not None:
+        shutil.rmtree(d, ignore_errors=True)
+        return None
+    try:
+        os.chmod(d, 0o700)
+        for name, target in sorted(tick.pins.items()):
+            if name == "planner":
+                continue
+            path = os.path.join(d, name)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o500)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write('#!/bin/sh\nexec %s "$@"\n' % shlex.quote(target))
+    except OSError:
+        shutil.rmtree(d, ignore_errors=True)
+        return None
+    return d
+
+
+def seal(tick):
+    """From here on every tool gets PATH=<the private directory> only (see _sealed())."""
+    tick.sealed = True
 
 
 def program_digest(tick):
     """{key: digest} of the program roots (see the comment above). Raises TooLarge."""
     if tick.programs is None:
         return {"programs": "unknown"}
-    files, trees = tick.programs
+    files, trees = tick.programs[:2]
+    statfiles = tick.programs[2] if len(tick.programs) > 2 else ()
     out, budget = {}, [0, 0]
-    for f in files:
+    for f in list(files) + list(statfiles):
         if not os.path.lexists(f):
             out["programs:" + f] = "missing"
         else:
-            _record(out, budget, "programs:" + f, f)
+            _record(out, budget, "programs:" + f, f, fast=f not in files)
     for t in trees:
         _walk(out, budget, "programs:" + t, t, fast=True)
+    if tick.pathdir is not None:
+        _walk(out, budget, "programs:private", tick.pathdir)
     return out
+
+
+def programs_trusted(tick):
+    """Compare only the program roots with the baseline, and poison the tick on any change.
+    Runs right after a planner, before the tick runs anything (git included), so a changed
+    git never runs to take the snapshot."""
+    if tick.tampered:
+        return False
+    try:
+        now = program_digest(tick)
+    except TooLarge:
+        now = {"programs": "too-large"}
+    base = {k: v for k, v in (tick.baseline or {}).items() if k.startswith("programs")}
+    if now == base:
+        return True
+    for k in sorted(k for k in set(base) | set(now) if base.get(k) != now.get(k))[:5]:
+        echo("plan", "changed: %s" % shown(k))
+    poison(tick, "programs")
+    return False
 
 
 def tool_digest(tick):
@@ -884,6 +982,8 @@ def programs_ok(tick):
     anything it would run after a planner (so no planner starts)."""
     if tick.programs is None:
         return "programs-unknown"
+    if tick.pathdir is None:
+        return "programs-no-private-path"
     if (tick.baseline or {}).get("programs") == "too-large":
         return "programs-too-large"
     return None
@@ -1006,7 +1106,13 @@ def plan_one(tick, env, tools, allow):
                                "allowlist": allow}
     argv = [prompt if a == "{prompt}" else tick.root if a == "{root}" else a
             for a in tick.planner]
+    if tick.pins.get("planner"):
+        argv[0] = tick.pins["planner"]  # resolved before any planner ran, never again
+    seal(tick)
     word, code = run_planner(tick, argv)
+    # Before anything else runs (the snapshot below runs git): the program roots.
+    if not programs_trusted(tick):
+        return None, spec, "planner-changed-programs"
     if word == "timeout":
         return None, spec, "planner-timeout"
     if code != 0:
@@ -1376,7 +1482,7 @@ def check_grant(tick, ref=None):
     try:
         cp = subprocess.run(argv, cwd=tick.root, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                            timeout=CHECK_TIMEOUT, check=False, env=tool_env())
+                            timeout=CHECK_TIMEOUT, check=False, env=tool_env(tick))
     except (OSError, subprocess.TimeoutExpired) as e:
         echo("grant", "cannot run contract_check.py: %s" % type(e).__name__)
         return None, "checker-error"
@@ -1429,9 +1535,18 @@ def cmd_tick(a):
 
 
 def run_tick(a):
-    """The tick body. cmd_tick() calls it only while it holds the pipeline lock."""
+    """The tick body. cmd_tick() calls it only while it holds the pipeline lock. The
+    private PATH directory (make_pathdir()) lives only as long as the tick."""
     tick = Tick(a.root, skill_roots(a.root, overrides=a.skills_dir),
                 growth_source=a.growth_source)
+    try:
+        return _run_tick(a, tick)
+    finally:
+        if tick.pathdir:
+            shutil.rmtree(tick.pathdir, ignore_errors=True)
+
+
+def _run_tick(a, tick):
     # R13: no stage runs (nothing is swept, picked or planned) without a live pipeline grant.
     gid, reason = check_grant(tick, a.grant)
     if gid is None:
@@ -1444,6 +1559,7 @@ def run_tick(a):
     # its tools (caps, plan, derive-grant) first checks that nothing changed since.
     # The program roots (the interpreter, its stdlib, git) are part of that baseline.
     tick.programs = program_roots(tick)
+    tick.pathdir = make_pathdir(tick)
     tick.baseline = tool_digest(tick)
     # R15: a cap checks before each stage that starts a new plan or run (STAGE_CAPS), and
     # derive-grant asks again between plans through tick.gate (R18's build will ask before

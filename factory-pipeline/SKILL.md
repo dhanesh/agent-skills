@@ -167,8 +167,14 @@ Before every run of a spec-first-planning tool, the tick checks every file of th
 and every program root, against that baseline. The program roots are every program and
 code root the tick runs after a planner: the interpreter the tools run with (its binary,
 its `pyvenv.cfg` and `._pth` files, its `libpython*` files, and every directory and zip of
-its stdlib path, its `site-packages` included) and the git binary with its `--exec-path`
-directory. When the tick cannot list them, or they pass the snapshot bound, no planner
+its stdlib path, its `site-packages` included), every program the tick or a tool runs
+by name (`git`, `python3`, `python`, `xcode-select`), pinned to an absolute path before
+any planner runs, git's `--exec-path` directory, and the tick's private `PATH` directory.
+From the first planner on, every tool gets a `PATH` that holds only that private
+directory (wrappers to the pinned paths), and the tick's own git calls run the pinned
+path, so a program planted on the owner's `PATH` never runs. Right after each planner,
+before anything else runs, the tick compares the program roots
+(`planner-changed-programs`). When the tick cannot list them, or they pass the snapshot bound, no planner
 starts (`programs-unknown`, `programs-too-large`). Every Python tool the tick starts runs
 as `python -I -S -B` with a `sys.path` of its own directory and the stdlib directories
 only, so no `site` module, `site-packages`, `.pth` file, `sitecustomize.py`,
@@ -179,7 +185,8 @@ whatever the owner can. Give it restricted tools (for Claude Code, an `--allowed
 list that lets it edit files and read the repository, and no shell), and keep its
 permission prompts on; the checker refuses a permission-bypass flag in any form. The
 snapshot skips `.skill-contract/runs/`, so a planner that forges or deletes run
-directories can lower the dispatch count. Outside the tripwire: shared libraries outside
+directories can lower the dispatch count. Programs are pinned by absolute path and run
+with a private `PATH`. Outside the tripwire: shared libraries outside
 the interpreter's prefix, the OS, and files that the tick never runs. The owner's own git
 hooks and fsmonitor are off for every tool the tick runs, the sweep commands included.
 

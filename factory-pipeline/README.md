@@ -46,8 +46,11 @@ What runs today:
   for sweep commands). A tamper poisons the tick: it prints `STOP: planner-tamper`, derives
   no grant, starts no build, puts every plan of the tick on the digest list and exits 4.
   Every Python tool runs as `python -I -S -B`, so no `.pth` file or `sitecustomize.py`
-  loads. The tick also takes a baseline of the interpreter, its stdlib and the git binary
-  before any planner runs. A change to one of them poisons the tick. These guards are
+  loads. Before any planner runs, the tick pins every program that it or a tool runs by
+  name (git included) to an absolute path, and takes a baseline of these programs, the
+  interpreter and its stdlib. After the first planner, every tool runs with a private
+  `PATH` that holds only wrappers to the pinned paths. A change to a pinned program
+  poisons the tick before that program runs again. These guards are
   tripwires, not a sandbox: give the planner restricted tools. Shared libraries outside
   the interpreter's prefix, the OS, and files that the tick never runs are outside them. The snapshot skips `.skill-contract/runs/`, so a
   planner that forges or deletes run directories can lower the dispatch count. With no planner in the grant, the stage

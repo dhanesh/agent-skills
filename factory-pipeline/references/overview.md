@@ -160,14 +160,29 @@ interpreter that the tools run with, not its own interpreter.
 - The stdlib: every directory and zip on the interpreter's `-I -S` path, and its
   `stdlib` and `platstdlib` directories from `sysconfig`. This includes `site-packages`
   and `__pycache__`, because a planted `.pth` or `.pyc` file lives there.
-- git: the binary that `PATH` gives to the tick and its tools (sha256), and its
-  `git --exec-path` directory.
+- The pinned programs: each program that the tick or a tool it starts runs by name.
+  These are `git`, `python3`, `python` and, on macOS, `xcode-select`, which
+  `contract_check.py` can run. The tick finds each one on the owner's `PATH` once and
+  pins its absolute path (sha256). It also records git's `git --exec-path` directory, and
+  the planner's own program (by stat).
+- The private `PATH` directory: the tick makes it with `mkdtemp`, outside the
+  repository, with mode 0700. It holds one small wrapper per pinned name, and each
+  wrapper runs the pinned absolute path.
+
+From the first planner on, every tool that the tick starts gets a `PATH` that holds only
+the private directory. The tick's own git calls run the pinned absolute path. So a
+program that a planner puts anywhere on the owner's `PATH` never runs in the tick. The
+planner itself keeps the owner's `PATH`, because it is the part that the tick does not
+trust. Right after each planner exits, before the tick runs anything else (git
+included), the tick compares the program roots with the baseline. So a changed git never
+runs to take the snapshot. The tick removes the private directory when it ends.
 
 The tick records the files in these trees by inode, size, mtime, ctime and mode, not by
 sha256, so the check before every tool run stays fast. A write, a rename, a `chmod` or a
 `utime` changes ctime, and a user cannot set ctime back. A path that does not exist is
 recorded as missing, so a file that appears later is a change. A change poisons the tick
-with `STOP: planner-tamper programs`. When the interpreter cannot report its paths, the
+with `STOP: planner-tamper programs`, and the plan waits with
+`planner-changed-programs`. When the interpreter cannot report its paths, the
 plan stage starts no planner (`programs-unknown`). When the roots pass the 200000-file
 bound, it starts no planner either (`programs-too-large`).
 
@@ -179,7 +194,8 @@ snapshot skips `.skill-contract/runs/`, so a planner that forges or deletes run
 directories can lower the dispatch count. The owner's own git hooks and fsmonitor are off
 for every tool that the tick runs, the sweep commands included.
 
-These parts are outside the tripwire:
+Programs are pinned by absolute path before any planner runs, and every tool after the
+first planner runs with the private `PATH`. These parts are outside the tripwire:
 
 - shared libraries outside the interpreter's prefix, and the OS itself (the dynamic
   loader, system libraries, the `xcrun` shim's developer directory on macOS);

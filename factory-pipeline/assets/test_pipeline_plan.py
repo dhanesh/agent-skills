@@ -19,6 +19,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -477,7 +478,8 @@ class TestProgramTamper(PlanFixture):
     def assertProgramsTampered(self, code, text, res, seen):
         self.assertEqual(code, 4, text)
         self.assertIn("\nSTOP: planner-tamper programs:", text)
-        self.assertIn("PLAN: waiting %s reason=planner-tamper" % self.spec("I0000000001"),
+        self.assertIn("PLAN: waiting %s reason=planner-changed-programs"
+                      % self.spec("I0000000001"),
                       text)
         self.assertEqual(res["plan"][0], "refused", text)
         for stage in ("derive-grant", "build"):
@@ -536,12 +538,109 @@ class TestProgramTamper(PlanFixture):
 
     def test_program_roots_name_the_interpreter_its_stdlib_and_git(self):
         tick = P.Tick(self.repo, [])
-        files, trees = P.program_roots(tick)
+        files, trees, _ = P.program_roots(tick)
         self.assertIn(self.exe, files)
         self.assertTrue(any(os.path.realpath(t) == os.path.realpath(self.std) for t in trees),
                         trees)
         git = shutil.which("git")
         self.assertIn(os.path.realpath(git), files)
+        self.assertEqual(tick.pins["git"], os.path.realpath(git))
+        self.assertEqual(tick.pins["python3"], self.exe)
+
+
+class TestPathPinning(PlanFixture):
+    """Programs run by name are pinned before any planner runs: from the first planner on,
+    every tool gets PATH=<the tick's private directory> only, and the tick's own git calls
+    run the pinned absolute path. A `git` a planner plants early on the owner's PATH never
+    runs, and a change to the pinned git poisons the tick before that git runs again."""
+
+    def setUp(self):
+        super().setUp()
+        self.early = os.path.join(self.tmp, "early-bin")
+        os.makedirs(self.early)
+        self.marker = os.path.join(self.tmp, "PWNED_GIT")
+        self.real_git = os.path.realpath(shutil.which("git"))
+
+    def on_path(self, *dirs):
+        p = mock.patch.dict(os.environ, {"PATH": os.pathsep.join(
+            list(dirs) + [os.environ.get("PATH", "")])})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def fake_git(self):
+        """A git that logs that it ran, then runs the real git (so nothing else breaks)."""
+        return "#!/bin/sh\necho ran >> %s\nexec %s \"$@\"\n" % (
+            shlex.quote(self.marker), shlex.quote(self.real_git))
+
+    def plant(self, path, text):
+        with open(os.path.join(self.agent, "extra.py"), "w", encoding="utf-8") as f:
+            f.write("open(%r, 'w', encoding='utf-8').write(%r)\nos.chmod(%r, 0o755)\n"
+                    % (path, text, path))
+
+    def test_git_planted_early_on_path_never_runs_and_the_plan_still_waits(self):
+        self.on_path(self.early)
+        self.pick("I0000000001")
+        self.mode("unlisted")
+        self.plant(os.path.join(self.early, "git"), self.fake_git())
+        code, text, res, seen = self.tick()
+        self.assertEqual(code, 0, text)
+        self.assertWaits(text, res, seen, "I0000000001", "allowlist-unlisted")
+        self.assertFalse(os.path.exists(self.marker), text)
+        self.assertEqual(seen["grants"], [])
+        # Not vacuous: on the owner's PATH, `git` now is the planted one.
+        subprocess.run(["git", "--version"], stdout=subprocess.DEVNULL, check=True,
+                       timeout=60, env=dict(os.environ))
+        self.assertTrue(os.path.exists(self.marker))
+
+    def test_git_planted_early_on_path_never_runs_in_tools_or_derive_grant(self):
+        self.on_path(self.early)
+        self.pick("I0000000001")
+        self.plant(os.path.join(self.early, "git"), self.fake_git())
+        code, text, res, seen = self.tick()
+        self.assertEqual(code, 0, text)
+        self.assertEqual(res["plan"], ["ok", "ready=1", "waiting=0"], text)
+        self.assertEqual(res["derive-grant"], ["ok", "derived=1", "refused=0"], text)
+        self.assertFalse(os.path.exists(self.marker), text)
+
+    def test_tools_get_only_the_private_path_after_the_planner(self):
+        seen_env = {}
+        real = P.run_tool
+
+        def spy(tick, stage, argv, *a, **kw):
+            seen_env.setdefault(stage, []).append(P.tool_env(tick)["PATH"])
+            return real(tick, stage, argv, *a, **kw)
+
+        self.pick("I0000000001")
+        with mock.patch.object(P, "run_tool", spy):
+            code, text, res, seen = self.tick()
+        self.assertEqual(code, 0, text)
+        after = seen_env["plan"][1:] + seen_env["derive-grant"]
+        self.assertTrue(after)
+        for path in after:
+            self.assertNotIn(os.pathsep, path)
+            self.assertTrue(os.path.basename(path).startswith("factory-pipeline-path-"))
+        self.assertFalse(os.path.exists(seen_env["derive-grant"][0]))  # removed at the end
+
+    def test_edited_pinned_git_poisons_before_it_runs_again(self):
+        gitbin = os.path.join(self.tmp, "git-copy")
+        K.write_rel(gitbin, "git", "#!/bin/sh\nexec %s \"$@\"\n" % shlex.quote(self.real_git))
+        os.chmod(os.path.join(gitbin, "git"), 0o755)
+        self.on_path(gitbin)
+        self.pick("I0000000001")
+        self.plant(os.path.join(gitbin, "git"), self.fake_git())
+        code, text, res, seen = self.tick()
+        self.assertFalse(os.path.exists(self.marker), "the edited git ran after the planner")
+        self.assertEqual(code, 4, text)
+        self.assertIn("\nSTOP: planner-tamper programs:", text)
+        self.assertIn("PLAN: waiting %s reason=planner-changed-programs"
+                      % self.spec("I0000000001"), text)
+        self.assertEqual(res["derive-grant"], ["skipped", "planner-tamper=programs"], text)
+        self.assertEqual(seen["plans"], [])
+        self.assertEqual(seen["grants"], [])
+        # Not vacuous: the edited copy writes the marker when it runs.
+        subprocess.run([os.path.join(gitbin, "git"), "--version"], stdout=subprocess.DEVNULL,
+                       check=True, timeout=60)
+        self.assertTrue(os.path.exists(self.marker))
 
 
 class TestCapInTick(PlanFixture):
