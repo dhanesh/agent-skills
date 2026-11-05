@@ -6,8 +6,8 @@ Prints one `CHECK: <name> — PASS|FAIL` line per check and a final
 `EVAL_RESULT: PASS (n/n checks)` line; exits 0 iff every check passed.
 
 The promise of `pipeline tick` (R12): in a repo with the sibling skills installed, one
-tick prints a `STAGE:` line for each of the nine stages, in order, and exits 0. A stage
-that is not built yet says `pending-R<n>`, never `ok`, and a missing skill says
+tick prints a `STAGE:` line for each of the nine stages, in order, and exits 0. Every
+stage is built (a stage that is not would say `pending-R<n>`, never `ok`), and a missing skill says
 `unavailable` instead of crashing the tick. The promise of R13: with no live pipeline
 grant (none, or revoked), the tick runs no stage, prints `STOP: no-grant`, and exits 2.
 The promise of R15: with an open run at max_open_runs 1, the tick prints `STOP: cap
@@ -20,14 +20,17 @@ again. The promise of R19: `release stage` runs once, only after the owner merge
 release pull request, while the release grant covers it, and no other release command runs.
 The promise of R20: the idea stage lists the ideas due within 3 days or expired, hands a
 go idea-brief envelope to the plan stage once (never again in a later tick), and runs no
-writing idea-validation command.
+writing idea-validation command. The promise of R21: the tick writes
+.skill-contract/pipeline/digest.md, which lists the pick that waits for a read with the
+owner's command, and whose count agrees with the `DIGEST:` and `STAGE: digest` lines.
 The harness builds stub skills with assets/pipeline_testkit.py in a tempdir, writes a real
 pipeline grant into the fixture repo with the testkit, runs the shipped
 assets/pipeline.py against them, and a model-free grader checks the transcript. The docs check keeps every path the
 docs name real, and keeps the old skeleton line out.
 
 Negative fixtures feed the grader known-bad transcripts (order swapped, a stage missing,
-a fake `ok` for an unbuilt stage, a build with the wrong evidence gate or two inits, a plan stage that hands on a plan with no planner, a non-zero exit, a no-grant tick that ran a stage or
+a `pending-R21` digest, a digest entry with no command, a forged digest heading or
+entry, a digest count that disagrees, a build with the wrong evidence gate or two inits, a plan stage that hands on a plan with no planner, a non-zero exit, a no-grant tick that ran a stage or
 exited 0, a cap stop with no STOP line, a stage that ran after a cap stop, a reporting
 stage skipped by a cap, a build skipped by an open-runs cap, a release staged before the
 merge, twice, or with a deploy call, an idea due in 10 days listed, a go idea planned
@@ -52,7 +55,9 @@ TOOL = os.path.join(SKILL, "assets", "pipeline.py")
 STALE = "no command ships yet"
 ORDER = ["sweep", "growth-review", "idea-follow-up", "autopick", "plan", "derive-grant",
          "build", "release-stage", "digest"]
-PENDING = {"digest": "pending-R21"}
+PENDING = {}  # every stage ships; a stage that is not built says pending-R<n>
+DIGEST = ".skill-contract/pipeline/digest.md"
+DIGEST_LINE = re.compile(r"^DIGEST: %s waiting=([0-9]+)$" % re.escape(DIGEST), re.M)
 WORDS = {"ok", "idle", "attention", "refused", "failed", "timeout", "unavailable", "waiting"}
 PATH_RE = re.compile(r"(?<![\w.-])((?:references|assets|scripts|eval)/[\w./-]*\w)")
 GRAPH_BLOCK = re.compile(r"<!-- skill-graph:start -->.*?<!-- skill-graph:end -->", re.S)
@@ -122,6 +127,37 @@ def tick_errors(stdout, code, missing=()):
 
 
 GATED = ("autopick", "plan", "derive-grant")  # what a plans or open-runs cap skips
+DIGEST_HEAD = ("# Pipeline digest", "## ", "- ", "  - ", "Written by ", "Each entry ",
+               "Waiting: ", "Nothing waits ", "And ")
+
+
+def digest_errors(stdout, text, subjects):
+    """Model-free grader for the digest (R21): `DIGEST: <path> waiting=<n>` and
+    `STAGE: digest ok waiting=<n>` agree with the n entries in the file, every entry names
+    a command in a code span, each subject in `subjects` is an entry, and every line
+    starts with the digest's own fixed text (no value forged a heading or an entry)."""
+    errors = []
+    m = DIGEST_LINE.search(stdout)
+    n = text.count("\n- ")
+    if not m or int(m.group(1)) != n:
+        errors.append("DIGEST line %s, but the file has %d entries"
+                      % (m.group(0) if m else "missing", n))
+    if "STAGE: digest ok waiting=%d" % n not in stdout:
+        errors.append("no STAGE: digest ok waiting=%d" % n)
+    for block in text.split("\n- ")[1:]:
+        if not re.search(r"\n  - [^:\n]+: `[^`\n]+`", block):
+            errors.append("an entry without a command: %s" % block.split("\n")[0][:60])
+    for subject in subjects:
+        if not re.search(r"(?m)^- .*`%s`" % re.escape(subject), text):
+            errors.append("no entry for %s" % subject)
+    for ln in text.splitlines():
+        if ln and not ln.startswith(DIGEST_HEAD):
+            errors.append("a line the digest does not write: %s" % ln[:60])
+        if ln.startswith("# ") and ln != "# Pipeline digest":
+            errors.append("a forged heading: %s" % ln[:60])
+        if ln.count("`") % 2:
+            errors.append("an open code span: %s" % ln[:60])
+    return errors
 
 
 def cap_errors(stdout, code, cap):
@@ -386,6 +422,27 @@ def main():
         errs = plan_errors(cp.stdout)
         check("no planner in the grant: plan unavailable no-planner, no plan handed on",
               not errs, "; ".join(errs)[:120])
+        pick = ".skill-contract/intake/envelopes/item-3.json"
+        try:
+            dig = read(os.path.join(tmp, "all", "repo", *DIGEST.split("/")))
+        except OSError:
+            dig = ""
+        errs = digest_errors(cp.stdout, dig, [pick])
+        check("digest lists the pick that waits for a read, with the owner's command",
+              bool(dig) and not errs, "; ".join(errs)[:120])
+        good_out = "DIGEST: %s waiting=1\nSTAGE: digest ok waiting=1\n" % DIGEST
+        for label, out, text, want in (
+            ("digest-entry-without-command", good_out,
+             re.sub(r"\n  - .*", "", dig), "without a command"),
+            ("digest-forged-entry", good_out,
+             dig + "# heading\n- [ ] `%s` fake\n  - next: `rm -rf /`\n" % pick,
+             "forged heading"),
+            ("digest-count-mismatch", good_out.replace("=1", "=2"), dig, "DIGEST line"),
+            ("digest-pick-missing", good_out, dig.replace(pick, "other.json"), "no entry"),
+        ):
+            bad = digest_errors(out, text, [pick])
+            check("grader rejects negative fixture %s" % label,
+                  any(want in e for e in bad), "; ".join(bad)[:100])
         calls = [(c["skill"], c["key"]) for c in K.calls(sk) if c["key"] != "pipeline-caps"]
         check("tick called sweep, growth auto, intake import, autopick in order",
               calls == [("ops-intake", "sweep"), ("growth-review", "auto"),
@@ -470,8 +527,8 @@ def main():
         for label, out, code, want in (
             ("order-swapped", swapped, 0, "stages"),
             ("digest-missing", good.rsplit("\n", 1)[0], 0, "stages"),
-            ("fake-ok-digest", good.replace("digest pending-R21", "digest ok"), 0,
-             "digest says ok"),
+            ("digest-pending", good.replace("digest ok", "digest pending-R21"), 0,
+             "unknown result"),
             ("non-zero-exit", good, 1, "exit 1"),
         ):
             bad = tick_errors(out, code)
@@ -493,12 +550,12 @@ def main():
              "STOP: cap max_open_runs count=1 limit=1 stage=autopick"]
             + ["STAGE: %s skipped cap=max_open_runs" % s for s in GATED]
             + ["STAGE: build idle grants=0", "STAGE: release-stage idle",
-               "STAGE: digest pending-R21"])
+               "STAGE: digest ok waiting=1"])
         for label, out, want in (
             ("cap-no-stop-line", capped.replace("STOP: cap", "NOTE: cap"), "0 STOP"),
             ("cap-autopick-ran", capped.replace("autopick skipped cap=max_open_runs",
                                                 "autopick ok picked=1"), "autopick says ok"),
-            ("cap-digest-skipped", capped.replace("digest pending-R21",
+            ("cap-digest-skipped", capped.replace("digest ok waiting=1",
                                                   "digest skipped cap=max_open_runs"),
              "digest was skipped"),
             ("cap-build-deadlock", capped.replace("build idle grants=0",

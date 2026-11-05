@@ -50,8 +50,8 @@ class PlanFixture(unittest.TestCase):
         K.picks(self.repo, self.skills, items)
 
     def tick(self, timeout=None):
-        """Run one tick in this process. The digest stage is R21 and not built yet, so a
-        recording stand-in keeps what the digest would list: tick.waiting."""
+        """Run one tick in this process. A recording wrapper around the digest stage (R21)
+        keeps what the earlier stages left for it: tick.waiting, plans and grants."""
         seen = {}
 
         def digest(tick):
@@ -88,7 +88,7 @@ class PlanFixture(unittest.TestCase):
         self.assertEqual(seen["plans"], [])
         self.assertEqual(res["derive-grant"], ["idle", "plans=0"])
         self.assertEqual(res["build"], ["idle", "grants=0"])
-        self.assertEqual(res["digest"], ["pending-R21", "waiting=1"])
+        self.assertEqual(res["digest"], ["ok", "waiting=1"])
         self.assertNotIn("under-pipeline", [c["key"] for c in K.calls(self.skills)])
 
 
@@ -105,7 +105,7 @@ class PlanFixture(unittest.TestCase):
             self.assertEqual(res[stage], ["skipped", "planner-tamper=%s" % what], text)
         # S5: release-stage runs release-conductor's code, so a tamper skips it too.
         self.assertEqual(res["release-stage"], ["skipped", "planner-tamper=%s" % what])
-        self.assertEqual(res["digest"][0], "pending-R21")
+        self.assertEqual(res["digest"][0], "ok")
         self.assertEqual(seen["plans"], [])
         self.assertEqual(seen["grants"], [])
         waits = [w[1] for w in seen["waiting"] if w[0] == "plan-read"]

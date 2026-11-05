@@ -37,13 +37,15 @@ class TestShape(unittest.TestCase):
         self.assertGreaterEqual(len(re.findall(r"^## ", body, re.M)), 3)
         self.assertGreaterEqual(len(re.findall(r"^[0-9]+\. ", body, re.M)), 3)
 
-    def test_status_is_partly_built_not_skeleton(self):
+    def test_status_is_built_not_skeleton(self):
         for rel in ("SKILL.md", "README.md"):
             text = read(rel).lower()
-            self.assertIn("partly built", text, rel)
+            self.assertIn("status: built.", text, rel)
+            self.assertNotIn("partly built", text, rel)
+            self.assertNotIn("pending-r21", text, rel)
             self.assertNotIn("no command ships yet", text, rel)
 
-    def test_tick_ships_and_docs_name_each_pending_requirement(self):
+    def test_tick_ships_and_docs_name_each_requirement(self):
         self.assertTrue(os.path.isfile(os.path.join(SKILL_DIR, "assets", "pipeline.py")))
         text = read("references/overview.md")
         for req in ("R13", "R14", "R15", "R16", "R17", "R18", "R19", "R20", "R21"):

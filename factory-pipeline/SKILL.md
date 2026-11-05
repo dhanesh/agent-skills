@@ -7,19 +7,19 @@ description: >-
   grant, build, release stage and digest, one `STAGE: <name> <result>` line each.
   It calls each sibling skill's tool (ops-intake, growth-review, idea-validation,
   spec-first-planning, factory-conductor, release-conductor) with no shell; a missing one
-  is unavailable. No live grant, a held lock or a cap prints `STOP:` (`no-grant`,
-  `locked`, `cap`). Idea follow-up lists due ideas and plans a go idea once. Plan hands
-  a plan on only when spec_lint and the allowlist pass. Build runs one `conductor init`
-  per tick. Release stage runs `release stage` once, after the owner merged the release
-  PR. `schedule install` sets a timer. Partly built: digest is `pending-R21`. Human gates
-  stay with the owner. Not for one plan to a PR (factory-conductor) or planning
+  is unavailable. No live grant, a held lock or a cap prints `STOP:`. Idea follow-up
+  lists due ideas and plans a go idea once. Plan hands a plan on only when spec_lint and
+  the allowlist pass. Build runs one `conductor init` per tick. Release stage runs
+  `release stage` once, after the owner merged the release PR. Digest lists each waiting
+  human gate with the owner's command. `schedule install` sets a timer. Human gates stay
+  the owner's. Not for one plan to a PR (factory-conductor) or planning
   (spec-first-planning).
 license: MIT
 compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, offline. The stages call the sibling skills ops-intake, growth-review, idea-validation, spec-first-planning, factory-conductor and release-conductor when they are installed.
 metadata:
   author: dhanesh
   version: "0.1.0"
-  tags: "software-factory,scheduler,pipeline,autonomy-grant,partly-built"
+  tags: "software-factory,scheduler,pipeline,autonomy-grant,digest"
 ---
 
 # factory-pipeline
@@ -32,7 +32,7 @@ mechanical part of each stage. It stops at the human gates: merge, production de
 rollback, spend, external messages, the release grant and idea decisions stay with the
 owner.
 
-**Status: partly built.** `pipeline tick` ships. First it takes the repo's pipeline lock
+**Status: built.** `pipeline tick` ships with all nine stages. First it takes the repo's pipeline lock
 (R14, shipped), so only one tick runs at a time: a tick that finds the lock held prints
 `STOP: locked: ...`, changes nothing and exits 3. Before any stage, it checks the standing
 pipeline grant (R13, shipped): with no live grant it runs no stage, prints
@@ -48,8 +48,9 @@ release stage (R19, shipped) runs release-conductor's `release stage` once per r
 only after the owner merged the release pull request and while the owner's release grant
 covers it; see "The release stage" below. The idea follow-up stage (R20, shipped) lists
 the ideas with an assumption due within 3 days or expired, and hands each `go` idea with no
-plan yet to the plan stage; see "The idea follow-up stage" below. The digest stage reports
-`pending-R21`. `pipeline schedule install` (R16, shipped) puts
+plan yet to the plan stage; see "The idea follow-up stage" below. The digest stage (R21,
+shipped) writes `.skill-contract/pipeline/digest.md`, which lists each human gate that
+waits, with the command the owner runs next; see "The digest" below. `pipeline schedule install` (R16, shipped) puts
 the tick on a timer; see "The schedule" below. The
 design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R12 to R21) in the
 agent-skills repository.
@@ -331,6 +332,49 @@ release-conductor with the owner. release-conductor's files are in the tamper ba
 planner that changes `release.py` poisons the tick before any release code runs
 (`STAGE: release-stage skipped planner-tamper=tools`).
 
+## The digest
+
+The digest stage (R21) writes `.skill-contract/pipeline/digest.md` on every tick that
+reaches it, also after a cap stop or a planner tamper. It proves the directory is
+git-ignored first (the same check as the lock), writes a temp file there and renames it
+over the digest. It prints `DIGEST: .skill-contract/pipeline/digest.md waiting=<n>` and
+`STAGE: digest ok waiting=<n>`. With nothing waiting, the file says "Nothing waits for
+the owner." Its sections, each entry with the command the owner runs next:
+
+- **Pull requests to merge**: a factory-conductor run that opened a pull request (its
+  `state.json` `finished.pr`) whose head is not on the local base branch, and a prepared
+  release whose release PR is not merged. The run result carries no PR number: the
+  digest shows `gh pr merge <url>` when the PR command printed a URL, else
+  `gh pr list --head <run branch> --state open`. A run whose branch is gone from the local
+  repo is not listed.
+- **Release grants to accept**: a prepared release whose release grant does not cover it
+  (`release abandon`, then a new `release prep`).
+- **Production deploys**: a release that is `staged` or `awaiting_deploy`
+  (`release deploy`, then the owner's `--approved-by`).
+- **Rollbacks**: a release that is `prod_failed` or `outcome_unknown`, and each open
+  incident-watch record. The commands are incident-watch's own (`release rollback`, then
+  `release rollback --approved-by "<their name>"`) and the recipe's rollback argv, word
+  for word, from release-conductor's `load_recipe`; a record whose strings differ is
+  flagged, never copied.
+- **Plans waiting for a read**, **Idea decisions** (an idea whose computed verdict is
+  `GO`, `KILL` or `STALLED` with no decision: `ideas decide <slug> ...`), **Idea
+  assumptions due**, **Planner tamper** (`tamper-clear --by <name>`), **Cap stops** and
+  **Other waits**.
+
+The digest reads state files and the idea stage's `ideas list` output. It runs no
+spec-first-planning or factory-conductor tool, and of release-conductor only its read-only
+recipe reader. It calls no forge and no network, and asks the local git only whether a
+run's head is merged (neither after a planner tamper). Every value from a state file or a
+tool is shown as an inline code span with backticks, control and bidi characters escaped
+as `\uXXXX`, so it cannot forge a line, a heading or an entry. A value goes into a
+command only when it passes a strict check (an id, a slug, a version, a branch, a PR URL,
+a repo-relative path that does not start with `-`); otherwise the entry has no command
+and says the value does not match the expected form.
+
+You MUST NOT run a command that the digest lists for the owner (a merge, a release grant,
+a production deploy, a rollback, an idea decision or `tamper-clear`), because each one is
+a human gate and the digest only shows it (spec constraint B1).
+
 ## The schedule
 
 `python3 "$SKILL_DIR/assets/pipeline.py" --root <repo> schedule install --every <minutes>`
@@ -389,7 +433,9 @@ removed (decision D9 of the factory spec: a run installs no timer).
    example no intake config or no registered growth plan), `failed`, `timeout`,
    `unavailable` (the skill is not installed), `skipped` (a cap stopped the tick before
    that stage), `waiting` (the release stage waits for the owner's merge or release
-   grant) or `pending-R<n>` (not built yet).
+   grant) or `pending-R<n>` (not built yet). Then read
+   `.skill-contract/pipeline/digest.md` and give the owner each waiting gate with its
+   command.
 3. **Follow the tool lines.** A `NEXT:` or `STOP:` line in a stage's output belongs to that
    stage's skill. Read it in that skill's terms, and give the owner the steps that are theirs.
 4. **Verify the report.** Check it against the success criteria below, then re-check.
@@ -410,8 +456,9 @@ gate that the owner keeps (spec constraint B1).
 ## Deliverable
 
 A tick report: the nine `STAGE:` lines as a table (stage, result, detail), a sentence for
-each result that is not `ok` or `idle`, and the owner's next step for each `STOP:` or
-`NEXT:` line a stage printed, including a `STOP: cap` line.
+each result that is not `ok` or `idle`, the owner's next step for each `STOP:` or
+`NEXT:` line a stage printed, including a `STOP: cap` line, and each digest entry with its
+command.
 
 ## Success criteria
 

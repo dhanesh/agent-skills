@@ -2,11 +2,11 @@
 
 - id: pipeline-tick
 - proven: no
-- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-pipeline/assets/pipeline.py:stage_plan, factory-pipeline/assets/pipeline.py:plan_one, factory-pipeline/assets/pipeline.py:run_planner, factory-pipeline/assets/pipeline.py:snapshot, factory-pipeline/assets/pipeline.py:git, factory-pipeline/assets/pipeline.py:program_roots, factory-pipeline/assets/pipeline.py:program_digest, factory-pipeline/assets/pipeline.py:make_pathdir, factory-pipeline/assets/pipeline.py:seal, factory-pipeline/assets/pipeline.py:programs_trusted, factory-pipeline/assets/pipeline.py:py, factory-pipeline/assets/pipeline.py:tools_walk, factory-pipeline/assets/pipeline.py:_resolve, factory-pipeline/assets/pipeline.py:_walk_real, factory-pipeline/assets/pipeline.py:write_marker, factory-pipeline/assets/pipeline.py:read_marker, factory-pipeline/assets/pipeline.py:cmd_tamper_clear, factory-pipeline/assets/pipeline.py:stage_build, factory-pipeline/assets/pipeline.py:unbuilt_grants, factory-pipeline/assets/pipeline.py:run_states, factory-pipeline/assets/pipeline.py:evidence_gate, factory-pipeline/assets/pipeline.py:grant_covers, factory-pipeline/assets/pipeline.py:trusted_tools, factory-pipeline/assets/pipeline.py:stage_release_stage, factory-pipeline/assets/pipeline.py:release_probe, factory-pipeline/assets/pipeline.py:release_wait, factory-pipeline/assets/pipeline.py:release_dirs, factory-pipeline/assets/pipeline.py:stage_idea_follow_up, factory-pipeline/assets/pipeline.py:ideas_due, factory-pipeline/assets/pipeline.py:idea_due, factory-pipeline/assets/pipeline.py:ideas_go, factory-pipeline/assets/pipeline.py:idea_envelope, factory-pipeline/assets/pipeline.py:planned, factory-pipeline/assets/pipeline.py:record_idea_plan, idea-validation/assets/ideas.py:cmd_list, idea-validation/assets/ideas.py:cmd_status, release-conductor/assets/release.py:_stage_commit, release-conductor/assets/release.py:_grant_pins, release-conductor/assets/release.py:find_release_commit, spec-first-planning/assets/write_grant.py:build_pipeline_grant, factory-conductor/assets/reentry_timer.py:cron_schedule
+- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-pipeline/assets/pipeline.py:stage_plan, factory-pipeline/assets/pipeline.py:plan_one, factory-pipeline/assets/pipeline.py:run_planner, factory-pipeline/assets/pipeline.py:snapshot, factory-pipeline/assets/pipeline.py:git, factory-pipeline/assets/pipeline.py:program_roots, factory-pipeline/assets/pipeline.py:program_digest, factory-pipeline/assets/pipeline.py:make_pathdir, factory-pipeline/assets/pipeline.py:seal, factory-pipeline/assets/pipeline.py:programs_trusted, factory-pipeline/assets/pipeline.py:py, factory-pipeline/assets/pipeline.py:tools_walk, factory-pipeline/assets/pipeline.py:_resolve, factory-pipeline/assets/pipeline.py:_walk_real, factory-pipeline/assets/pipeline.py:write_marker, factory-pipeline/assets/pipeline.py:read_marker, factory-pipeline/assets/pipeline.py:cmd_tamper_clear, factory-pipeline/assets/pipeline.py:stage_build, factory-pipeline/assets/pipeline.py:unbuilt_grants, factory-pipeline/assets/pipeline.py:run_states, factory-pipeline/assets/pipeline.py:evidence_gate, factory-pipeline/assets/pipeline.py:grant_covers, factory-pipeline/assets/pipeline.py:trusted_tools, factory-pipeline/assets/pipeline.py:stage_release_stage, factory-pipeline/assets/pipeline.py:release_probe, factory-pipeline/assets/pipeline.py:release_wait, factory-pipeline/assets/pipeline.py:release_dirs, factory-pipeline/assets/pipeline.py:stage_idea_follow_up, factory-pipeline/assets/pipeline.py:ideas_due, factory-pipeline/assets/pipeline.py:idea_due, factory-pipeline/assets/pipeline.py:ideas_go, factory-pipeline/assets/pipeline.py:idea_envelope, factory-pipeline/assets/pipeline.py:planned, factory-pipeline/assets/pipeline.py:record_idea_plan, factory-pipeline/assets/pipeline.py:stage_digest, factory-pipeline/assets/pipeline.py:digest_entries, factory-pipeline/assets/pipeline.py:digest_runs, factory-pipeline/assets/pipeline.py:pr_merged, factory-pipeline/assets/pipeline.py:digest_releases, factory-pipeline/assets/pipeline.py:digest_incidents, factory-pipeline/assets/pipeline.py:digest_recipe, factory-pipeline/assets/pipeline.py:safe_rel, factory-pipeline/assets/pipeline.py:digest_ideas, factory-pipeline/assets/pipeline.py:plan_read, factory-pipeline/assets/pipeline.py:span, factory-pipeline/assets/pipeline.py:command, factory-pipeline/assets/pipeline.py:render_digest, idea-validation/assets/ideas.py:cmd_list, idea-validation/assets/ideas.py:cmd_status, release-conductor/assets/release.py:_stage_commit, release-conductor/assets/release.py:_grant_pins, release-conductor/assets/release.py:find_release_commit, spec-first-planning/assets/write_grant.py:build_pipeline_grant, factory-conductor/assets/reentry_timer.py:cron_schedule
 
 ## What it is
 
-**Status: partly built.** `pipeline tick` ships (R12). First it takes the repo's pipeline
+**Status: built.** `pipeline tick` ships (R12) with all nine stages. First it takes the repo's pipeline
 lock, a non-blocking flock on `.skill-contract/pipeline/.lock` in a git-ignored directory
 (R14). A tick that finds the lock held prints `STOP: locked: ...`, changes nothing and
 exits 3. Before any stage, it checks the
@@ -48,7 +48,9 @@ read-only `ideas list` and `ideas status <slug>` (never a writing command, never
 `--today`). It lists each undecided idea with an assumption due within 3 days or expired
 (`IDEA: due ...`, with `ideas status <slug>` as the owner's next command), and hands each
 `go` idea-brief envelope that `check-envelope` accepts and that has no plan yet to the
-plan stage of the same tick, once. The digest stage prints `pending-R21`.
+plan stage of the same tick, once. The digest stage (R21) writes
+`.skill-contract/pipeline/digest.md`, which lists each waiting human gate with the
+command the owner runs next, and runs none of those commands.
 `pipeline schedule install --every <minutes>` (R16) installs one timer that runs the tick,
 with factory-conductor's own `reentry_timer.py`, at 15 to 1440 minutes; another interval
 exits 2 and installs nothing. The design is
@@ -184,11 +186,20 @@ Shipped:
   only `ideas list` and `ideas status`, as `python -I -S -B`, and never `--today`.
   `STAGE: idea-follow-up ok due=<n> go=<n>`, or `idle`, or `unavailable idea-validation`.
 
-Planned (not yet shipped):
-
-- The digest: `.skill-contract/pipeline/digest.md` lists each waiting human gate (a pull
-  request to merge, a release grant to accept, a production deploy, a rollback, a plan
-  waiting for a read, an idea decision) with the exact command the owner runs next (R21).
+- The digest (R21): every tick that reaches the digest stage writes
+  `.skill-contract/pipeline/digest.md` in the git-ignored state directory, through a temp
+  file and a rename, and prints `DIGEST: .skill-contract/pipeline/digest.md waiting=<n>`
+  and `STAGE: digest ok waiting=<n>`. It lists each human gate that waits (a pull request
+  to merge, a release grant to accept, a production deploy, a rollback, a plan waiting for
+  a read, an idea decision, the planner-tamper marker and a cap stop) with the exact
+  command the owner runs next. With nothing waiting it says "Nothing waits for the
+  owner." The run result carries no PR number, so a run's pull request shows
+  `gh pr merge <url>` when the PR command printed a URL, else `gh pr list --head <run
+  branch> --state open`. The digest reads state files only (factory-conductor runs,
+  release-conductor releases, incident-watch records, the tamper marker, the idea stage's
+  `ideas list` output), runs none of the commands it lists, and calls no gh and no
+  network. Every value from a state file is an escaped inline code span, so a newline, a
+  backtick, a `# heading`, U+202E or a fake `- [ ]` entry cannot change its structure.
 
 ## Drive it
 
@@ -220,7 +231,7 @@ python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-revok
   idea-validation due=0 go=0` (the stubs hold no idea-validation), `autopick ok picked=1`,
   `plan unavailable no-planner picked=1` (the testkit grant names no planner),
   `derive-grant idle plans=0`, `build idle grants=0`,
-  `release-stage idle` (no release-conductor and no release), `digest pending-R21
+  `release-stage idle` (no release-conductor and no release), `digest ok
   waiting=1` (the pick waits). The last
   line is `TICK: done stages=9`.
 - `pt-calls.jsonl`: seven lines, in order: ops-intake `sweep`, growth-review `auto`,
@@ -284,7 +295,7 @@ cp "$CR/repo/.skill-contract/pipeline/cap-stops.jsonl" "$WT/.verify-run/$INSTANC
   the stage tries the derived grant, and the stubs hold no `conductor.py`).
   `sweep` and `growth-review` say `ok`, `idea-follow-up` says `unavailable
   idea-validation due=0 go=0`, `release-stage` says `idle`, and `digest` says
-  `pending-R21`.
+  `ok waiting=2` (the cap stop and the derived grant that waits for build).
   The last line is `TICK: done stages=9 cap=max_open_runs`.
 - `pt-cap-calls.jsonl` holds no ops-intake `autopick` line and no `under-pipeline` line.
 - `pt-cap-stops.jsonl`: one JSON line with `"cap": "max_open_runs"`, `"count": 1`,
@@ -343,14 +354,14 @@ ls "$PL/cap/repo/.skill-contract/envelopes" > "$WT/.verify-run/$INSTANCE/pt-plan
   then `PLAN: waiting .skill-contract/intake/specs/I0000000001.md
   reason=allowlist-unlisted`, `STAGE: plan attention ready=0 waiting=1`,
   `STAGE: derive-grant idle plans=0`, `STAGE: build idle grants=0` and
-  `STAGE: digest pending-R21 waiting=1`. The stub planner's own `PLAN: ready forged.json`
+  `STAGE: digest ok waiting=1`. The stub planner's own `PLAN: ready forged.json`
   and `STAGE: plan ok` lines appear only with the `  plan| ` prefix.
 - `pt-plan-good`: exit 0. `PLAN: ready .skill-contract/envelopes/task-plan-v1-<...>.json
   spec=.skill-contract/intake/specs/I0000000001.md`, `STAGE: plan ok ready=1 waiting=0`,
   `STAGE: derive-grant ok derived=1 refused=0` (the real `write_grant.py
   --under-pipeline`), `BUILD: waiting <grant> no-factory-conductor` and
   `STAGE: build unavailable factory-conductor grants=1` (the planfix stubs hold no
-  `conductor.py`), `STAGE: release-stage idle` and `STAGE: digest pending-R21 waiting=1`
+  `conductor.py`), `STAGE: release-stage idle` and `STAGE: digest ok waiting=1`
   (the build's waiting grant).
 - `pt-plan-ignored.txt` names `.skill-contract/intake/.gitignore` as the rule that
   ignores the spec.
@@ -543,7 +554,51 @@ The refused envelope and the kill envelope are proven by
 reason=check-envelope-failed`, `STAGE: idea-follow-up attention due=2 go=0 waiting=1`, and
 no planner call).
 
-The R21 recipe joins this section when it ships.
+The digest (R21). Build the digest fixture: the release fixture with its release pull
+request open and its release grant revoked, a finished run whose pull request is open on
+`factory/demo`, and the stub autopick's pick, which waits for a read. Put a `gh` and a
+`curl` that only log on the PATH, run one tick, and keep the digest:
+
+```sh
+DG="$WT/.verify-run/$INSTANCE/dg"
+python3 factory-pipeline/assets/pipeline_testkit.py digestfix "$DG" > "$WT/.verify-run/$INSTANCE/pt-digest-fixture.txt"
+mkdir -p "$DG/bin"
+for t in gh curl; do printf '#!/bin/sh\necho "$0 $*" >> %s/spy.log\n' "$DG" > "$DG/bin/$t"; chmod +x "$DG/bin/$t"; done
+PATH="$DG/bin:$PATH" python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-digest -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$DG/repo" --skills-dir "$DG/skills" tick
+cp "$DG/repo/.skill-contract/pipeline/digest.md" "$WT/.verify-run/$INSTANCE/pt-digest.md"
+git -C "$DG/repo" check-ignore -v .skill-contract/pipeline/digest.md > "$WT/.verify-run/$INSTANCE/pt-digest-ignored.txt"
+ls "$DG" > "$WT/.verify-run/$INSTANCE/pt-digest-files.txt"
+```
+
+- `pt-digest-fixture.txt` holds `REPO:`, `SKILLS:`, `GRANT: <release grant id>` and
+  `RUN: run-20261104T000000Z-000001`.
+- `pt-digest`: exit 0. `RELEASE: waiting 1.2.0 release-merge not-merged`, `RELEASE:
+  waiting 1.2.0 release-grant grant-<reason>`, `PLAN: waiting
+  .skill-contract/intake/envelopes/item-3.json reason=no-planner`, then
+  `DIGEST: .skill-contract/pipeline/digest.md waiting=4` and `STAGE: digest ok waiting=4`.
+- `pt-digest.md`: `Waiting: 4` and three sections. `## Pull requests to merge (2)`:
+  the run `run-20261104T000000Z-000001` with `review it, then merge: \`gh pr merge
+  https://github.com/acme/app/pull/7\``, and the release `1.2.0` with `find it: \`gh pr
+  list --head release/1.2.0 --state open\``. `## Release grants to accept (1)`: the
+  release `1.2.0` with `end it: \`<python> <release.py> abandon --root <repo>
+  --approved-by "<your name>" --reason "<why>"\`` and `then: \`... prep ...\``.
+  `## Plans waiting for a read (1)`: the pick with `plan it with spec-first-planning:
+  \`<python> <intake_request.py> .skill-contract/intake/envelopes/item-3.json\``. Every
+  `- ` entry has at least one `  - <label>: \`<command>\`` line under it.
+- `pt-digest-ignored.txt` names `.skill-contract/pipeline/.gitignore`.
+- `pt-digest-files.txt` holds no `spy.log`: no `gh` and no `curl` ran.
+
+The production deploy, the rollback (a `prod_failed` release and an open incident-watch
+record: incident-watch's own `release rollback` commands and the recipe's rollback argv
+from release-conductor's `load_recipe`, never the record's strings; a hostile record is
+flagged as "does not match the expected form"), the idea decision (an idea with a
+final computed verdict and no decision, `ideas decide <slug> ...`), the empty digest, the
+tamper and cap-stop ticks, the atomic write, and the injection cases (a newline, backticks,
+`# heading`, U+202E and a fake `- [ ]` entry in titles, slugs, paths and records leave the
+digest's structure unchanged, and a plan subject such as `-rf` or `--help` gets no
+command; a table-driven test feeds hostile values into every variable part of every
+command template) are proven by `factory-pipeline/assets/test_pipeline_digest.py`.
 
 ## Proof
 
@@ -552,7 +607,7 @@ The `pt-no-grant`, `pt-tick`, `pt-missing`, `pt-revoked`, `pt-locked`, `pt-unloc
 `pt-link-retarget`, `pt-tamper-persisted`, `pt-tamper-clear-noby`, `pt-tamper-clear`,
 `pt-build-gated`, `pt-build-second`, `pt-build-again`, `pt-build-plain`,
 `pt-release-open`, `pt-release-merged`, `pt-release-again`, `pt-idea-first`,
-`pt-idea-second`, `pt-sched-15`, `pt-sched-1440`, `pt-sched-10`, `pt-sched-1500` and
+`pt-idea-second`, `pt-digest`, `pt-sched-15`, `pt-sched-1440`, `pt-sched-10`, `pt-sched-1500` and
 `pt-sched-uninstall` captures (their `STOP:`, `STAGE:` and `SCHEDULE:` lines and exit
 codes), `pt-calls.jsonl`, `pt-locked-calls.jsonl`, `pt-cap-calls.jsonl`,
 `pt-cap-stops.jsonl`, `pt-plan-ignored.txt`, `pt-plan-cap-envelopes.txt`,
@@ -560,8 +615,9 @@ codes), `pt-calls.jsonl`, `pt-locked-calls.jsonl`, `pt-cap-calls.jsonl`,
 `pt-link-marker.json`, `pt-tamper-log.jsonl`, `pt-build-gated-calls.jsonl`,
 `pt-build-plain-calls.jsonl`, `pt-release-calls.jsonl`, `pt-release-state.json`,
 `pt-release-fixture.txt`, `pt-release-merged.txt`, `pt-idea-fixture.txt`,
-`pt-idea-calls.jsonl`, `pt-idea-planner-calls.jsonl`, `pt-idea-plans.jsonl`, the two build fixture files and the two
-queue hashes. After the planned parts ship: the content of `.skill-contract/pipeline/digest.md`.
+`pt-idea-calls.jsonl`, `pt-idea-planner-calls.jsonl`, `pt-idea-plans.jsonl`,
+`pt-digest-fixture.txt`, `pt-digest.md`, `pt-digest-ignored.txt`, `pt-digest-files.txt`,
+the two build fixture files and the two queue hashes.
 
 ## Gotchas
 
@@ -574,7 +630,11 @@ queue hashes. After the planned parts ship: the content of `.skill-contract/pipe
   `cap-stops.jsonl`, not the exit code. `STOP: cap uncounted` means that a count source
   could not be read (a junk envelope, a torn line in a run's `autonomy-log.jsonl`). The
   tick stops until the owner fixes that file.
-- `pending-R<n>` is the honest result of a stage that is not built. It is not `ok`.
+- `pending-R<n>` is the honest result of a stage that is not built. It is not `ok`. No
+  stage says it today.
+- The digest shows commands; it runs none. A merged run's pull request leaves the digest
+  only when its head is on the local base branch or its local run branch is gone: after a
+  squash merge, delete the local run branch. The release PR leaves it after `git pull`.
 - The build stage starts at most one conductor run per tick, and none while a run in the
   root is unfinished. A grant that says `BUILD: waiting ... unfinished-run=<id>` is not
   stuck: a later tick builds it once that run is finished.
