@@ -643,6 +643,189 @@ class TestPathPinning(PlanFixture):
         self.assertTrue(os.path.exists(self.marker))
 
 
+class TestSymlinkTamper(PlanFixture):
+    """R2: the `skills` CLI installs a skill directory as a symlink (~/.claude/skills/x ->
+    ~/.agents/skills/x). Here spec-first-planning is a symlink to a store directory, so the
+    baseline must hash the files at their real paths and record every link on the way. A
+    planner that edits write_grant.py through the link, or retargets the link, poisons the
+    tick: no derived grant, and the derive-grant marker the tampered tool writes never
+    appears."""
+
+    def setUp(self):
+        super().setUp()
+        self.store = os.path.join(self.tmp, "store", "spec-first-planning")
+        self.link = os.path.join(self.skills, "spec-first-planning")
+        os.makedirs(os.path.dirname(self.store))
+        shutil.move(self.link, self.store)
+        os.symlink(self.store, self.link)
+        # The key of a link names it with every link before it resolved (macOS /var).
+        self.link_key = "tools:link:" + os.path.join(os.path.realpath(self.skills),
+                                                     "spec-first-planning")
+        self.marker = os.path.join(self.tmp, "PWNED_LINK")
+        self.evil = "open(%r, 'a').write('ran\\n')\n" % self.marker
+
+    def extra(self, code):
+        with open(os.path.join(self.agent, "extra.py"), "w", encoding="utf-8") as f:
+            f.write(code)
+
+    def assertLinkTampered(self, code, text, res, seen):
+        self.assertTampered(code, text, res, seen, "I0000000001", "tools")
+        self.assertFalse(os.path.exists(self.marker), "the tampered write_grant.py ran")
+        self.assertEqual([c for c in K.calls(self.skills) if c["key"] == "under-pipeline"],
+                         [])
+
+    def test_write_grant_changed_through_the_link_poisons_the_tick(self):
+        wg = os.path.join(self.link, "assets", "write_grant.py")
+        self.extra("src = open(%r).read()\nopen(%r, 'w').write(%r + src)\n"
+                   % (wg, wg, self.evil))
+        self.pick("I0000000001")
+        code, text, res, seen = self.tick()
+        self.assertLinkTampered(code, text, res, seen)
+        self.assertIn("  plan| changed: tools:%s" % os.path.join(
+            os.path.realpath(self.store), "assets", "write_grant.py"), text)
+
+    def test_retargeted_link_poisons_the_tick(self):
+        copy = os.path.join(self.tmp, "evil-store", "spec-first-planning")
+        shutil.copytree(self.store, copy, symlinks=True)
+        wg = os.path.join(copy, "assets", "write_grant.py")
+        with open(wg, encoding="utf-8") as f:
+            src = f.read()
+        with open(wg, "w", encoding="utf-8") as f:
+            f.write(self.evil + src)
+        self.extra("os.remove(%r)\nos.symlink(%r, %r)\n" % (self.link, copy, self.link))
+        self.pick("I0000000001")
+        code, text, res, seen = self.tick()
+        self.assertLinkTampered(code, text, res, seen)
+        self.assertIn("  plan| changed: %s" % self.link_key, text)
+        with open(P.marker_path(self.repo), encoding="utf-8") as f:
+            self.assertIn(self.link_key, json.load(f)["changed"])
+
+    def test_symlinked_file_inside_the_skill_is_followed(self):
+        """A tool file that is itself a link: an edit of its target poisons the tick."""
+        wg = os.path.join(self.store, "assets", "write_grant.py")
+        outside = os.path.join(self.tmp, "outside", "write_grant.py")
+        os.makedirs(os.path.dirname(outside))
+        shutil.move(wg, outside)
+        os.symlink(outside, wg)
+        self.extra("src = open(%r).read()\nopen(%r, 'w').write(%r + src)\n"
+                   % (outside, outside, self.evil))
+        self.pick("I0000000001")
+        code, text, res, seen = self.tick()
+        self.assertLinkTampered(code, text, res, seen)
+
+    def test_new_link_inside_the_skill_poisons_the_tick(self):
+        self.extra("os.symlink(%r, os.path.join(%r, 'assets', 'helper.py'))\n"
+                   % (os.path.join(self.tmp, "nowhere.py"), self.store))
+        self.pick("I0000000001")
+        code, text, res, seen = self.tick()
+        self.assertLinkTampered(code, text, res, seen)
+
+    def test_baseline_records_every_link_at_its_real_path(self):
+        # Not vacuous: an untouched symlinked skill runs the whole tick and derives.
+        self.pick("I0000000001")
+        code, text, res, seen = self.tick()
+        self.assertEqual(code, 0, text)
+        self.assertEqual(res["derive-grant"], ["ok", "derived=1", "refused=0"], text)
+        tick = P.Tick(self.repo, [self.skills])
+        out = {}
+        self.assertTrue(P.tools_walk(out, [0, 0], tick))
+        self.assertEqual(out[self.link_key], self.store)
+        self.assertEqual(out["tools:skill:spec-first-planning"], os.path.realpath(self.store))
+        self.assertIn("tools:%s" % os.path.join(os.path.realpath(self.store), "assets",
+                                                "write_grant.py"), out)
+
+
+class TestTamperPersists(PlanFixture):
+    """R2 / S5: a poison outlives its tick. The tick writes a marker in the git-ignored
+    state directory; every later tick prints `STOP: planner-tamper persisted <reason>`
+    right after the grant check and runs no stage, until the owner runs
+    `pipeline tamper-clear --by <name>`."""
+
+    def clear(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = P.main(["--root", self.repo, "tamper-clear"] + list(args))
+        return code, out.getvalue()
+
+    def poisoned(self):
+        self.pick("I0000000001")
+        self.mode("touch")
+        code, text, res, seen = self.tick()
+        self.assertEqual(code, 4, text)
+        self.mode("good")
+
+    def test_next_tick_after_a_poison_runs_no_stage(self):
+        self.poisoned()
+        with open(P.marker_path(self.repo), encoding="utf-8") as f:
+            rec = json.load(f)
+        self.assertEqual(rec["reason"], "the-repo")
+        self.assertIn("repo/Makefile", rec["changed"])
+        before = len(K.calls(self.skills)), len(self.planner_calls())
+        self.pick("I0000000002")
+        n_calls = len(K.calls(self.skills))
+        code, text, res, seen = self.tick()
+        self.assertEqual(code, 4, text)
+        self.assertIn("\nSTOP: planner-tamper persisted the-repo", text)
+        self.assertEqual(res, {}, text)
+        self.assertNotIn("TICK: done", text)
+        self.assertEqual(len(K.calls(self.skills)), n_calls)
+        self.assertEqual(len(self.planner_calls()), before[1])
+
+    def test_tamper_clear_by_the_owner_lets_the_next_tick_run(self):
+        self.poisoned()
+        code, out = self.clear("--by", "Owner")
+        self.assertEqual(code, 0, out)
+        self.assertIn("TAMPER: cleared the-repo by Owner", out)
+        self.assertFalse(os.path.lexists(P.marker_path(self.repo)))
+        with open(os.path.join(P._pipeline_dir(self.repo), P.TAMPER_LOG),
+                  encoding="utf-8") as f:
+            log = [json.loads(ln) for ln in f]
+        self.assertEqual([r["event"] for r in log], ["poison", "clear"])
+        self.assertEqual(log[1]["by"], "Owner")
+        code, text, res, seen = self.tick()
+        self.assertNotIn("persisted", text)
+        self.assertEqual(len(res), 9, text)
+        self.assertIn("TICK: done stages=9", text)
+
+    def test_tamper_clear_without_by_exits_2_and_keeps_the_marker(self):
+        self.poisoned()
+        for args in ((), ("--by", ""), ("--by", "  ")):
+            code, out = self.clear(*args)
+            self.assertEqual(code, 2, (args, out))
+            self.assertTrue(os.path.isfile(P.marker_path(self.repo)))
+        code, text, res, _ = self.tick()
+        self.assertEqual(code, 4, text)
+        self.assertIn("STOP: planner-tamper persisted the-repo", text)
+
+    def test_planner_that_writes_the_marker_poisons_the_tick(self):
+        """The marker is in the snapshot: a planner that plants (or edits, or removes) it
+        during the tick poisons that tick."""
+        mk = P.marker_path(self.repo)
+        with open(os.path.join(self.agent, "extra.py"), "w", encoding="utf-8") as f:
+            f.write("open(%r, 'w').write('{\"reason\": \"x\"}')\n" % mk)
+        self.pick("I0000000001")
+        code, text, res, seen = self.tick()
+        self.assertEqual(code, 4, text)
+        self.assertIn("\nSTOP: planner-tamper state:", text)
+        self.assertIn("PLAN: waiting %s reason=planner-changed-state"
+                      % self.spec("I0000000001"), text)
+        self.assertEqual(seen["grants"], [])
+        with open(mk, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["reason"], "state")
+
+    def test_removed_marker_is_a_change_in_the_snapshot(self):
+        tick = P.Tick(self.repo, [self.skills])
+        P.ensure_dir(self.repo)
+        with open(P.marker_path(self.repo), "w", encoding="utf-8") as f:
+            f.write('{"reason": "tools"}')
+        tools = {"lint": P.find_tool(tick.roots, P.PLANNING, P.PLAN_TOOLS["lint"])}
+        before = P.snapshot(tick, "spec.md", tools)
+        os.remove(P.marker_path(self.repo))
+        after = P.snapshot(tick, "spec.md", tools)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(P.changed_reason(before, after), "planner-changed-state")
+
+
 class TestCapInTick(PlanFixture):
     """The R15 path that T15 could not drive through the real CLIs: max_plans_per_day 1,
     two picks, the real plan stage hands on two plans, derive-grant derives one, then
