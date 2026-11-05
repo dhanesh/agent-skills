@@ -501,10 +501,10 @@ line under it.
 |---|---|---|---|
 | Pull requests to merge | A factory-conductor run that opened a pull request that is not merged. | The run's `state.json` `finished` (`pr`, `integration.head`), `run_branch` and `base_branch`. | `gh pr merge <url>` when the PR command printed a URL; else `gh pr list --head <run branch> --state open`, then `gh pr merge <number>`. |
 | Pull requests to merge | A prepared release whose release pull request is not merged. | The release stage's `release-merge` wait, or the release's `state.json` when the release stage did not check it in this tick. | The same `gh` commands for `release/<version>`, then `git -C <repo> pull`. |
-| Release grants to accept | A prepared release whose release grant does not cover it. | The release stage's `release-grant` wait. | `release abandon --root <repo> --approved-by <name> --reason <why>`, then `release prep --root <repo> --approved-by <name> --driver <agent id>`. |
+| Release grants to accept | A prepared release whose release grant does not cover it. | The release stage's `release-grant` wait. | `release abandon --root <repo> --approved-by <name> --reason <why>`, then `release prep --root <repo> --approved-by <name> --driver <agent-id>`. |
 | Production deploys | A release that is `staged` or `awaiting_deploy`. | The release's `state.json`. | `release deploy --root <repo>` (it shows the summary and waits), then the same with `--approved-by <name>`. |
 | Rollbacks | A release that is `prod_failed` or `outcome_unknown`. | The release's `state.json`. | `release verify-prod --root <repo>` first for `outcome_unknown`, then `release rollback --root <repo>`, then the same with `--approved-by <name>`. |
-| Rollbacks | An open incident record. | incident-watch's `records/<id>.json`. | The record's `rollback.ask_owner` commands, word for word, or the recipe's rollback when release-conductor cannot act; then `incident close --by <name> --id <id>`. |
+| Rollbacks | An open incident record. | incident-watch's `records/<id>.json`. | incident-watch's own commands (`release rollback`, then `release rollback --approved-by "<their name>"`), never the record's strings: a record whose strings differ is flagged. The recipe's rollback argv comes word for word from release-conductor's `load_recipe`, and a record whose copy differs is flagged. When no release is `prod_failed` or `outcome_unknown`, the owner rolls back by hand with that argv. Then `incident close --by <name> --id <id>`. |
 | Plans waiting for a read | A plan that the plan or derive-grant stage left for the owner. | `tick.waiting`. | `spec_to_tasks.py <spec> --envelope <repo>` for a spec, `write_grant.py --under-pipeline <grant> --root <repo> --plan <plan>` for a plan, `intake_request.py` or `idea_request.py` for a picked envelope, and `tamper-clear` after a tamper. |
 | Idea decisions | An idea whose computed verdict is `GO`, `KILL` or `STALLED`, with no decision and not closed. | The idea stage's `ideas list` output. | `ideas decide <slug> --verdict go\|kill\|pivot --by <name> --reason <words>`. |
 | Idea assumptions due | An idea with an assumption due within 3 days or expired. | `tick.waiting`. | `ideas status <slug>`. |
@@ -519,9 +519,15 @@ After a squash merge, the run stays listed until the owner deletes the local run
 What the digest does not do:
 
 - It runs none of the commands it lists. Each one is a human gate (B1).
-- It runs no spec-first-planning, factory-conductor or release-conductor tool, calls no
-  forge and opens no network connection. It runs git only to check a merge, and not after
-  a planner tamper.
+- It runs no spec-first-planning or factory-conductor tool. Of release-conductor it runs
+  only the read-only recipe reader (`load_recipe`), for the recipe's rollback. It calls no
+  forge and opens no network connection. It runs git only to check a merge. It runs
+  neither git nor the recipe reader after a planner tamper.
+- It puts no free text from a state file into a command. A value becomes a command
+  argument only when it passes a strict check: an id, a slug, a version, a branch name,
+  a PR URL, or a repo-relative path that does not start with `-` or `/` and has no `..`
+  part. A value that fails gets no command. Its entry shows it as a span and says that it
+  does not match the expected form.
 - It runs `ideas list` itself only when the idea stage left no output and no planner ran
   in the tick. That is the same read-only command, never with `--today`.
 

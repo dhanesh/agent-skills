@@ -352,18 +352,24 @@ the owner." Its sections, each entry with the command the owner runs next:
 - **Production deploys**: a release that is `staged` or `awaiting_deploy`
   (`release deploy`, then the owner's `--approved-by`).
 - **Rollbacks**: a release that is `prod_failed` or `outcome_unknown`, and each open
-  incident-watch record, with the rollback commands the record holds, word for word.
+  incident-watch record. The commands are incident-watch's own (`release rollback`, then
+  `release rollback --approved-by "<their name>"`) and the recipe's rollback argv, word
+  for word, from release-conductor's `load_recipe`; a record whose strings differ is
+  flagged, never copied.
 - **Plans waiting for a read**, **Idea decisions** (an idea whose computed verdict is
   `GO`, `KILL` or `STALLED` with no decision: `ideas decide <slug> ...`), **Idea
   assumptions due**, **Planner tamper** (`tamper-clear --by <name>`), **Cap stops** and
   **Other waits**.
 
-The digest reads state files and the idea stage's `ideas list` output only. It runs no
-spec-first-planning, factory-conductor or release-conductor tool, calls no forge and no
-network, and asks the local git only whether a run's head is merged (not after a planner
-tamper). Every value from a state file or a tool is shown as an inline code span with
-backticks, control and bidi characters escaped as `\uXXXX`, so it cannot forge a line,
-a heading or an entry.
+The digest reads state files and the idea stage's `ideas list` output. It runs no
+spec-first-planning or factory-conductor tool, and of release-conductor only its read-only
+recipe reader. It calls no forge and no network, and asks the local git only whether a
+run's head is merged (neither after a planner tamper). Every value from a state file or a
+tool is shown as an inline code span with backticks, control and bidi characters escaped
+as `\uXXXX`, so it cannot forge a line, a heading or an entry. A value goes into a
+command only when it passes a strict check (an id, a slug, a version, a branch, a PR URL,
+a repo-relative path that does not start with `-`); otherwise the entry has no command
+and says the value does not match the expected form.
 
 You MUST NOT run a command that the digest lists for the owner (a merge, a release grant,
 a production deploy, a rollback, an idea decision or `tamper-clear`), because each one is

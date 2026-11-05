@@ -2101,7 +2101,9 @@ def stage_release_stage(tick):
 # The digest stage writes DIGEST_FILE in the git-ignored pipeline state directory on every
 # tick that reaches it: one entry for each human gate that waits, each with the command
 # the owner runs next. It only SHOWS commands; it never runs one (B1). It runs no
-# spec-first-planning, factory-conductor or release-conductor tool. It reads:
+# spec-first-planning or factory-conductor tool, and of release-conductor only its
+# read-only recipe reader (RECIPE_PROBE, load_recipe(), not after a planner tamper). It
+# reads:
 #   - tick.waiting, what the earlier stages of this tick left (plan reads, cap waits,
 #     build waits, idea due dates, release merge and grant waits);
 #   - factory-conductor's run state (RUNS_DIR/<run>/state.json `finished`): a run that
@@ -2113,8 +2115,10 @@ def stage_release_stage(tick):
 #   - release-conductor's release state (RELEASES_DIR/<version>/state.json): a prepared
 #     release that waits for its merge or its grant, a staged release that waits for the
 #     production deploy, and a failed one that waits for a rollback;
-#   - incident-watch's open incident records (INCIDENTS_DIR/records/<id>.json), whose
-#     `rollback` field already holds the owner's rollback commands word for word;
+#   - incident-watch's open incident records (INCIDENTS_DIR/records/<id>.json). Their
+#     commands are never copied: the digest shows incident-watch's constants
+#     (OWNER_ROLLBACK_ASK, OWNER_ROLLBACK_YES) and the recipe's rollback argv from
+#     release-conductor's load_recipe(), and flags a record whose strings differ;
 #   - the `ideas list` output of the idea stage (read-only, never --today): an idea whose
 #     computed verdict is final (IDEA_FINAL) and that has no decision waits for
 #     `ideas decide`. Only when the idea stage did not list, and no planner ran in this
@@ -2128,7 +2132,11 @@ def stage_release_stage(tick):
 # an inline code span (span()), with backticks, backslashes, control, format, bidi and
 # line-separator characters escaped as \uXXXX, so it cannot end the span, start a line,
 # forge an entry or a heading, or reorder the text. Each line starts with fixed text, and
-# each command is a fixed template with its arguments shlex-quoted (command()).
+# each command is a fixed template with its arguments shlex-quoted (command()). A value
+# from a state file becomes a command argument only when it passes a strict check (an id,
+# a slug, a version, a branch, a PR URL, a repo-relative path with no leading `-`: see
+# safe_rel()) or equals a known constant. A value that fails gets no command: the entry
+# shows it as a span and says that it does not match the expected form.
 DIGEST_FILE = "digest.md"
 DIGEST_SHOWN = 50        # entries shown per section; the rest are counted
 DIGEST_VALUE_MAX = 300   # characters shown of one untrusted value
@@ -2153,12 +2161,32 @@ PR_URL = re.compile(r"^https://[A-Za-z0-9.-]{1,253}(?:/[A-Za-z0-9._~-]{1,100}){1
                     r"/pull/[0-9]{1,9}\Z")
 BRANCH = re.compile(r"^(?!-)[A-Za-z0-9._/-]{1,200}\Z")
 SHA = re.compile(r"^[0-9a-f]{7,64}\Z")
-VERSION_NAME = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}\Z")
+VERSION_NAME = re.compile(r"^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}(?:[-+][0-9A-Za-z.-]{1,40})?\Z")
 CAP_WAIT = re.compile(r"wait(?:s)? for (\S+) to fall below its cap")
 REASON_IN = re.compile(r"reason=(\S+)")
 DUE_IN = re.compile(r"^assumptions due or expired: (\S+);")
 BUILD_IN = re.compile(r"^build waits: (\S+)")
 YOUR_NAME = '"<your name>"'
+# A value from a state file goes into a command only when it passes one of these checks
+# (or equals a known constant); otherwise the entry shows it as a span, with no command.
+SAFE_REL = re.compile(r"^(?![-/])[A-Za-z0-9._/-]{1,300}\Z")  # a repo-relative path
+# incident-watch's constants (incident.py OWNER_ROLLBACK_ASK, OWNER_ROLLBACK_YES and
+# ROLLBACK_ACTS_ON; the digest tests compare them with that file). A record's own
+# ask_owner strings are only checked against them, never shown as a command.
+OWNER_ROLLBACK_ASK = "release rollback"
+OWNER_ROLLBACK_YES = 'release rollback --approved-by "<their name>"'
+ROLLBACK_ACTS_ON = ("prod_failed", "outcome_unknown")
+RECIPE_LINE = re.compile(r"^RECIPE: (\{.*\})\s*$")
+# release-conductor's own recipe reader, asked read-only (the recipe's rollback argv is
+# the owner's committed command, shown word for word, R25).
+RECIPE_PROBE = r'''import json, os, sys
+tool, root = sys.argv[1], sys.argv[2]
+sys.path[:] = [os.path.dirname(tool)] + [p for p in sys.path if os.path.isdir(p)]
+import release as R
+recipe, problems = R.load_recipe(root)
+rb = recipe.get("rollback") if isinstance(recipe, dict) else None
+print("RECIPE: " + json.dumps({"rollback": rb, "problems": [str(x) for x in problems]}))
+'''
 
 
 class Hole(str):
@@ -2244,16 +2272,17 @@ def _tool_cmd(tick, skill, rel, short):
     return [PYTHON, tool] if tool else [Hole(short)]
 
 
-def _git_ok(tick):
-    """True when the digest may ask the local git: no planner tamper, and the program
-    roots unchanged since the baseline when a planner ran."""
+def _trusted_now(tick):
+    """True when the digest may ask the local git or release-conductor's recipe reader:
+    no planner tamper, and the tools and program roots unchanged since the baseline when
+    a planner ran."""
     return not tick.tampered and (not tick.sealed or tools_trusted(tick))
 
 
 def pr_merged(tick, fin, branch, base):
     """True when the run's pull request needs no merge any more: the run branch is gone
     from the local repo, or the run head is an ancestor of the local base branch."""
-    if not (branch and base and BRANCH.match(base)) or not _git_ok(tick):
+    if not (branch and base and BRANCH.match(base)) or not _trusted_now(tick):
         return False
     cp = git(tick, "rev-parse", "-q", "--verify", "refs/heads/%s^{commit}" % branch)
     if cp is None:
@@ -2265,6 +2294,19 @@ def pr_merged(tick, fin, branch, base):
     head = head if isinstance(head, str) and SHA.match(head) else "refs/heads/" + branch
     cp = git(tick, "merge-base", "--is-ancestor", head, "refs/heads/" + base)
     return cp is not None and cp.returncode == 0
+
+
+def safe_rel(value):
+    """True for a repo-relative path the digest may put in a command: no leading `-` or
+    `/`, no `..` part, only [A-Za-z0-9._/-]."""
+    return (isinstance(value, str) and bool(SAFE_REL.match(value))
+            and ".." not in value.split("/"))
+
+
+def _no_command(what, where=None):
+    """The step of an entry whose value does not match the expected form."""
+    return ("no command: %s does not match the expected form; inspect %s"
+            % (what, span(where) if where else "it"), None)
 
 
 def merge_steps(url, branch):
@@ -2343,7 +2385,7 @@ def digest_releases(tick):
                                       ("then", command(*rel + ["prep", "--root", root,
                                                                "--approved-by",
                                                                Hole(YOUR_NAME), "--driver",
-                                                               Hole("<agent id>")]))]))
+                                                               Hole("<agent-id>")]))]))
                 elif kind != "release-merge":
                     out.append(entry("other", "Release %s waits: %s %s." % (
                         v, span(kind), span(text)),
@@ -2378,40 +2420,89 @@ def digest_releases(tick):
     return out
 
 
+def digest_recipe(tick):
+    """(the recipe's rollback argv, None), or (None, why). The argv comes from
+    release-conductor's own load_recipe() on .release/recipe.json, asked read-only, and
+    only from a recipe with no problems."""
+    tool = find_tool(tick.roots, RELEASE[0], RELEASE[1])
+    if tool is None:
+        return None, "release-conductor is not installed"
+    if not _trusted_now(tick):
+        return None, "not read after a planner tamper"
+    _w, rc, out = run_tool(tick, "digest", [PYTHON, "-I", "-S", "-B", "-c", RECIPE_PROBE,
+                                            tool, tick.root], echo_stdout=False)
+    for line in out.decode("utf-8", "replace").splitlines():
+        m = RECIPE_LINE.match(line)
+        if m and rc == 0:
+            try:
+                ans = json.loads(m.group(1))
+            except ValueError:
+                break
+            argv = ans.get("rollback") if isinstance(ans, dict) else None
+            if ans.get("problems"):
+                return None, ("the recipe cannot be read" if argv is None
+                              else "the recipe has problems")
+            if isinstance(argv, list) and argv and all(isinstance(a, str) for a in argv):
+                return argv, None
+            return None, "the recipe has no rollback"
+    return None, "the recipe cannot be read"
+
+
 def digest_incidents(tick):
-    """incident-watch's open incident records: each waits for the owner's rollback."""
-    d = os.path.join(tick.root, *INCIDENTS_DIR.split("/"), "records")
-    out = []
-    for name in _listdir(d):
-        if not name.endswith(".json"):
-            continue
+    """incident-watch's open incident records: each waits for the owner's rollback. The
+    commands are incident-watch's constants and the recipe's rollback argv, never text
+    from the record: a record whose strings differ from them is flagged."""
+    rel_dir = "%s/records" % INCIDENTS_DIR
+    d = os.path.join(tick.root, *rel_dir.split("/"))
+    names = [n for n in _listdir(d) if n.endswith(".json")]
+    records = []
+    for name in names:
         rec = _read_state(os.path.join(d, name))
-        if not rec or rec.get("status") != "open":
-            continue
+        if rec and rec.get("status") == "open":
+            records.append((name, rec))
+    if not records:
+        return []
+    recipe, why = digest_recipe(tick)
+    base = os.path.join(tick.root, *RELEASES_DIR.split("/"))
+    acts = [v for v in release_dirs(tick.root)
+            if (_read_state(os.path.join(base, v, "state.json")) or {}).get("status")
+            in ROLLBACK_ACTS_ON]
+    out = []
+    for name, rec in records:
         rid = rec.get("id") if isinstance(rec.get("id"), str) else name[:-len(".json")]
+        where = "%s/%s" % (rel_dir, name)
         rb = rec.get("rollback") if isinstance(rec.get("rollback"), dict) else {}
         ask = rb.get("ask_owner") if isinstance(rb.get("ask_owner"), dict) else {}
-        shown_rb = rb.get("display") if isinstance(rb.get("display"), str) else None
         text = "Incident %s, opened at %s after %s failed production probes." % (
             span(rid), span(rec.get("opened_at")), span(rec.get("consecutive_failures")))
         steps = []
-        if rb.get("available") and shown_rb:
-            text += " The recipe's rollback is %s." % span(shown_rb)
-            if ask.get("can_act") and isinstance(ask.get("command"), str):
-                steps.append(("shows the rollback and waits", ask["command"]))
-                if isinstance(ask.get("on_owner_yes"), str):
-                    steps.append(("on the owner's yes", ask["on_owner_yes"]))
-            else:
-                text += " release rollback cannot act: %s." % span(
-                    ask.get("cannot_act_reason"))
-                steps.append(("the owner rolls back by hand", shown_rb))
+        if ask and (ask.get("command"), ask.get("on_owner_yes")) != (OWNER_ROLLBACK_ASK,
+                                                                      OWNER_ROLLBACK_YES):
+            text += (" The record's rollback commands do not match the expected form; "
+                     "inspect %s." % span(where))
+        if acts:
+            steps += [("shows the rollback and waits", OWNER_ROLLBACK_ASK),
+                      ("on the owner's yes", OWNER_ROLLBACK_YES)]
         else:
-            text += " There is no rollback to show: %s; the owner mitigates by hand." % span(
-                rb.get("reason"))
+            text += " release rollback cannot act: no release is %s." % " or ".join(
+                ROLLBACK_ACTS_ON)
+        if recipe:
+            shown_rb = shlex.join(recipe)
+            text += " The recipe's rollback is %s." % span(shown_rb, DIGEST_COMMAND_MAX)
+            rec_argv = rb.get("argv")
+            if rec_argv is not None and rec_argv != recipe:
+                text += " The record's copy differs from the recipe: %s." % span(
+                    shlex.join(str(a) for a in rec_argv) if isinstance(rec_argv, list)
+                    else rec_argv)
+            if not acts:
+                steps.append(("the owner rolls back by hand (the recipe's rollback, word "
+                              "for word)", shown_rb))
+        else:
+            text += " The recipe's rollback is not shown: %s; read %s." % (
+                why, span(".release/recipe.json"))
         steps.append(("after the fix", command(Hole("incident"), "close", "--by",
-                                               Hole(YOUR_NAME), "--id", rid)
-                      if INCIDENT_ID.match(rid) else
-                      command(Hole("incident"), "close", "--by", Hole(YOUR_NAME))))
+                                               Hole(YOUR_NAME), "--id", rid))
+                      if INCIDENT_ID.match(rid) else _no_command("the record id", where))
         out.append(entry("rollback", text, steps))
     return out
 
@@ -2428,6 +2519,8 @@ def plan_read(tick, subject, text):
             ("then", command(PYTHON, os.path.abspath(__file__), "--root", root,
                              "tamper-clear", "--by", Hole(YOUR_NAME)))])
     name = os.path.basename(subject)
+    if not safe_rel(subject):
+        return entry("plan-read", shown_text, [_no_command("the plan path")])
     if subject.endswith(".md"):
         tool = _tool_cmd(tick, PLANNING, PLAN_TOOLS["tasks"], "spec_to_tasks.py")
         steps = [("read and finish the spec, then",
@@ -2435,7 +2528,8 @@ def plan_read(tick, subject, text):
     elif name.startswith("task-plan-v1-"):
         tool = _tool_cmd(tick, PLANNING, TOOLS[PLANNING], "write_grant.py")
         steps = [("read the plan, then", command(*tool + [
-            "--under-pipeline", tick.grant or Hole("<pipeline grant id>"), "--root", root,
+            "--under-pipeline", tick.grant if PIPELINE_GRANT_ID.match(tick.grant or "")
+            else Hole("<pipeline-grant-id>"), "--root", root,
             "--plan", subject]))]
     else:
         key = "idea" if subject.startswith(SPEC_DIRS["idea"].rsplit("/", 1)[0] + "/") \
@@ -2465,24 +2559,28 @@ def digest_waiting(tick):
         elif kind == "idea":
             m = DUE_IN.match(text)
             nxt = [("next", command(Hole("ideas"), "status", subject))] \
-                if IDEA_SLUG.match(subject) else []
+                if IDEA_SLUG.match(subject) else [_no_command("the idea slug")]
             out.append(entry("idea-due", "Idea %s has assumptions due or expired: %s." % (
                 span(subject), span(m.group(1) if m else text)), nxt))
         elif kind == "idea-envelope":
             tool = _tool_cmd(tick, CHECKER[0], CHECKER[1], "contract_check.py")
+            ok = (safe_rel(subject) and subject.startswith(IDEA_ENVELOPES + "/")
+                  and ENVELOPE_ID.match(subject[len(IDEA_ENVELOPES) + 1:]))
             out.append(entry("other", "Idea envelope %s waits: %s." % (
                 span(subject), span(text)),
-                [("see why", command(*tool + ["check-envelope", subject, "--root", root]))]))
+                [("see why", command(*tool + ["check-envelope", subject, "--root", root]))
+                 if ok else _no_command("the envelope path")]))
         elif kind == "build":
             m = BUILD_IN.match(text)
             why = m.group(1) if m else text
             nxt = [("see the changes", command("git", "-C", root, "status", "--short"))] \
-                if why == "root-dirty" else [("next", None)]
+                if why == "root-dirty" else [("no command: a later tick retries", None)]
             out.append(entry("other", "Build of grant %s waits: %s. A later tick builds it "
                              "when the reason is gone." % (span(subject), span(why)), nxt))
         else:
             out.append(entry("other", "%s %s waits: %s." % (span(kind), span(subject),
-                                                            span(text)), [("next", None)]))
+                                                            span(text)),
+                             [("no command: read the entry", None)]))
     return out, caps
 
 
@@ -2590,8 +2688,8 @@ def render_digest(tick, entries):
         for e in mine[:DIGEST_SHOWN]:
             lines.append("- %s" % e["text"])
             for label, cmd in e["next"]:
-                lines.append("  - %s: %s" % (label, span(cmd, DIGEST_COMMAND_MAX) if cmd is not None
-                                             else "no command; a later tick retries"))
+                lines.append("  - %s: %s" % (label, span(cmd, DIGEST_COMMAND_MAX))
+                             if cmd is not None else "  - %s" % label)
         if len(mine) > DIGEST_SHOWN:
             lines += ["", "And %d more, not shown." % (len(mine) - DIGEST_SHOWN)]
     return "\n".join(lines) + "\n"
