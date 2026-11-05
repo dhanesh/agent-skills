@@ -169,6 +169,34 @@ class TestPlanStage(PlanFixture):
         envs = os.listdir(os.path.join(self.repo, ".skill-contract", "envelopes"))
         self.assertFalse([n for n in envs if n.startswith("task-plan-v1-")], envs)
 
+    def test_one_tick_waits_the_unlisted_plan_and_hands_on_the_passing_one(self):
+        """R1's proof in one tick: the stub planner drafts one plan with an unlisted
+        command (I..01) and one passing plan (I..02). The first waits for the owner's
+        read; only the second reaches derive-grant and build."""
+        self.pick("I0000000001", "I0000000002")
+        with open(os.path.join(self.agent, "extra.py"), "w", encoding="utf-8") as f:
+            f.write("if 'I0000000001' in spec:\n"
+                    "    p = os.path.join(root, spec)\n"
+                    "    t = open(p, encoding='utf-8').read()\n"
+                    "    open(p, 'w', encoding='utf-8').write(t.replace(%r, %r))\n"
+                    % ("[cmd: %s]" % K.GOOD_CMD, "[cmd: %s]" % K.EVIL_CMD))
+        code, text, res, seen = self.tick()
+        self.assertEqual(code, 0, text)
+        self.assertEqual(res["plan"], ["attention", "ready=1", "waiting=1"], text)
+        self.assertIn("PLAN: waiting %s reason=allowlist-unlisted"
+                      % self.spec("I0000000001"), text)
+        self.assertEqual([w for w in seen["waiting"] if w[0] == "plan-read"],
+                         [("plan-read", self.spec("I0000000001"),
+                           "waiting for owner's read: reason=allowlist-unlisted")])
+        self.assertEqual(len(seen["plans"]), 1)
+        plan = seen["plans"][0]
+        self.assertIn("PLAN: ready %s spec=%s" % (plan, self.spec("I0000000002")), text)
+        self.assertEqual(res["derive-grant"], ["ok", "derived=1", "refused=0"], text)
+        self.assertEqual(res["build"], ["pending-R18", "grants=1"])
+        self.assertEqual([p for p, _ in seen["grants"]], [plan])
+        self.assertEqual(len([c for c in K.calls(self.skills)
+                              if c["key"] == "under-pipeline"]), 1)
+
     def test_failing_planner_waits(self):
         self.pick("I0000000001")
         self.mode("fail")
