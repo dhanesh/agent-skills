@@ -99,7 +99,7 @@ the digest list as waiting for the owner's read, and hands nothing on.
 | 3a | Takes the tamper snapshot. When the repository is too large for it, the planner does not run. | `snapshot-too-large-files`, `snapshot-too-large-bytes` |
 | 4 | Runs the planner with no shell, in its own process group, with the tick's timeout. Then it kills what the planner left running. | `planner-exit=<n>`, `planner-timeout`, `planner-failed` |
 | 5 | Takes the tamper snapshot again and compares it with the one taken before the planner (see below). Then it makes sure that the spec is still a regular file, and that the allowlist still has the pinned sha256. | `planner-changed-the-repo`, `planner-changed-git`, `planner-changed-tools`, `spec-replaced`, `allowlist-changed` |
-| 6 | Runs `spec_lint.py --unattended <spec>` with `python -I`, only when the tool's sha256 matches the snapshot. | `lint-failed`, `planner-changed-tools` |
+| 6 | Runs `spec_lint.py --unattended <spec>` with `python -I -S -B`, only when the tool's files and the program roots match the baseline. | `lint-failed`, `planner-tamper` |
 | 7 | Runs `spec_to_tasks.py <spec> --allowlist <allowlist>`. | `allowlist-unlisted` (exit 3), `allowlist-error` (exit 2), `allowlist-failed` |
 | 8 | Runs `spec_to_tasks.py <spec> --envelope <repo>` and reads its `ENVELOPE:` line. | `envelope-failed` |
 
@@ -127,12 +127,13 @@ fsmonitor command that the planner plants never runs in a tick.
 
 ### A poisoned tick
 
-A `planner-changed-*` reason poisons the tick. So does a spec-first-planning file that
-differs from the baseline. The tick takes that baseline after the grant check, before
-any planner runs, and checks it again before every run of a spec-first-planning tool:
-the cap counter, each plan check and each derivation. Then the tick:
+A `planner-changed-*` reason poisons the tick. So does a spec-first-planning file or a
+program root that differs from the baseline. The tick takes that baseline after the
+grant check, before any planner runs, and checks it again before every run of a
+spec-first-planning tool: the cap counter, each plan check and each derivation. Then the
+tick:
 
-- prints `STOP: planner-tamper <the-repo|git|tools>`;
+- prints `STOP: planner-tamper <the-repo|git|tools|programs>`;
 - runs no further spec-first-planning tool;
 - moves every plan of this tick, the ready ones too, and every derived grant to the
   digest list, with the reason `planner-tamper-<what>`;
@@ -141,9 +142,34 @@ the cap counter, each plan check and each derivation. Then the tick:
 - still runs release stage and digest, because they run no spec-first-planning code;
 - ends `TICK: done stages=9 tamper=<what>` and exits 4.
 
-Every Python tool that the tick starts runs as `python -I -B`. Python then loads no
-`usercustomize.py`, no `.pth` file and no `PYTHON*` variable, and writes no bytecode. A
-small launcher puts back only the tool's own directory on `sys.path`.
+Every Python tool that the tick starts runs as `python -I -S -B`. Python then loads no
+`site` module, so it reads no `site-packages` directory, no `.pth` file, no
+`sitecustomize.py` or `usercustomize.py` and no `PYTHON*` variable. It writes no
+bytecode. A small launcher sets `sys.path` to the tool's own directory and the stdlib
+directories only.
+
+### The program baseline
+
+The baseline also holds the program roots: every program and code root that the tick
+runs after a planner. The tick finds them once, before any planner runs. It asks the
+interpreter that the tools run with, not its own interpreter.
+
+- The interpreter: its path and its real file (sha256), `pyvenv.cfg` beside it and one
+  level up, `<name>._pth` and `pythonXY._pth` beside it, and its `libpython*` files in
+  `<prefix>/lib`.
+- The stdlib: every directory and zip on the interpreter's `-I -S` path, and its
+  `stdlib` and `platstdlib` directories from `sysconfig`. This includes `site-packages`
+  and `__pycache__`, because a planted `.pth` or `.pyc` file lives there.
+- git: the binary that `PATH` gives to the tick and its tools (sha256), and its
+  `git --exec-path` directory.
+
+The tick records the files in these trees by inode, size, mtime, ctime and mode, not by
+sha256, so the check before every tool run stays fast. A write, a rename, a `chmod` or a
+`utime` changes ctime, and a user cannot set ctime back. A path that does not exist is
+recorded as missing, so a file that appears later is a change. A change poisons the tick
+with `STOP: planner-tamper programs`. When the interpreter cannot report its paths, the
+plan stage starts no planner (`programs-unknown`). When the roots pass the 200000-file
+bound, it starts no planner either (`programs-too-large`).
 
 These guards are tripwires, not a sandbox. The planner runs as the owner, so it can reach
 anything the owner can reach. Run it with restricted tools: let it edit files and read
@@ -152,6 +178,15 @@ a permission-bypass flag in any form (`--flag=value` and any letter case too). T
 snapshot skips `.skill-contract/runs/`, so a planner that forges or deletes run
 directories can lower the dispatch count. The owner's own git hooks and fsmonitor are off
 for every tool that the tick runs, the sweep commands included.
+
+These parts are outside the tripwire:
+
+- shared libraries outside the interpreter's prefix, and the OS itself (the dynamic
+  loader, system libraries, the `xcrun` shim's developer directory on macOS);
+- files that the tick never runs.
+
+So a planner with a shell can still change what the tick runs. Run the planner with
+restricted tools: no shell, edits to the repository only, and permission prompts on.
 
 When all steps pass, the stage prints `PLAN: ready <plan> spec=<spec>` and hands the plan
 to derive grant. Derive grant checks the plan again with the real `write_grant.py

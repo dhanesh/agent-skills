@@ -45,6 +45,13 @@ them. plan_fixture(d, mode, max_plans, items) builds all of it: a git repo with 
 git-ignored intake directory, stubs whose spec-first-planning hands `under-pipeline` to
 the real write_grant.py, the stub planner, and a pipeline grant that names it.
 
+interpreter(d) builds a test-owned interpreter prefix under d: a copy of the running
+interpreter's real binary in d/bin, symlinks to its libpython* files in d/lib, and a
+d/lib/pythonX.Y stdlib whose entries are symlinks to the real stdlib, except an empty real
+site-packages and real copies of the modules in OWN_STDLIB. A test plants or edits files
+only there, so it never changes the real interpreter. It returns the binary's path, or None
+when the copy cannot start on this platform.
+
 CLI: python3 pipeline_testkit.py stubs <dir>   (prints STUBS: <dir>)
      python3 pipeline_testkit.py planfix <dir> <mode> <max_plans_per_day> <item id>...
                                     (prints REPO: <dir>/repo and SKILLS: <dir>/skills)
@@ -363,6 +370,43 @@ def picks(repo, skills, items):
            stdout="".join("NEXT: run spec-first-planning with %s\n" % r for r in rels)
            + "AUTOPICK: matched %d picked %d\n" % (len(rels), len(rels)))
     return rels
+
+
+OWN_STDLIB = ("shlex.py",)  # spec_lint, spec_to_tasks and write_grant import shlex
+
+
+def interpreter(d):
+    """A test-owned interpreter prefix under d (see the module docstring)."""
+    import sysconfig  # noqa: E402
+    real = os.path.realpath(sys.executable)
+    ver = "python%d.%d" % sys.version_info[:2]
+    std = sysconfig.get_path("stdlib")
+    lib = os.path.join(d, "lib")
+    own = os.path.join(lib, ver)
+    os.makedirs(os.path.join(d, "bin"))
+    os.makedirs(os.path.join(own, "site-packages"))
+    exe = os.path.join(d, "bin", "python3")
+    shutil.copy2(real, exe)
+    real_lib = os.path.join(os.path.dirname(os.path.dirname(real)), "lib")
+    for n in sorted(os.listdir(real_lib)) if os.path.isdir(real_lib) else []:
+        if n.startswith("libpython"):
+            os.symlink(os.path.join(real_lib, n), os.path.join(lib, n))
+    for n in sorted(os.listdir(std)):
+        if n in ("site-packages", "__pycache__"):
+            continue
+        if n in OWN_STDLIB:
+            shutil.copy2(os.path.join(std, n), os.path.join(own, n))
+        else:
+            os.symlink(os.path.join(std, n), os.path.join(own, n))
+    probe = "import shlex, sys, sysconfig; print(sysconfig.get_path('stdlib'))"
+    try:
+        cp = subprocess.run([exe, "-I", "-S", "-B", "-c", probe], stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, timeout=60, check=False, text=True)
+    except OSError:
+        return None
+    if cp.returncode != 0 or os.path.realpath(cp.stdout.strip()) != os.path.realpath(own):
+        return None
+    return exe
 
 
 def plan_fixture(d, mode="good", max_plans=3, items=(), with_planner=True):

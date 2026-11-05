@@ -148,31 +148,40 @@ in the work tree (tracked, untracked and git-ignored, except the spec and the ti
 the conductor's state directories), of `.git/config`, `HEAD`, `refs/`, `hooks/` and
 `info/` (not `objects/`, which is large and runs nothing), of the global git config and every `core.hooksPath`
 directory, and of every file in the spec-first-planning skill that it runs. Any change
-makes the plan wait. spec_lint and spec_to_tasks run (as `python -I`) only when their
+makes the plan wait. spec_lint and spec_to_tasks run (as `python -I -S -B`) only when their
 bytes match the snapshot. Every git call of the tick runs with `core.fsmonitor=false`,
 `core.hooksPath=/dev/null`, no replace objects, no system config and no `GIT_*` variable
 from the caller, and every tool gets the same switches through `GIT_CONFIG_COUNT`.
 
 **A poisoned tick.** When a planner changed the repository, the git config or hooks, or
 spec-first-planning's files (any `planner-changed-*` reason), or when a
-spec-first-planning file differs from the baseline the tick took before any planner ran,
-the tick prints `STOP: planner-tamper <the-repo|git|tools>` and trusts nothing for the
+spec-first-planning file or a program root differs from the baseline the tick took before
+any planner ran, the tick prints `STOP: planner-tamper <the-repo|git|tools|programs>` and
+trusts nothing for the
 rest of the tick. It runs no further spec-first-planning tool (no cap count, no plan
 check, no derive grant), moves every plan of the tick (the ready ones too) and every
 derived grant to the digest list as waiting for the owner's read, prints
 `STAGE: <name> skipped planner-tamper=<what>` for autopick, plan, derive grant and build,
 still runs release stage and digest (they run no spec-first-planning code), and exits 4.
-Before every run of a spec-first-planning tool, the tick checks every file of that skill
-against that baseline. Every Python tool the tick starts runs as `python -I -B`, so no
-`usercustomize.py`, `.pth` file or `PYTHON*` variable is loaded.
+Before every run of a spec-first-planning tool, the tick checks every file of that skill,
+and every program root, against that baseline. The program roots are every program and
+code root the tick runs after a planner: the interpreter the tools run with (its binary,
+its `pyvenv.cfg` and `._pth` files, its `libpython*` files, and every directory and zip of
+its stdlib path, its `site-packages` included) and the git binary with its `--exec-path`
+directory. When the tick cannot list them, or they pass the snapshot bound, no planner
+starts (`programs-unknown`, `programs-too-large`). Every Python tool the tick starts runs
+as `python -I -S -B` with a `sys.path` of its own directory and the stdlib directories
+only, so no `site` module, `site-packages`, `.pth` file, `sitecustomize.py`,
+`usercustomize.py` or `PYTHON*` variable is loaded.
 
 These guards are tripwires, not a sandbox: the planner runs as the owner and can reach
 whatever the owner can. Give it restricted tools (for Claude Code, an `--allowedTools`
 list that lets it edit files and read the repository, and no shell), and keep its
 permission prompts on; the checker refuses a permission-bypass flag in any form. The
 snapshot skips `.skill-contract/runs/`, so a planner that forges or deletes run
-directories can lower the dispatch count. The owner's own git hooks and fsmonitor are off
-for every tool the tick runs, the sweep commands included.
+directories can lower the dispatch count. Outside the tripwire: shared libraries outside
+the interpreter's prefix, the OS, and files that the tick never runs. The owner's own git
+hooks and fsmonitor are off for every tool the tick runs, the sweep commands included.
 
 Anything else prints `PLAN: waiting <spec> reason=<reason>` and hands nothing on. The
 reasons include `planner-exit=<n>`, `planner-timeout`, `planner-changed-the-repo`,

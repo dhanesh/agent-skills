@@ -108,8 +108,8 @@ directory beside this skill, <root>/.agents/skills, <root>/.claude/skills,
 ~/.agents/skills, ~/.claude/skills. `--skills-dir` (repeatable) or $FACTORY_PIPELINE_SKILLS
 (os.pathsep-separated) replaces that list, so a test can point at stub skills only.
 
-The tick runs every tool with sys.executable -I -B (see LAUNCH), an argv list and no
-shell. Stdlib only, Python 3.10+, POSIX. Exits: 0 every stage ran; 2 usage error, a state
+The tick runs every tool with PYTHON (sys.executable) -I -S -B (see LAUNCH), an argv
+list and no shell. Stdlib only, Python 3.10+, POSIX. Exits: 0 every stage ran; 2 usage error, a state
 directory that is not git-ignored, or no live pipeline grant; 3 another tick holds the
 pipeline lock; 4 a planner tamper poisoned the tick (`STOP: planner-tamper <what>`: no
 further spec-first-planning tool runs, no grant is derived, no build starts, every plan
@@ -143,6 +143,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -247,6 +248,7 @@ class Tick:
         self.stops = []     # the caps that stopped this tick, in order (R15)
         self.gate = None    # run_tick sets it: gate(stage) -> cap name or None (R15)
         self.baseline = None  # spec-first-planning's files before any planner ran (R17)
+        self.programs = None  # (files, trees) program_roots() found before any planner ran
         self.tampered = None  # what a planner changed: the tick trusts nothing after it
 
 
@@ -374,17 +376,23 @@ def worse(a, b):
     return a if SEVERITY.get(a, 3) >= SEVERITY.get(b, 3) else b
 
 
-# Every Python tool the tick starts runs isolated: `python -I -B` loads no PYTHONPATH,
-# no PYTHON* variable and no user site-packages (where a planner could plant a
-# usercustomize.py or a .pth file), and writes no bytecode. -I also drops the script's
-# directory from sys.path, so this launcher puts back only the tool's own directory
-# (ops-intake's intake.py imports its siblings from there) and runs the tool as __main__.
-LAUNCH = ("import os, runpy, sys; t = sys.argv[1]; sys.argv = sys.argv[1:]; "
-          "sys.path.insert(0, os.path.dirname(t)); runpy.run_path(t, run_name='__main__')")
+# Every Python tool the tick starts runs isolated: `python -I -S -B` loads no PYTHONPATH,
+# no PYTHON* variable, no user site-packages, and (-S) no `site` module at all, so no
+# site-packages directory, no .pth file and no sitecustomize.py or usercustomize.py is
+# ever loaded, wherever a planner planted it. It writes no bytecode. The launcher then
+# sets sys.path explicitly: the tool's own directory (ops-intake's intake.py imports its
+# siblings from there), then the interpreter's stdlib directories only (the directories
+# of the -S path; the stdlib zip, a file, is dropped). It runs the tool as __main__.
+# The code that loads before the launcher (the interpreter, its stdlib zip and stdlib)
+# is in the program baseline (see program_digest()).
+PYTHON = sys.executable  # the interpreter of every tool; a test points it at a fixture
+LAUNCH = ("import os, sys; t = sys.argv[1]; sys.argv = sys.argv[1:]; "
+          "sys.path[:] = [os.path.dirname(t)] + [p for p in sys.path if os.path.isdir(p)]; "
+          "import runpy; runpy.run_path(t, run_name='__main__')")
 
 
 def py(tool, *args):
-    return [sys.executable, "-I", "-B", "-c", LAUNCH, tool] + list(args)
+    return [PYTHON, "-I", "-S", "-B", "-c", LAUNCH, tool] + list(args)
 
 
 # ── the stages ──────────────────────────────────────────────────────────────────────────
@@ -457,6 +465,10 @@ def stage_plan(tick):
     if None in tools.values() or len({skill_dir_of(t) for t in tools.values()}) != 1:
         wait_all(tick, "no-spec-first-planning")
         return "unavailable", "spec-first-planning"
+    unsafe = programs_ok(tick)
+    if unsafe:
+        wait_all(tick, unsafe)
+        return "unavailable", "%s picked=%d" % (unsafe, n)
     allow = allowlist_rel(tick)
     if allow is None:
         wait_all(tick, "allowlist-changed")
@@ -612,14 +624,26 @@ def _sha(path):
     return h.hexdigest()
 
 
-def _record(out, budget, key, path):
-    """Record one path (a file by sha256, a symlink by target, anything else by kind)."""
+def _stat_sig(path):
+    """A file's stat signature: inode, size, mtime_ns, ctime_ns and mode (lstat). A write,
+    a rename over it, a chmod or a utime() all move ctime, which no user can set back."""
+    st = os.lstat(path)
+    return "stat:%d:%d:%d:%d:%o" % (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+                                    st.st_mode)
+
+
+def _record(out, budget, key, path, fast=False):
+    """Record one path (a file by sha256, or by _stat_sig() when fast, a symlink by
+    target, anything else by kind). A fast record counts toward SNAP_MAX_FILES only,
+    since it reads no bytes."""
     budget[0] += 1
     if budget[0] > SNAP_MAX_FILES:
         raise TooLarge("files")
     try:
         if os.path.islink(path):
             out[key] = "link:" + os.readlink(path)
+        elif os.path.isfile(path) and fast:
+            out[key] = _stat_sig(path)
         elif os.path.isfile(path):
             budget[1] += os.path.getsize(path)
             if budget[1] > SNAP_MAX_BYTES:
@@ -633,13 +657,13 @@ def _record(out, budget, key, path):
         out[key] = "error:%s" % type(e).__name__
 
 
-def _walk(out, budget, label, top, skip=()):
+def _walk(out, budget, label, top, skip=(), fast=False):
     """Record top and everything under it, never following a symlink. skip holds
-    top-relative paths (files or directories) to leave out."""
+    top-relative paths (files or directories) to leave out. fast: see _record()."""
     if not os.path.lexists(top):
         out[label] = "missing"
         return
-    _record(out, budget, label, top)
+    _record(out, budget, label, top, fast)
     if os.path.islink(top) or not os.path.isdir(top):
         return
     for dirpath, dirnames, filenames in os.walk(top, followlinks=False):
@@ -650,14 +674,15 @@ def _walk(out, budget, label, top, skip=()):
             rel = rel_dir + name
             if rel in skip:
                 continue
-            _record(out, budget, "%s/%s" % (label, rel), os.path.join(dirpath, name))
+            _record(out, budget, "%s/%s" % (label, rel), os.path.join(dirpath, name), fast)
             if not os.path.islink(os.path.join(dirpath, name)):
                 keep.append(name)
         dirnames[:] = keep
         for name in sorted(filenames):
             rel = rel_dir + name
             if rel not in skip:
-                _record(out, budget, "%s/%s" % (label, rel), os.path.join(dirpath, name))
+                _record(out, budget, "%s/%s" % (label, rel), os.path.join(dirpath, name),
+                        fast)
 
 
 def _hooks_paths(tick, config_files):
@@ -722,9 +747,101 @@ def changed_reason(before, after):
     return "planner-changed-%s" % first
 
 
+# The program baseline (R17): every program and code root the tick runs after a planner,
+# so a planner that changes one poisons the tick (`STOP: planner-tamper programs`):
+#   python:  the interpreter every tool runs with (PYTHON) and its real file, by sha256;
+#            the files that steer where it finds its stdlib before any code runs
+#            (pyvenv.cfg beside it and one level up, <name>._pth and pythonXY._pth
+#            beside it); its libpython* files in <real prefix>/lib; and every directory
+#            and zip of its `-I -S` sys.path plus sysconfig's stdlib and platstdlib, as
+#            the launched interpreter itself reports them (its site-packages and
+#            __pycache__ included, since a planted .pth or .pyc lives there);
+#   git:     the git that PATH resolves for the tick and its tools, by sha256, and its
+#            `git --exec-path` directory.
+# The trees are recorded by _stat_sig(), not sha256, so the check before every tool run
+# stays cheap; the executables are hashed. A path that does not exist is recorded as
+# missing, so a file that appears later counts as a change. Outside this tripwire: shared
+# libraries outside the interpreter's prefix, the OS itself, and files the tick never
+# runs.
+PROBE = ("import json, os, sys, sysconfig; print(json.dumps({'exe': sys.executable, "
+         "'path': sys.path, 'stdlib': sysconfig.get_path('stdlib'), "
+         "'platstdlib': sysconfig.get_path('platstdlib'), "
+         "'ver': '%d%d' % sys.version_info[:2]}))")
+
+
+def program_roots(tick):
+    """(files to hash, trees to stat) that the program baseline watches, found once before
+    any planner runs, or None when the interpreter cannot report its paths. Asks the
+    interpreter the tools run with (PYTHON), never the tick's own."""
+    try:
+        cp = subprocess.run([PYTHON, "-I", "-S", "-B", "-c", PROBE], cwd=tick.root,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            stdin=subprocess.DEVNULL, timeout=CHECK_TIMEOUT, check=False,
+                            env=tool_env())
+        info = json.loads(cp.stdout.decode("utf-8")) if cp.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        info = None
+    if not isinstance(info, dict) or not all(isinstance(info.get(k), str) for k in
+                                             ("exe", "stdlib", "platstdlib", "ver")) \
+            or not isinstance(info.get("path"), list):
+        return None
+    files, trees = set(), set()
+    exes = {os.path.abspath(PYTHON), os.path.abspath(info["exe"])}
+    for exe in list(exes):
+        exes.add(os.path.realpath(exe))
+    for exe in exes:
+        d = os.path.dirname(exe)
+        files.update((exe, os.path.join(d, "pyvenv.cfg"),
+                      os.path.join(os.path.dirname(d), "pyvenv.cfg"),
+                      os.path.splitext(exe)[0] + "._pth",
+                      os.path.join(d, "python%s._pth" % info["ver"])))
+        lib = os.path.join(os.path.dirname(d), "lib")
+        try:
+            files.update(os.path.join(lib, n) for n in os.listdir(lib)
+                         if n.startswith("libpython"))
+        except OSError:
+            pass
+    for p in info["path"] + [info["stdlib"], info["platstdlib"]]:
+        if isinstance(p, str) and p:
+            trees.add(os.path.abspath(p))
+    gitexe = shutil.which("git", path=tool_env().get("PATH"))
+    if gitexe:
+        files.update((os.path.abspath(gitexe), os.path.realpath(gitexe)))
+        try:
+            cp = subprocess.run([gitexe, "--exec-path"], stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                                timeout=CHECK_TIMEOUT, check=False, env=git_env())
+            ep = cp.stdout.decode("utf-8", "replace").strip()
+            if cp.returncode == 0 and os.path.isabs(ep):
+                trees.add(ep)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    # A tree inside another is walked once, as part of the outer one.
+    trees = sorted(t for t in trees
+                   if not any(o != t and t.startswith(o.rstrip(os.sep) + os.sep)
+                              for o in trees))
+    return sorted(files), trees
+
+
+def program_digest(tick):
+    """{key: digest} of the program roots (see the comment above). Raises TooLarge."""
+    if tick.programs is None:
+        return {"programs": "unknown"}
+    files, trees = tick.programs
+    out, budget = {}, [0, 0]
+    for f in files:
+        if not os.path.lexists(f):
+            out["programs:" + f] = "missing"
+        else:
+            _record(out, budget, "programs:" + f, f)
+    for t in trees:
+        _walk(out, budget, "programs:" + t, t, fast=True)
+    return out
+
+
 def tool_digest(tick):
-    """{key: digest} of every file of the spec-first-planning skill the tick runs, or None
-    when that skill is not installed."""
+    """{key: digest} of every file of the spec-first-planning skill the tick runs and of
+    the program roots, or None when that skill is not installed."""
     tool = find_tool(tick.roots, PLANNING)
     if tool is None:
         return None
@@ -733,19 +850,43 @@ def tool_digest(tick):
         _walk(out, [0, 0], "tools", skill_dir_of(tool))
     except TooLarge:
         out["tools"] = "too-large"
+    try:
+        out.update(program_digest(tick))
+    except TooLarge:
+        out["programs"] = "too-large"
     return out
 
 
 def tools_trusted(tick):
-    """False once the tick is poisoned, or when spec-first-planning's files differ from the
-    baseline taken before any planner ran in this tick (which poisons the tick). Called
-    before every run of a spec-first-planning tool after the baseline."""
+    """False once the tick is poisoned, or when spec-first-planning's files or the program
+    roots differ from the baseline taken before any planner ran in this tick (which
+    poisons the tick: `programs` when a program root changed, else `tools`). Called before
+    every run of a spec-first-planning tool after the baseline."""
     if tick.tampered:
         return False
-    if tool_digest(tick) != tick.baseline:
-        poison(tick, "tools")
+    now = tool_digest(tick)
+    if now != tick.baseline:
+        if tick.baseline is None or now is None:  # no baseline, or the skill went away
+            poison(tick, "tools")
+            return False
+        keys = [k for k in set(tick.baseline) | set(now)
+                if tick.baseline.get(k) != now.get(k)]
+        for k in sorted(keys)[:5]:
+            echo("plan", "changed: %s" % shown(k))
+        poison(tick, "programs" if any(k.startswith("programs") for k in keys)
+               else "tools")
         return False
     return True
+
+
+def programs_ok(tick):
+    """None when the program baseline is usable, else why the plan stage cannot trust
+    anything it would run after a planner (so no planner starts)."""
+    if tick.programs is None:
+        return "programs-unknown"
+    if (tick.baseline or {}).get("programs") == "too-large":
+        return "programs-too-large"
+    return None
 
 
 def poison(tick, what):
@@ -1301,6 +1442,8 @@ def run_tick(a):
     load_grant_payload(tick)  # R17: the owner's planner and the pinned allowlist
     # R17: spec-first-planning's files before any planner runs. Every later run of one of
     # its tools (caps, plan, derive-grant) first checks that nothing changed since.
+    # The program roots (the interpreter, its stdlib, git) are part of that baseline.
+    tick.programs = program_roots(tick)
     tick.baseline = tool_digest(tick)
     # R15: a cap checks before each stage that starts a new plan or run (STAGE_CAPS), and
     # derive-grant asks again between plans through tick.gate (R18's build will ask before

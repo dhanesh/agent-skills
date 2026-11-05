@@ -309,9 +309,27 @@ class TestTamper(PlanFixture):
 
     def test_snapshot_over_its_bound_waits_before_the_planner_runs(self):
         self.pick("I0000000001")
-        with mock.patch.object(P, "SNAP_MAX_FILES", 3):
+        # Empty program roots, so the bound trips on the repo snapshot itself.
+        with mock.patch.object(P, "SNAP_MAX_FILES", 3), \
+                mock.patch.object(P, "program_roots", lambda tick: ([], [])):
             _, text, res, seen = self.tick()
         self.assertWaits(text, res, seen, "I0000000001", "snapshot-too-large-files")
+        self.assertEqual(self.planner_calls(), [])
+
+    def test_program_roots_over_the_bound_wait_before_the_planner_runs(self):
+        self.pick("I0000000001")
+        with mock.patch.object(P, "SNAP_MAX_FILES", 3):
+            _, text, res, seen = self.tick()
+        self.assertEqual(res["plan"], ["unavailable", "programs-too-large", "picked=1"], text)
+        self.assertIn("reason=programs-too-large", text)
+        self.assertEqual(seen["plans"], [])
+        self.assertEqual(self.planner_calls(), [])
+
+    def test_unknown_interpreter_paths_wait_before_the_planner_runs(self):
+        self.pick("I0000000001")
+        with mock.patch.object(P, "program_roots", lambda tick: None):
+            _, text, res, seen = self.tick()
+        self.assertEqual(res["plan"], ["unavailable", "programs-unknown", "picked=1"], text)
         self.assertEqual(self.planner_calls(), [])
 
     def test_tool_and_git_calls_run_hardened(self):
@@ -429,6 +447,101 @@ class TestNoPlanner(PlanFixture):
         self.assertEqual(res["derive-grant"], ["idle", "plans=0"])
         self.assertFalse(os.path.exists(os.path.join(self.repo, ".skill-contract", "intake",
                                                      "specs")))
+
+
+class TestProgramTamper(PlanFixture):
+    """The program baseline: a planner that plants a .pth or sitecustomize.py in the
+    interpreter's prefix, or edits one of its stdlib modules, poisons the tick before any
+    tool runs again. Every tool runs with a test-owned interpreter copy (K.interpreter), so
+    the real interpreter is never touched. The planted code would force every tool to exit
+    0, which is how a planner could make a failing plan pass."""
+    EVIL = "import os; os._exit(0)\n"
+
+    def setUp(self):
+        super().setUp()
+        self.exe = K.interpreter(os.path.join(self.tmp, "py"))
+        if self.exe is None:
+            self.skipTest("a copied interpreter cannot start on this platform")
+        p = mock.patch.object(P, "PYTHON", self.exe)
+        p.start()
+        self.addCleanup(p.stop)
+        self.std = os.path.join(self.tmp, "py", "lib", "python%d.%d" % sys.version_info[:2])
+
+    def plant(self, path, text, append=False):
+        """The stub planner writes text to path (inside the fixture prefix) after it
+        writes the spec, as a steered planner would."""
+        with open(os.path.join(self.agent, "extra.py"), "w", encoding="utf-8") as f:
+            f.write("open(%r, %r, encoding='utf-8').write(%r)\n"
+                    % (path, "a" if append else "w", text))
+
+    def assertProgramsTampered(self, code, text, res, seen):
+        self.assertEqual(code, 4, text)
+        self.assertIn("\nSTOP: planner-tamper programs:", text)
+        self.assertIn("PLAN: waiting %s reason=planner-tamper" % self.spec("I0000000001"),
+                      text)
+        self.assertEqual(res["plan"][0], "refused", text)
+        for stage in ("derive-grant", "build"):
+            self.assertEqual(res[stage], ["skipped", "planner-tamper=programs"], text)
+        self.assertEqual(seen["plans"], [])
+        self.assertEqual(seen["grants"], [])
+        self.assertNotIn("under-pipeline", [c["key"] for c in K.calls(self.skills)])
+        self.assertIn("TICK: done stages=9 tamper=programs", text)
+
+    def test_the_fixture_interpreter_runs_the_tick(self):
+        self.pick("I0000000001")
+        code, text, res, seen = self.tick()
+        self.assertEqual(code, 0, text)
+        self.assertEqual(res["plan"], ["ok", "ready=1", "waiting=0"], text)
+        self.assertEqual(res["derive-grant"], ["ok", "derived=1", "refused=0"], text)
+
+    def test_planted_pth_poisons_the_tick(self):
+        self.pick("I0000000001")
+        self.mode("unlisted")
+        self.plant(os.path.join(self.std, "site-packages", "evil.pth"), self.EVIL)
+        self.assertProgramsTampered(*self.tick())
+
+    def test_planted_sitecustomize_poisons_the_tick(self):
+        self.pick("I0000000001")
+        self.mode("unlisted")
+        self.plant(os.path.join(self.std, "sitecustomize.py"), self.EVIL)
+        self.assertProgramsTampered(*self.tick())
+
+    def test_edited_stdlib_module_poisons_the_tick(self):
+        self.pick("I0000000001")
+        self.mode("unlisted")
+        self.plant(os.path.join(self.std, "shlex.py"), "\n" + self.EVIL, append=True)
+        self.assertProgramsTampered(*self.tick())
+
+    def test_launcher_loads_no_site_code_and_only_stdlib_paths(self):
+        """-S: a planted .pth and sitecustomize.py, which `python -I -B` loads, never load
+        through the launcher, and the tool's sys.path is its own directory plus stdlib."""
+        marker = os.path.join(self.tmp, "PWNED_PREFIX")
+        log = "import sys; open(%r, 'a').write('ran\\n')\n" % marker
+        K.write_rel(self.std, "site-packages/evil.pth", log)
+        K.write_rel(self.std, "sitecustomize.py", log)
+        subprocess.run([self.exe, "-I", "-B", "-c", "pass"], check=True, timeout=60)
+        self.assertTrue(os.path.exists(marker), "the planted site code must load without -S")
+        os.remove(marker)
+        tool = os.path.join(self.tmp, "tooldir", "tool.py")
+        K.write_rel(self.tmp, "tooldir/tool.py", "import json, sys; print(json.dumps(sys.path))")
+        out = subprocess.run(P.py(tool), stdout=subprocess.PIPE, check=True,
+                             timeout=60).stdout
+        path = json.loads(out)
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual(path[0], os.path.dirname(tool))
+        self.assertTrue(path[1:])
+        for p in path[1:]:  # the stdlib directories of the fixture prefix, nothing else
+            self.assertTrue(p == self.std or p.startswith(self.std + os.sep), p)
+            self.assertNotIn("site-packages", p)
+
+    def test_program_roots_name_the_interpreter_its_stdlib_and_git(self):
+        tick = P.Tick(self.repo, [])
+        files, trees = P.program_roots(tick)
+        self.assertIn(self.exe, files)
+        self.assertTrue(any(os.path.realpath(t) == os.path.realpath(self.std) for t in trees),
+                        trees)
+        git = shutil.which("git")
+        self.assertIn(os.path.realpath(git), files)
 
 
 class TestCapInTick(PlanFixture):
