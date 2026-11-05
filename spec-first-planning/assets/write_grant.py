@@ -58,8 +58,9 @@ Exit 2: usage error (an unreadable or malformed --answers file, or one missing a
     python3 write_grant.py --pipeline --root <repo-root> --answers <answers.json>
                            --accepted-by <human name>
     Answers keys: branch_pattern, gate_policy, expires_at, caps, budget, stop_on,
-    reentry, pick_policy_path (default .intake/pick-policy.json), allowlist_path
-    (default .factory/check-commands.txt). The statement must pass the reference
+    reentry, planner (optional: the argv of the agent factory-pipeline's plan stage
+    starts, with {prompt} once), pick_policy_path (default .intake/pick-policy.json),
+    allowlist_path (default .factory/check-commands.txt). The statement must pass the reference
     checker's check_statement and pipeline_grant_violations and must not be expired, so
     it refuses what check-pipeline-grant refuses. Exit 0 prints REVOKE:/KILL-SWITCH:
     lines and ends with "GRANT: <path>"; exit 1 "REFUSED: <reason>"; exit 2 on usage
@@ -644,20 +645,24 @@ def _check_production_allowlist(root, answers):
     grant's own to check (release prep's own grant, written separately, is covered by
     release.py's own refusal at stage/deploy time)."""
     reentry = answers.get("reentry")
-    agent_cmd = reentry.get("agent_cmd") if isinstance(reentry, dict) else None
-    if not isinstance(agent_cmd, list):
+    cmds = [("answers.reentry.agent_cmd",
+             reentry.get("agent_cmd") if isinstance(reentry, dict) else None),
+            ("answers.planner", answers.get("planner"))]  # a pipeline grant's planner
+    cmds = [(name, c) for name, c in cmds if isinstance(c, list)]
+    if not cmds:
         return
     argvs = _production_argvs(root)
     if not argvs:
         return
-    for argv in argvs:
-        rule = agent_cmd_exposing_rule(agent_cmd, argv)
-        if rule is not None:
-            raise GrantRefused(
-                "answers.reentry.agent_cmd's allowlist would let an unattended agent run "
-                "the repo's production deploy or rollback (%s) through rule `%s`; narrow "
-                "that rule. The release grant itself is written only by `release prep`, "
-                "with the human present" % (RELEASE_RECIPE_REL, rule))
+    for name, agent_cmd in cmds:
+        for argv in argvs:
+            rule = agent_cmd_exposing_rule(agent_cmd, argv)
+            if rule is not None:
+                raise GrantRefused(
+                    "%s's allowlist would let an unattended agent run "
+                    "the repo's production deploy or rollback (%s) through rule `%s`; narrow "
+                    "that rule. The release grant itself is written only by `release prep`, "
+                    "with the human present" % (name, RELEASE_RECIPE_REL, rule))
 
 
 def _check_accepted_by(accepted_by):
@@ -777,7 +782,7 @@ def build_grant(root, spec_rel, plan_rel, answers, accepted_by, now=None):
 # writer refuses what check-pipeline-grant would refuse and keeps no second rule list.
 PIPELINE_ANSWER_KEYS = frozenset({
     "branch_pattern", "gate_policy", "expires_at", "caps", "budget", "stop_on", "reentry",
-    "pick_policy_path", "allowlist_path",
+    "planner", "pick_policy_path", "allowlist_path",
 })
 PICK_POLICY_REL = ".intake/pick-policy.json"      # ops-intake's registered pick policy
 ALLOWLIST_REL = ".factory/check-commands.txt"     # the owner's committed command allowlist
@@ -840,6 +845,8 @@ def build_pipeline_grant(root, answers, accepted_by, now=None):
     if reentry is not None:
         payload["reentry"] = (dict(contract_check.REENTRY_DEFAULTS, **reentry)
                               if isinstance(reentry, dict) else reentry)
+    if "planner" in answers:  # pipeline_grant_violations checks it (planner_problems)
+        payload["planner"] = answers["planner"]
     accepted = {"test": "grant-accepted", "assertedBy": {"human": accepted_by.strip()},
                 "result": {"outcome": "passed"},
                 "command": ["{python}", "{skill_dir:spec-first-planning}/assets/contract_check.py",

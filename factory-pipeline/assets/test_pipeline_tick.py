@@ -24,7 +24,7 @@ import pipeline_testkit as K  # noqa: E402
 TOOL = os.path.join(HERE, "pipeline.py")
 ORDER = ["sweep", "growth-review", "idea-follow-up", "autopick", "plan", "derive-grant",
          "build", "release-stage", "digest"]
-PENDING = {"idea-follow-up": "pending-R20", "plan": "pending-R17", "build": "pending-R18",
+PENDING = {"idea-follow-up": "pending-R20", "build": "pending-R18",
            "release-stage": "pending-R19", "digest": "pending-R21"}
 
 
@@ -85,7 +85,8 @@ class TestTick(Fixture):
         _, res, _ = self.tick()
         for stage, word in PENDING.items():
             self.assertEqual(res[stage][0], word, stage)
-        self.assertEqual(res["plan"][1], "picked=1")
+        # R17: the grant names no planner, so the plan stage plans nothing.
+        self.assertEqual(res["plan"], ["unavailable", "no-planner", "picked=1"])
 
     def test_growth_bytes_reach_intake_import_on_stdin(self):
         self.tick()
@@ -258,7 +259,15 @@ class TestDeriveGrantSeam(Fixture):
     """derive-grant is wired for the plans R17 will hand on; drive it directly."""
 
     def make_tick(self, grant="pg-1"):
-        return P.Tick(self.repo, [self.skills], grant=grant, timeout=60)
+        t = P.Tick(self.repo, [self.skills], grant=grant, timeout=60)
+        t.baseline = P.tool_digest(t)  # run_tick takes it before any stage (R17)
+        return t
+
+    def test_no_baseline_is_a_tamper_never_a_trust(self):
+        t = P.Tick(self.repo, [self.skills], grant="pg-1", timeout=60)
+        t.plans = ["plans/a.json"]
+        self.assertEqual(P.stage_derive_grant(t), ("refused", "tamper=tools"))
+        self.assertEqual(K.calls(self.skills), [])
 
     def test_calls_write_grant_under_pipeline_per_plan(self):
         t = self.make_tick()
@@ -309,11 +318,20 @@ class TestLookupAndShell(unittest.TestCase):
     def test_no_shell_anywhere(self):
         with open(os.path.join(HERE, "pipeline.py"), encoding="utf-8") as f:
             tree = ast.parse(f.read())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.keyword):
-                self.assertNotEqual(node.arg, "shell")
-            if isinstance(node, ast.Attribute):
-                self.assertNotIn(node.attr, ("system", "popen", "Popen"))
+        popen_in = []
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            for node in ast.walk(fn):
+                if isinstance(node, ast.keyword):
+                    self.assertNotEqual(node.arg, "shell")
+                if isinstance(node, ast.Attribute):
+                    self.assertNotIn(node.attr, ("system", "popen"))
+                    if node.attr == "Popen":
+                        popen_in.append(fn.name)
+        # R17: only the planner runs through Popen (an argv list, no shell), because a
+        # timeout must kill its whole process group, and that needs the child's pid.
+        self.assertEqual(popen_in, ["run_planner"])
 
 
 if __name__ == "__main__":

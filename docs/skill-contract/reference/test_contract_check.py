@@ -1776,7 +1776,7 @@ class PipelineGrantTests(unittest.TestCase):
         r = subprocess.run([sys.executable, "-I", os.path.join(self.CONFORMANCE, "run.py")],
                            capture_output=True, text=True, timeout=120)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("CONFORMANCE: PASS (5 vectors)", r.stdout)
+        self.assertIn("CONFORMANCE: PASS (7 vectors)", r.stdout)
 
     def test_committed_vectors_match_the_generator(self):
         for name, vec in self.cf.build().items():
@@ -1835,6 +1835,23 @@ class PipelineGrantTests(unittest.TestCase):
             "enforce without cap": lambda p, pr: p["budget"].update(enforce=["usd"]),
             "signed": lambda p, pr: p.update(require_signature=True),
             "no stop_on": lambda p, pr: p.pop("stop_on"),
+            "planner a string": lambda p, pr: p.update(planner="claude -p {prompt}"),
+            "planner a shell": lambda p, pr: p.update(planner=["sh", "-c", "{prompt}"]),
+            "planner no prompt": lambda p, pr: p.update(planner=["claude", "-p"]),
+            "planner two prompts": lambda p, pr: p.update(
+                planner=["claude", "{prompt}", "{prompt}"]),
+            "planner bypass": lambda p, pr: p.update(
+                planner=["claude", "--dangerously-skip-permissions", "-p", "{prompt}"]),
+            "planner bypass mode": lambda p, pr: p.update(
+                planner=["claude", "--permission-mode", "bypassPermissions", "{prompt}"]),
+            "planner bypass =value": lambda p, pr: p.update(
+                planner=["claude", "--dangerously-skip-permissions=true", "{prompt}"]),
+            "planner bypass case": lambda p, pr: p.update(
+                planner=["claude", "--Dangerously-Skip-Permissions", "{prompt}"]),
+            "planner bypass mode =value": lambda p, pr: p.update(
+                planner=["claude", "--permission-mode=BYPASSPERMISSIONS", "{prompt}"]),
+            "planner allow bypass": lambda p, pr: p.update(
+                planner=["claude", "--allow-dangerously-skip-permissions", "{prompt}"]),
         }
         for label, mutate in cases.items():
             with self.subTest(label):
@@ -1842,6 +1859,10 @@ class PipelineGrantTests(unittest.TestCase):
                 mutate(st["predicate"]["payload"], st["predicate"])
                 self.assertTrue(cc.pipeline_grant_violations(st), label)
         self.assertEqual(cc.pipeline_grant_violations(self.cf._grant()), [])
+        st = self.cf._grant()
+        st["predicate"]["payload"]["planner"] = ["/usr/local/bin/claude", "-p", "{prompt}",
+                                                 "--add-dir", "{root}"]
+        self.assertEqual(cc.pipeline_grant_violations(st), [], "an optional planner is valid")
 
     def test_cli_exit_codes_and_lines(self):
         def cli(*args):

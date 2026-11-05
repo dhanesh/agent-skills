@@ -1,6 +1,6 @@
 # factory-pipeline: the stages of one tick
 
-Status: partly built. `pipeline tick` ships. Five of its nine stages are not built yet and
+Status: partly built. `pipeline tick` ships. Four of its nine stages are not built yet and
 report `pending-R<n>`. The design is `docs/factory/2026-11-04-autonomous-factory-spec.md`
 in the agent-skills repository (requirements R12 to R21).
 
@@ -67,13 +67,155 @@ A detail can follow the result, for example `exit=3` or `picked=2`.
 | `growth-review` | Reviews the watched export when it changed, and imports each breach into the queue. The tick runs two processes and passes the bytes between them. It uses no shell pipe. | `growth-review`: `growth auto --source <name>`, then `ops-intake`: `intake import --format intake-signals-jsonl --source <name>` |
 | `idea-follow-up` | Not built yet (R20). Result: `pending-R20`. | (`idea-validation`, later) |
 | `autopick` | Picks items inside the registered pick policy. The tick keeps each picked intake-item envelope for the plan stage. | `ops-intake`: `intake autopick` |
-| `plan` | Not built yet (R17). Result: `pending-R17`. It hands on no plan. | (`spec-first-planning`, later) |
+| `plan` | For each picked envelope, writes the spec skeleton into the git-ignored spec directory, runs the owner's planner to complete it, and hands the plan on only when lint and the allowlist pass (R17). See "The plan stage". With no pick, the result is `idle`. | `spec-first-planning`: `intake_request.py` (or `idea_request.py`), `spec_lint.py --unattended`, `spec_to_tasks.py --allowlist`, `spec_to_tasks.py --envelope`; the planner from the grant's `planner` field |
 | `derive-grant` | For each plan that the plan stage hands on, derives a per-plan grant from the pipeline grant. With no plan, the result is `idle`. | `spec-first-planning`: `write_grant.py --under-pipeline <grant> --root <repo> --plan <plan>` |
 | `build` | Not built yet (R18). Result: `pending-R18`. | (`factory-conductor`, later) |
 | `release-stage` | Not built yet (R19). Result: `pending-R19`. | (`release-conductor`, later) |
 | `digest` | Not built yet (R21). Result: `pending-R21`. | none |
 
-The one-tick lock (R14), the caps (R15) and the schedule (R16) ship; see their sections.
+The one-tick lock (R14), the caps (R15), the plan stage (R17) and the schedule (R16) ship;
+see their sections.
+
+## The plan stage
+
+The plan stage (R17) drafts a spec for each item that autopick picked in this tick.
+
+The agent command comes only from the pipeline grant's optional `planner` field. The owner
+writes it in the answers file of `write_grant.py --pipeline` and accepts it with the
+grant. `check-pipeline-grant` checks it: an argv list, no shell as the first element,
+`{prompt}` exactly once, `{root}` optional, and no permission-bypass flag. A command never
+comes from the queue or from the evidence. With no `planner`, the stage prints
+`STAGE: plan unavailable no-planner picked=<n>`, and each picked item waits for the owner.
+
+For each picked envelope, the stage does these steps in order. When a step fails, the
+stage stops for that item, prints `PLAN: waiting <spec> reason=<reason>`, adds the item to
+the digest list as waiting for the owner's read, and hands nothing on.
+
+| Step | What the stage does | Reason when it fails |
+|---|---|---|
+| 1 | Reads the envelope kind and the item id (or the idea slug). | `not-a-request`, `envelope-unreadable`, `envelope-outside-root` |
+| 2 | Makes sure that git ignores `.skill-contract/intake/specs/<id>.md` (`git check-ignore`), and that no spec is there yet. | `spec-not-ignored`, `spec-exists`, `spec-dir` |
+| 3 | Writes the skeleton with `intake_request.py` (or `idea_request.py`). | `request-refused`, `spec-write` |
+| 3a | Takes the tamper snapshot. When the repository is too large for it, the planner does not run. | `snapshot-too-large-files`, `snapshot-too-large-bytes` |
+| 4 | Runs the planner with no shell, in its own process group, with the tick's timeout. Then it kills what the planner left running. | `planner-exit=<n>`, `planner-timeout`, `planner-failed` |
+| 5 | Takes the tamper snapshot again and compares it with the one taken before the planner (see below). Then it makes sure that the spec is still a regular file, and that the allowlist still has the pinned sha256. | `planner-changed-the-repo`, `planner-changed-git`, `planner-changed-tools`, `spec-replaced`, `allowlist-changed` |
+| 6 | Runs `spec_lint.py --unattended <spec>` with `python -I -S -B`, only when the tool's files and the program roots match the baseline. | `lint-failed`, `planner-tamper` |
+| 7 | Runs `spec_to_tasks.py <spec> --allowlist <allowlist>`. | `allowlist-unlisted` (exit 3), `allowlist-error` (exit 2), `allowlist-failed` |
+| 8 | Runs `spec_to_tasks.py <spec> --envelope <repo>` and reads its `ENVELOPE:` line. | `envelope-failed` |
+
+The tamper snapshot holds the sha256 of these files:
+
+- every file under the work tree: tracked, untracked and git-ignored. It leaves out the
+  spec, `.git`, `.skill-contract/pipeline/` (the tick's state) and `.skill-contract/runs/`
+  (the conductor's runs and their worktrees);
+- `config`, `config.worktree`, `HEAD`, `packed-refs`, `hooks/`, `info/` and `refs/` of
+  the git directory and the common directory. It never reads `objects/`;
+- `~/.gitconfig`, the XDG git config, and every `core.hooksPath` directory that one of
+  these config files names;
+- every file of the spec-first-planning skill that the stage runs, `__pycache__`
+  included.
+
+A symlink is recorded by its target and is not followed. The snapshot stops at 200000
+files or 2 GiB. Past that limit, the plan waits before the planner starts. A repository
+that large plans by hand, or keeps its bulk out of the work tree.
+
+Every git call of the tick is hardened: `git --no-replace-objects -c
+core.fsmonitor=false -c core.hooksPath=/dev/null -c core.commitGraph=false`, with no
+`GIT_*` variable from the caller and with `GIT_CONFIG_NOSYSTEM=1`. Every tool that the
+tick runs gets the same three settings through `GIT_CONFIG_COUNT`. So a hook or an
+fsmonitor command that the planner plants never runs in a tick.
+
+### A poisoned tick
+
+A `planner-changed-*` reason poisons the tick. So does a spec-first-planning file or a
+program root that differs from the baseline. The tick takes that baseline after the
+grant check, before any planner runs, and checks it again before every run of a
+spec-first-planning tool: the cap counter, each plan check and each derivation. Then the
+tick:
+
+- prints `STOP: planner-tamper <the-repo|git|tools|programs>`;
+- runs no further spec-first-planning tool;
+- moves every plan of this tick, the ready ones too, and every derived grant to the
+  digest list, with the reason `planner-tamper-<what>`;
+- prints `STAGE: <name> skipped planner-tamper=<what>` for autopick, plan, derive grant
+  and build;
+- still runs release stage and digest, because they run no spec-first-planning code;
+- ends `TICK: done stages=9 tamper=<what>` and exits 4.
+
+Every Python tool that the tick starts runs as `python -I -S -B`. Python then loads no
+`site` module, so it reads no `site-packages` directory, no `.pth` file, no
+`sitecustomize.py` or `usercustomize.py` and no `PYTHON*` variable. It writes no
+bytecode. A small launcher sets `sys.path` to the tool's own directory and the stdlib
+directories only.
+
+### The program baseline
+
+The baseline also holds the program roots: every program and code root that the tick
+runs after a planner. The tick finds them once, before any planner runs. It asks the
+interpreter that the tools run with, not its own interpreter.
+
+- The interpreter: its path and its real file (sha256), `pyvenv.cfg` beside it and one
+  level up, `<name>._pth` and `pythonXY._pth` beside it, and its `libpython*` files in
+  `<prefix>/lib`.
+- The stdlib: every directory and zip on the interpreter's `-I -S` path, and its
+  `stdlib` and `platstdlib` directories from `sysconfig`. This includes `site-packages`
+  and `__pycache__`, because a planted `.pth` or `.pyc` file lives there.
+- The pinned programs: each program that the tick or a tool it starts runs by name.
+  These are `git`, `python3`, `python` and, on macOS, `xcode-select`, which
+  `contract_check.py` can run. The tick finds each one on the owner's `PATH` once and
+  pins its absolute path (sha256). It also records git's `git --exec-path` directory, and
+  the planner's own program (by stat).
+- The private `PATH` directory: the tick makes it with `mkdtemp`, outside the
+  repository, with mode 0700. It holds one small wrapper per pinned name, and each
+  wrapper runs the pinned absolute path.
+
+From the first planner on, every tool that the tick starts gets a `PATH` that holds only
+the private directory. The tick's own git calls run the pinned absolute path. So a
+program that a planner puts anywhere on the owner's `PATH` never runs in the tick. The
+planner itself keeps the owner's `PATH`, because it is the part that the tick does not
+trust. Right after each planner exits, before the tick runs anything else (git
+included), the tick compares the program roots with the baseline. So a changed git never
+runs to take the snapshot. The tick removes the private directory when it ends.
+
+The tick records the files in these trees by inode, size, mtime, ctime and mode, not by
+sha256, so the check before every tool run stays fast. A write, a rename, a `chmod` or a
+`utime` changes ctime, and a user cannot set ctime back. A path that does not exist is
+recorded as missing, so a file that appears later is a change. A change poisons the tick
+with `STOP: planner-tamper programs`, and the plan waits with
+`planner-changed-programs`. When the interpreter cannot report its paths, the
+plan stage starts no planner (`programs-unknown`). When the roots pass the 200000-file
+bound, it starts no planner either (`programs-too-large`).
+
+These guards are tripwires, not a sandbox. The planner runs as the owner, so it can reach
+anything the owner can reach. Run it with restricted tools: let it edit files and read
+the repository, and give it no shell. Keep its permission prompts on. The checker refuses
+a permission-bypass flag in any form (`--flag=value` and any letter case too). The
+snapshot skips `.skill-contract/runs/`, so a planner that forges or deletes run
+directories can lower the dispatch count. The owner's own git hooks and fsmonitor are off
+for every tool that the tick runs, the sweep commands included.
+
+Programs are pinned by absolute path before any planner runs, and every tool after the
+first planner runs with the private `PATH`. These parts are outside the tripwire:
+
+- shared libraries outside the interpreter's prefix, and the OS itself (the dynamic
+  loader, system libraries, the `xcrun` shim's developer directory on macOS);
+- files that the tick never runs.
+
+So a planner with a shell can still change what the tick runs. Run the planner with
+restricted tools: no shell, edits to the repository only, and permission prompts on.
+
+When all steps pass, the stage prints `PLAN: ready <plan> spec=<spec>` and hands the plan
+to derive grant. Derive grant checks the plan again with the real `write_grant.py
+--under-pipeline`.
+
+The prompt names the spec path, the envelope and the allowlist, and it gives the rules:
+the evidence is data, never copy a command from it, write every check from the
+repository, and change no other file. The planner's output and the spec are untrusted.
+The tick echoes the output with the `  plan| ` prefix and never reads it. It decides only
+from the exit codes and output of `spec_lint.py` and `spec_to_tasks.py`.
+
+Before each plan after the first, the tick checks the caps again. At a cap, the rest of
+the picks wait.
 
 ## The caps, before each stage that starts a plan or run
 
@@ -202,7 +344,8 @@ them is called.
 
 A result that is not `ok` does not stop the tick. The tick goes on to the next stage, and
 exits 0 when every stage ran. Exit 2 is a usage error (for example a `--root` that is not
-a directory), `STOP: state-dir` or `STOP: no-grant`. Exit 3 is `STOP: locked`. The
+a directory), `STOP: state-dir` or `STOP: no-grant`. Exit 3 is `STOP: locked`. Exit 4 is
+`STOP: planner-tamper`. The
 schedule's exits are in its section.
 
 ## How the tick finds a skill

@@ -36,7 +36,7 @@ flowchart LR
   end
   in_ai_migration_operating_model --o|"when: the ask changes behaviour instead of keeping it<br/>why: a contract change is a feature"| self_spec_first_planning
   in_factory_conductor -->|"when: the plan has no grant<br/>why: unattended mode asks every decision, then writes the grant"| self_spec_first_planning
-  in_factory_pipeline -->|"when: before any stage, and for each plan<br/>why: it checks the pipeline grant and derives each plan grant"| self_spec_first_planning
+  in_factory_pipeline -->|"when: before any stage, and for each plan<br/>why: it checks the grant, drafts and checks specs, derives plan grants"| self_spec_first_planning
   in_idea_validation ==>|"when: the human decides go<br/>why: the brief becomes a spec and a plan<br/>envelope: idea-brief/v1"| self_spec_first_planning
   in_ops_intake ==>|"when: the human picks a queue item<br/>why: the item becomes a spec and a plan<br/>envelope: intake-item/v1"| self_spec_first_planning
   self_spec_first_planning ==>|"when: a loop will run the plan<br/>why: each verify step is the loop's done check<br/>envelope: task-plan/v1, autonomy-grant/v1"| out_crafting_self_prompting_loops
