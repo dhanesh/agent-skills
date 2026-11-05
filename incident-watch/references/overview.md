@@ -1,23 +1,127 @@
-# incident-watch: planned steps
+# incident-watch: steps
 
-Status: in development: no command ships yet. This page lists what is planned. Nothing
-on it runs today.
+Status: built. The `probe`, `refuse`, `open`, `signal`, `mitigate` and `close` steps
+ship.
 
 The design is `docs/factory/2026-11-04-autonomous-factory-spec.md` in the agent-skills
 repository (requirements R22 to R26, decision D1).
 
-## Planned steps, in order
+## Steps, in order
 
-| Step | What it will do | Skill that does it by hand today |
+| Step | What it does | Status |
 |---|---|---|
-| probe | Run only the release recipe's read-only `health`, `version_probe` and `prod_smoke` commands on a schedule, and record each result. | `release-conductor` (its recipe holds the commands) |
-| open | After 2 or more consecutive failed probes, open one incident record with the probe output, the last release record and the recent CI runs. | no skill yet |
-| signal | Write one `incident` line into the ops-intake signals file. | `ops-intake` |
-| mitigate | Show the recipe's rollback command word for word. The owner decides and runs it. | `release-conductor`, after the owner's yes |
-| close | Close the record with `--by <name>` and hand it on for a post-mortem. | `bug-autopsy` |
+| probe | Run only the release recipe's read-only `health`, `version_probe` and `prod_smoke` commands, and record each result. | ships (R22) |
+| refuse | Refuse any other command with exit 2, and run nothing. `--only` takes only `health`, `version_probe` or `prod_smoke`. An extra argument after `probe`, or a probe entry whose program word holds a `{token}`, is refused too. | ships (R23) |
+| open | After 2 or more consecutive failed probes, open one incident record with the probe output, the last release record and the recent CI runs. A later failure while the record is open adds its probe to that record. It opens no second record. | ships (R24) |
+| signal | Write one `intake-signals-jsonl` line of kind `incident` to `signals.jsonl` for each record that it opens. | ships (R24) |
+| mitigate | Show the recipe's rollback command word for word, and the release-conductor command that asks the owner. The owner decides and runs it through `release-conductor`. incident-watch never runs it. | ships (R25) |
+| close | Close the record with `--by <name>` (a human's name) and hand it to `bug-autopsy`. | ships (R26) |
 
-## What it will never do
+## The probe's output
 
-- It will never run a rollback or deploy command. Rollback stays the owner's decision
-  (decision D1).
-- It will never run a command that is not in the recipe's three read-only lists.
+- One line per command: `PROBE: <name> <pass|fail|timeout> rc=<exit code>`. The names
+  are `health`, `version_probe`, `prod_smoke[0]`, `prod_smoke[1]` and so on.
+- One summary line:
+  `PROBE_RESULT: <pass|fail> commands=<n> failed=<n> consecutive_failures=<n>`.
+- A refusal: `PROBE: refused: <reason>`, exit 2. Nothing ran.
+- When a probe opens a record: `INCIDENT: opened <id> <record path>`,
+  `SIGNAL: .skill-contract/incidents/signals.jsonl kind incident` and
+  `NEXT: intake import --format intake-signals-jsonl --source incident-watch .skill-contract/incidents/signals.jsonl`.
+- When a probe opens a record, two more lines show the rollback. They are
+  `ROLLBACK: <the recipe's rollback argv>` and
+  `NEXT: ask the owner to roll back: release rollback (shows the rollback and waits); on their yes: release rollback --approved-by "<their name>"`.
+  `release rollback` acts only on a release in `prod_failed` or `outcome_unknown`. If
+  no release is in one of those states (for example, the last release is `verified`),
+  the second line is
+  `NEXT: release rollback cannot act: <reason>; the owner rolls back by hand with the ROLLBACK command above`
+  instead.
+  If the recipe has no valid `rollback` field, the probe prints
+  `ROLLBACK: none: <reason>; the owner mitigates by hand` and no rollback `NEXT:` line.
+- Every line that the probe prints escapes control, format and line-separator
+  characters (`\x0a`, `\x1b`, `\u2028` and so on). Recipe or record text in a line,
+  such as a refusal reason or the rollback argv, cannot add a line of its own. The
+  record keeps that text as data, unescaped.
+- When a record is already open: `INCIDENT: open <id> <record path> probes=<n>`. No new
+  signal line.
+- When the CI runs are not on disk: `NEXT: gh run list --branch <branch> --limit 10 --json
+  <fields> > .skill-contract/incidents/ci-runs.json`. The probe never runs `gh`. The owner
+  runs this line. The next failed probe reads the file into the open record.
+- Exit 0 is a pass. Exit 3 is a failed probe, or another probe holds the lock.
+
+## The close command's output
+
+`incident.py --root <repo> close --by <name> [--reason <text>] [--id <record id>]`:
+
+- On success: `INCIDENT: closed <id> <record path> by <name> at <time>` and
+  `NEXT: run bug-autopsy with <record path>`. Exit 0. The record path is relative to
+  the repository root.
+- Closing is a human step. A missing or empty `--by`, a name with hidden characters, or
+  a name that starts with the word "agent" in any form (`agent:x`, `Agent Smith`,
+  Cyrillic or fullwidth letters) gives a `STOP:` line and exit 2. The check is the one
+  that growth-review and ops-intake use, copied byte for byte. The unit suite compares
+  the copies.
+- No open record, an `--id` that is not a record id, an unknown `--id`, or an `--id`
+  whose record is already closed: a `STOP:` line and exit 2.
+- More than one open record and no `--id`: a `STOP:` line that names the open ids, and
+  exit 2.
+- The command takes the same lock as `probe`. If another command holds it:
+  `STOP: locked: ...` and exit 3.
+- Every refusal changes nothing. Every line goes through the same escaping as the probe.
+
+bug-autopsy reads the record as evidence for its timeline: the probe times, the exit
+codes, the output tails, the last release and the CI runs. The record is in the
+git-ignored state directory and can hold production details. Quote from it only what the
+post-mortem needs.
+
+## The state directory
+
+`<repo>/.skill-contract/incidents/` holds its own `.gitignore` with `*`. The tool checks
+it before it runs a command.
+
+- `probes.jsonl`: one line for each probe. Each line has the time, the result, the
+  recipe's sha256 and, for each command, the time, the name, the argv, the exit code and
+  the last 2000 characters of stdout and stderr.
+- `state.json`: the count of consecutive failed probes and the id of the open record. A
+  pass sets the count to 0. A pass does not close the record. `incident close` sets the
+  count to 0 and clears the open record, so a new failure streak opens a new record.
+- `records/<id>.json`: one incident record. The id is
+  `inc-<UTC time of opening>-<6 hex characters>`. The record holds:
+  - `status` (`open` or `closed`), `opened_at`, `updated_at` and `probe_count`;
+  - `probes`: the failed probes of the streak, with their output tails (at most 20, the
+    newest last);
+  - `last_release`: the newest `release-result/v1` envelope from release-conductor under
+    `.skill-contract/envelopes/`. Its checks are the same as in ops-intake's sync. If
+    there is no such envelope, the field says that it is not available;
+  - `releases`: the version and status of each release directory of release-conductor;
+  - `ci_runs`: the 10 newest runs on the default branch, from `ci-runs.json`. The default
+    branch is `ci.default_branch` in `.intake/config.json`, else `main`. If there is no
+    file, the field says that the runs are not available, and it gives the `NEXT:` command;
+  - `rollback` (R25): the rollback, shown and never run. `argv` is the recipe's
+    `rollback` list word for word, with `{version}` and `{commit}` unfilled.
+    release-conductor fills them from the rollback target. `display` is the same argv
+    on one line, quoted like release-conductor's own `rollback:` line, with every
+    control character escaped. `tokens` lists the tokens in it. `ask_owner` holds the
+    release-conductor command that shows the rollback and waits (`release rollback`),
+    the command that the owner's yes adds (`--approved-by "<their name>"`), the release
+    states that release-conductor's rollback acts on (`prod_failed`, `outcome_unknown`)
+    and the releases now in those states. If the recipe has no valid `rollback`,
+    `available` is false and `reason` says why;
+  - `closed_at`, `closed_by` and `close_reason`: null while the record is open.
+    `incident close` fills them (R26).
+- `signals.jsonl`: one `intake-signals-jsonl` line for each opened record. The source is
+  `incident-watch`, the kind is `incident`, the severity is 4 and the `source_id` is the
+  record id. The evidence names the failed commands, their exit codes and the record
+  path. It holds no output tail. The file is the hand-off and not stdout, because stdout
+  holds the machine lines. To read it, add the source `incident-watch` with the format
+  `intake-signals-jsonl` to `.intake/config.json`, then run the printed `NEXT:` line. A
+  second import of the same file adds nothing.
+- `ci-runs.json`: optional. The owner writes it with the printed `gh run list` line.
+
+## What it never does
+
+- It never runs a rollback or deploy command. Rollback stays the owner's decision
+  (decision D1). The tool reads the recipe's `rollback` in one function, and only to
+  show it. The unit suite checks the source for this, and it checks that the rollback
+  and deploy stubs never run.
+- It never runs a command that is not in the recipe's three read-only lists (constraint
+  S4).

@@ -1,32 +1,233 @@
-# factory-pipeline: planned stages
+# factory-pipeline: the stages of one tick
 
-Status: in development: no command ships yet. This page lists what is planned. Nothing
-on it runs today.
+Status: partly built. `pipeline tick` ships. Five of its nine stages are not built yet and
+report `pending-R<n>`. The design is `docs/factory/2026-11-04-autonomous-factory-spec.md`
+in the agent-skills repository (requirements R12 to R21).
 
-The design is `docs/factory/2026-11-04-autonomous-factory-spec.md` in the agent-skills
-repository (requirements R12 to R21).
+## The lock, before everything else
 
-## Planned stages, in order
+Only one tick runs at a time in one repository (R14). A tick can last longer than the
+timer interval, because one tool call can run for up to 3600 seconds. The lock stops two
+ticks from running at the same time.
 
-One planned `pipeline tick` runs these stages under a standing pipeline grant. It stops
-at each human gate.
+1. The tick makes `<repo>/.skill-contract/pipeline/` with a `.gitignore` that holds `*`.
+   It writes the lock file only after it proves that this `.gitignore` is a regular file
+   with `*` and no `!` line. When it cannot prove this (for example, the directory is a
+   symlink), it prints `STOP: state-dir reason=<reason> dir=.skill-contract/pipeline` and
+   exits 2.
+2. The tick takes a non-blocking exclusive `flock` on `.skill-contract/pipeline/.lock`.
+   It does this before the grant check and before any stage.
+3. When another process holds the lock, the tick prints
+   `STOP: locked: another pipeline tick holds .skill-contract/pipeline/.lock` and exits 3.
+   It runs no grant check and no stage, so the queue does not change.
+4. The tick holds the lock until it exits, through every stage and every tool call.
 
-| Stage | What it will do | Skill that does it by hand today |
+When the process that holds the lock dies, the system releases the lock. A killed tick
+thus never blocks the next tick. The lock file stays on disk, and that is correct: only
+the `flock` counts. The tools that the tick runs do not inherit the lock. ops-intake's own
+run lock is a different file (`.skill-contract/intake/.lock`), so the two locks never wait
+for each other.
+
+## The grant check, before any stage
+
+Before the first stage, the tick runs spec-first-planning's vendored
+`contract_check.py check-pipeline-grant --root <repo>` (R13). The checker judges the newest
+pipeline grant that no revision supersedes, as the skill-contract SPEC says. With
+`tick --grant <id or envelope path>`, it judges that grant instead. The tick goes on only
+when the checker exits 0 with `VALID`. Then it prints `TICK: grant <id> expires_at <time>`,
+and the derive-grant stage uses that id and no other.
+
+In every other case the tick runs no stage, so it sweeps, picks and plans nothing. It
+prints `STOP: no-grant reason=<reason>` and exits 2. The reasons are:
+
+| Reason | Meaning |
+|---|---|
+| `none` | There is no pipeline grant (or no grant with the `--grant` id). |
+| `revoked` | The grant is revoked, by its id or by the kill switch (`revoke-grant` with no id). |
+| `superseded` | A newer revision replaces the grant. |
+| `expired` | `expires_at` is past. |
+| `lifetime` | `expires_at` is more than 7 days from now. |
+| `stale` | The pick policy or the command allowlist changed after the owner accepted the grant. |
+| `tracked` | Git tracks the grant file. A grant is one person's acceptance and stays out of commits. |
+| `invalid` | The envelope breaks the contract (the checker prints a `FAIL:` line for each problem). |
+| `checker-unavailable` | spec-first-planning, or its vendored `contract_check.py`, is not installed. |
+| `checker-error` | The checker did not start, timed out or gave an answer the tick cannot read. |
+| `not-an-envelope` | `--grant` names no pipeline grant id and no envelope under `.skill-contract/envelopes/`. |
+
+The checker's own lines are printed with the `  grant| ` prefix.
+
+## The stages, in order
+
+One `pipeline tick` runs these stages and prints one `STAGE: <name> <result>` line for each.
+A detail can follow the result, for example `exit=3` or `picked=2`.
+
+| Stage | What the tick does today | Skill and tool it calls |
 |---|---|---|
-| sweep | Collect operational signals and pick what broke. | `ops-intake` |
-| growth review | Check product metrics against registered thresholds. | `growth-review` |
-| idea follow-up | List ideas with an assumption that is due or expired. | `idea-validation` |
-| autopick | Pick the next item of work. | `ops-intake` (`pick`) |
-| plan | Draft a spec and a task plan from the picked item. | `spec-first-planning` |
-| derive grant | Write the autonomy grant for the plan. | `spec-first-planning` (unattended mode) |
-| build | Run the plan to an open pull request. | `factory-conductor` |
-| release stage | Stage a release after the release pull request is merged. | `release-conductor` |
-| digest | List every waiting human gate with the next command. | no skill yet |
+| `sweep` | Runs the sweep commands of the owner's committed intake config. | `ops-intake`: `intake sweep` |
+| `growth-review` | Reviews the watched export when it changed, and imports each breach into the queue. The tick runs two processes and passes the bytes between them. It uses no shell pipe. | `growth-review`: `growth auto --source <name>`, then `ops-intake`: `intake import --format intake-signals-jsonl --source <name>` |
+| `idea-follow-up` | Not built yet (R20). Result: `pending-R20`. | (`idea-validation`, later) |
+| `autopick` | Picks items inside the registered pick policy. The tick keeps each picked intake-item envelope for the plan stage. | `ops-intake`: `intake autopick` |
+| `plan` | Not built yet (R17). Result: `pending-R17`. It hands on no plan. | (`spec-first-planning`, later) |
+| `derive-grant` | For each plan that the plan stage hands on, derives a per-plan grant from the pipeline grant. With no plan, the result is `idle`. | `spec-first-planning`: `write_grant.py --under-pipeline <grant> --root <repo> --plan <plan>` |
+| `build` | Not built yet (R18). Result: `pending-R18`. | (`factory-conductor`, later) |
+| `release-stage` | Not built yet (R19). Result: `pending-R19`. | (`release-conductor`, later) |
+| `digest` | Not built yet (R21). Result: `pending-R21`. | none |
 
-## Human gates the tick will stop at
+The one-tick lock (R14), the caps (R15) and the schedule (R16) ship; see their sections.
+
+## The caps, before each stage that starts a plan or run
+
+The pipeline grant has three caps (R15). Each is an integer of 1 or more, and each counts
+per UTC calendar day:
+
+| Cap | What the tick counts | Where the count comes from |
+|---|---|---|
+| `max_plans_per_day` | Grants derived from this pipeline grant today. | spec-first-planning `write_grant.py --pipeline-caps <grant> --root <repo>` |
+| `max_open_runs` | Derived grants that have no `run-result/v1` envelope yet. | the same `--pipeline-caps` call |
+| `max_dispatches_per_day` | `dispatch` events dated today in the `autonomy-log.jsonl` of each factory-conductor run whose `state.json` `grant_id` is a grant derived from this pipeline grant. | `.skill-contract/runs/<run>/` |
+
+`--pipeline-caps` uses the same counter that `write_grant.py --under-pipeline` uses when it
+refuses a derivation past a cap. The tick and the derivation thus never disagree.
+
+Four stages can start a new plan or run: `autopick`, `plan`, `derive-grant` and `build`.
+The tick checks all three caps before `autopick`, `plan` and `derive-grant`, because that
+is where a plan or an open run gets counted. In `derive-grant` it checks them again before
+each plan after the first, because the grant it just derived can reach a cap. Before
+`build`, and only when there are grants to build, it checks only
+`max_dispatches_per_day`. A grant that `derive-grant` already derived was counted then,
+so building it starts no new counted plan or open run. If build were gated on those caps,
+the grant would never run, never get a run result, and stay open for ever. The other stages only read, sweep or report. They run in this order, with or
+without a cap stop: `sweep`, `growth-review` and `idea-follow-up` before the gates, and
+`release-stage` and `digest` after them.
+
+When a count is equal to or more than its cap, the tick:
+
+1. prints `STOP: cap <name> count=<n> limit=<m> stage=<stage>`;
+2. appends one JSON line with the same facts to `.skill-contract/pipeline/cap-stops.jsonl`
+   (git-ignored), and keeps the stop for the digest;
+3. prints `STAGE: <name> skipped cap=<name>` for each later stage that the same cap
+   gates. A plans or open-runs stop skips `autopick`, `plan` and `derive-grant`, so no new
+   plan starts, and the grants already derived still reach `build`. A dispatches stop
+   also skips `build`. An `uncounted` stop skips all four;
+4. runs the stages that only read, sweep or report, and ends
+   `TICK: done stages=9 cap=<name>[,<name>]` with exit 0.
+
+The tick checks the dispatch cap before a build starts. It does not stop a build that is
+already running. A build that starts below the cap can thus pass it: factory-conductor's
+own per-run `max_dispatches` budget bounds that run. So one tick passes the daily cap by
+at most that budget, and the next build, or the next tick, stops.
+
+A count that the tick cannot make is a stop, not a zero. The tick prints
+`STOP: cap uncounted source=<what> reason=<why> stage=<stage>` when:
+
+- `--pipeline-caps` refuses (for example, an envelope it cannot read), fails or is not
+  installed (`source=write_grant`);
+- a run's `state.json` cannot be read (`reason=unreadable`), or a run directory has an
+  `autonomy-log.jsonl` but no `state.json` (`reason=missing`). A run directory with
+  neither file is a run that factory-conductor is still making, and the tick skips it;
+- a derived run's `autonomy-log.jsonl` is missing while its `state.json` shows
+  dispatches, or the log cannot be read, has a line that is
+  not a JSON object (`reason=not-json`), or has a `dispatch` event with no time
+  (`reason=no-time`).
+
+The stop stays until the owner fixes the file or a new UTC day starts.
+
+## The schedule
+
+`pipeline schedule install --every <minutes>` installs one timer on this machine. The
+timer runs `pipeline tick` for the repo every `<minutes>` (R16). The schedule runs on the
+owner's always-on machine. There is no hosted scheduler (decision D5).
+
+1. The tool checks `--every` first, before it reads or installs anything. The value must
+   be a whole number from 15 to 1440. Another value (for example `10`, `1500`, `15.0` or
+   `abc`) prints `STOP: schedule every=<value> reason=<why>` and exits 2. The reason is
+   `out-of-range` or `not-a-whole-number`. Nothing is installed.
+2. The tool checks the pipeline grant, as the tick does. With no live grant, it prints
+   `STOP: no-grant reason=<reason>`, installs nothing and exits 2.
+3. The tool loads factory-conductor's timer module, `reentry_timer.py`, from the
+   place where factory-conductor is installed. It finds that skill in the same roots as
+   the other siblings. It imports the module and does not copy it. When factory-conductor
+   is not installed, it prints `SCHEDULE: unavailable factory-conductor` and exits 2. The
+   tick still works when you run it by hand.
+4. The tool installs the timer with the timer kind of this machine: launchd on macOS, a
+   systemd user timer or a tagged crontab line on Linux. It prints
+   `SCHEDULE: installed every <n> min kind=<kind> id=<id> grant=<id>`, then
+   `SCHEDULE: runs <argv>`, and exits 0.
+
+The timer id is `pipeline-` and the first 12 hex digits of the SHA-256 of the repo's real
+path. One repo thus has one timer. A second install replaces it. The id never matches a
+factory-conductor run id (`run-...`), so the two timers never touch each other.
+
+The timer runs this argv, with no shell: the absolute path of the Python interpreter that
+ran install, the absolute path of `pipeline.py`, `--root <repo>`, each `--skills-dir`
+given to install, and `tick`.
+
+A timer has a minimal PATH of its own (launchd: `/usr/bin:/bin:/usr/sbin:/sbin`, cron:
+`/usr/bin:/bin`). The tick finds Python by its absolute path. But the grant checker calls
+git, and the sweep runs the owner's commands. Install thus captures the PATH that it runs
+with, and reentry_timer writes that PATH into the timer: `EnvironmentVariables` in the
+launchd plist, `Environment=` in the systemd unit, and `/usr/bin/env PATH=...` in the
+cron line. Run install from a shell whose PATH finds git and the sweep's tools.
+
+cron cannot step its minute field past 59. On cron, an interval under 60 is
+`*/<n> * * * *`. An interval of 60 or more must be a whole number of hours that divides
+24: 60, 120, 180, 240, 360, 480, 720 or 1440 (`0 0 * * *`). Another interval gives
+`SCHEDULE: failed` and exit 2. The tool tests the timer text before it changes anything,
+so the timer that was there stays. launchd and systemd take every interval from 15 to
+1440.
+
+`schedule status` prints `SCHEDULE: id <id>` and `SCHEDULE: timer <files or line>`, or
+`none`. `schedule uninstall` removes the timer and prints `SCHEDULE: uninstalled id <id>`.
+Neither needs a grant. When the owner revokes the pipeline grant, the timer stays, and
+each tick prints `STOP: no-grant`. Run `schedule uninstall` to stop the timer.
+
+The tests never install a real timer. They set reentry_timer's dry-run hooks
+(`FACTORY_CONDUCTOR_TIMER_DRYRUN=1` and `FACTORY_CONDUCTOR_TIMER_HOME=<temp dir>`). They
+also put fake `launchctl`, `systemctl` and `crontab` first on PATH, and fail when one of
+them is called.
+
+## Result words
+
+| Result | Meaning |
+|---|---|
+| `ok` | The tool exited 0. |
+| `idle` | The stage had nothing to do. |
+| `attention` | The tool exited 3 (a problem or the owner is needed), or some plans were refused a grant. |
+| `refused` | The tool exited 2 (or 1 for `write_grant.py`). For example, there is no intake config or no registered growth plan. |
+| `failed` | The tool exited with another code, or could not start. |
+| `timeout` | The tool ran for more than 3600 seconds. |
+| `unavailable` | The skill is not installed. |
+| `pending-R<n>` | The stage is not built yet. |
+| `skipped` | A cap stopped the tick before this stage, which would start a plan or run. The detail is `cap=<name>`. |
+
+A result that is not `ok` does not stop the tick. The tick goes on to the next stage, and
+exits 0 when every stage ran. Exit 2 is a usage error (for example a `--root` that is not
+a directory), `STOP: state-dir` or `STOP: no-grant`. Exit 3 is `STOP: locked`. The
+schedule's exits are in its section.
+
+## How the tick finds a skill
+
+Each skill is installed on its own, so the tick looks for each sibling by its directory
+name. It searches the roots that skill-contract `discover` searches, in this order:
+`$SKILL_CONTRACT_PATH`, the directory beside this skill, `<repo>/.agents/skills`,
+`<repo>/.claude/skills`, `~/.agents/skills` and `~/.claude/skills`. The directory has to hold
+a `SKILL.md` and the tool. `--skills-dir <dir>` or `$FACTORY_PIPELINE_SKILLS` replaces the
+whole list. The tests use it to point at stub skills.
+
+## Output
+
+The tick prints `TICK: start <time> root <repo>`, then (when it holds the lock) `TICK: grant <id> expires_at <time>`,
+then the stages, then `TICK: done stages=<n>`. A line that starts with two spaces and `<stage>|` is the stage
+tool's own stdout or stderr. The prefix keeps a tool's `STOP:` line apart from the tick's
+own lines. The growth signals themselves are not printed: they go only to `intake import`.
+
+## Human gates
+
+The tick removes no human gate. These stay with the owner:
 
 - A pull request to merge.
 - A release grant to accept.
 - A production deploy or a rollback.
 - A plan that waits for the owner's read.
 - An idea decision.
+- The pick policy, the intake config and the pipeline grant.

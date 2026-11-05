@@ -92,6 +92,24 @@ def _sd_quote(a, dollar=True):
     return '"%s"' % (a.replace("$", "$$") if dollar else a)
 
 
+def cron_schedule(interval_min):
+    """The five cron time fields for "every interval_min minutes". Under 60 it is
+    `*/n * * * *`. cron's minute field cannot step past 59, so 60 or more is written in
+    hours, and only a whole number of hours that divides 24 (1, 2, 3, 4, 6, 8, 12 or 24)
+    gives an even interval; any other value raises OSError rather than install a timer
+    that runs at a different interval than asked (factory-pipeline's schedule allows up
+    to 1440 minutes)."""
+    if 1 <= interval_min < 60:
+        return "*/%d * * * *" % interval_min
+    hours, rest = divmod(interval_min, 60)
+    if rest or not 1 <= hours <= 24 or 24 % hours:
+        raise OSError("cron cannot run every %d minutes: use under 60, or 60, 120, 180, "
+                      "240, 360, 480, 720 or 1440" % interval_min)
+    if hours == 24:
+        return "0 0 * * *"
+    return "0 * * * *" if hours == 1 else "0 */%d * * *" % hours
+
+
 def render(kind, run_id, argv, interval_min, path=None):
     """The files (or, for cron, the one tagged line) for run_id's timer. `path`, when
     given, is the PATH the timer runs argv with: a timer's own PATH is minimal
@@ -136,7 +154,7 @@ def render(kind, run_id, argv, interval_min, path=None):
             if "\\%" in a:
                 raise OSError("cron cannot express a literal \\% in a path")
         cmd = shlex.join(argv).replace("%", "\\%")
-        return {"crontab": "*/%d * * * * %s %s" % (interval_min, cmd, TAG % run_id)}
+        return {"crontab": "%s %s %s" % (cron_schedule(interval_min), cmd, TAG % run_id)}
     raise ValueError("unsupported timer kind: %r" % kind)
 
 

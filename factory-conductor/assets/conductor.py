@@ -34,6 +34,9 @@ Usage:
     python3 conductor.py usage --file F [--root <repo>]                # USAGE: | PROBLEM: line <n>: ...
     python3 conductor.py finish [--root <repo>] [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]
                                                                        # FINISH: <envelope path>
+    python3 conductor.py brief reviewer <task> --plan <task-plan envelope> --base <ref>
+                               [--head <ref>] [--root <repo>]          # the filled reviewer brief;
+                                                                       #   needs no run, writes nothing
 
 Gates. `init` validates the task-plan/v1 envelope with the vendored checker (C3-C7,
 fresh subjects, a schedulable plan, and a runnable command on every verify step: a task
@@ -231,6 +234,7 @@ import math  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
 import secrets  # noqa: E402
+import shlex  # noqa: E402
 import shutil  # noqa: E402
 import signal  # noqa: E402
 import subprocess  # noqa: E402
@@ -2472,6 +2476,157 @@ def _run_steps(task, steps, checkout, quiet=False):
 
 def _shown(argv):
     return " ".join(str(a) for a in argv) if isinstance(argv, list) else repr(argv)
+
+
+# The reviewer brief, word for word as the ```text block under "## The reviewer brief" in
+# SKILL.md (test_conductor_review_brief.py compares the two, so they cannot drift).
+REVIEWER_BRIEF = """\
+You are reviewing task <id> of an approved plan. You did not write this code. You MUST NOT
+dispatch subagents or edit any file.
+
+Task: <title>; requirement: <requirement text>
+Acceptance criteria, each with the command the plan pins as its proof: <each verify step's
+text and command>. A pinned command proves its criterion only if what it runs asserts that
+behaviour; a test filter that names no existing test proves nothing.
+Constraints: <the plan's constraints; the grant's decisions and defaults>
+Diff: <output of git --no-replace-objects -C <worktree> -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --text --no-color <run_branch>...<sha>, or that exact command for you to run>
+
+Building or running the code to check a claim is fine; leave every tracked file as it is.
+
+Escape hatches: when the diff touches a Rust (.rs) file, search its added lines for
+`assume(`, `admit(` and `external_body`. Each one tells a prover to trust a claim without
+proof, so a proof of that code proves less than it says. Name each hit as <path>:<line>.
+The answer to 1 is no for a diff that adds one, unless the requirement asks for it.
+
+Answer two questions about the diff:
+1. Does it satisfy the requirement?
+2. Does it do anything the task did not ask for?
+Verdict: pass only if the answer to 1 is yes and to 2 is no; otherwise fail.
+Report: Verdict: pass | fail, then one line of detail.
+"""
+
+# The slots of REVIEWER_BRIEF that `brief reviewer` fills, in the order it fills them.
+BRIEF_SLOT_ID = "<id>"
+BRIEF_SLOT_TITLE = "<title>"
+BRIEF_SLOT_REQUIREMENT = "<requirement text>"
+BRIEF_SLOT_STEPS = "<each verify step's\ntext and command>"
+BRIEF_SLOT_CONSTRAINTS = "<the plan's constraints; the grant's decisions and defaults>"
+BRIEF_SLOT_DIFF = ("<output of git --no-replace-objects -C <worktree> -c core.fsmonitor=false "
+                   "-c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --text "
+                   "--no-color <run_branch>...<sha>, or that exact command for you to run>")
+
+
+def review_diff_argv(worktree, base, head):
+    """The hardened, read-only diff command of the reviewer brief, as an argv."""
+    return ["git", "--no-replace-objects", "-C", worktree, "-c", "core.fsmonitor=false",
+            "-c", "core.hooksPath=/dev/null", "diff", "--no-ext-diff", "--no-textconv",
+            "--text", "--no-color", "%s...%s" % (base, head)]
+
+
+def _brief_text(value):
+    """Plan text for the reviewer brief: one inline code span (code()), with every control
+    character left after one_line() written as an \\xNN escape. Plans made from intake
+    items are untrusted, so no value can start a line of its own or a fake verdict."""
+    s = re.sub(r"[\x00-\x1f\x7f-\x9f]", lambda m: "\\x%02x" % ord(m.group()),
+               one_line(value))
+    return code(s)
+
+
+def _brief_command(argv):
+    """A pinned command as one fenced JSON list: every argument keeps its bounds, and a
+    newline inside one stays the two characters \\n."""
+    return code(json.dumps(argv))
+
+
+def _brief_constraints(plan):
+    """The plan's constraints and decisions, one fenced item per line, or 'none in the plan'."""
+    lines = []
+    for c in plan.get("constraints") or []:
+        if isinstance(c, dict):
+            lines.append("%s %s: %s" % (_brief_text(c.get("id")), _brief_text(c.get("type")),
+                                        _brief_text(c.get("text"))))
+    for d in plan.get("decisions") or []:
+        if isinstance(d, dict):
+            src = (" (source: %s)" % _brief_text(d.get("source"))) if d.get("source") else ""
+            lines.append("%s: %s -> %s%s" % (_brief_text(d.get("id")),
+                                              _brief_text(d.get("question")),
+                                              _brief_text(d.get("answer")), src))
+    if not lines:
+        return "none in the plan"
+    return "\n" + "\n".join("- " + ln for ln in lines)
+
+
+def fill_reviewer_brief(task, worktree, base, head, constraints):
+    """REVIEWER_BRIEF with every slot filled from one plan task, in one pass: a value is
+    never searched for slots, so plan text that names a slot cannot take its place."""
+    steps = task.get("verify") if isinstance(task.get("verify"), list) else []
+    shown = []
+    for n, step in enumerate(steps, 1):
+        step = step if isinstance(step, dict) else {}
+        shown.append("\n  %d. %s\n     command: %s"
+                     % (n, _brief_text(step.get("text")), _brief_command(step.get("command"))))
+    rids = task.get("requirement_ids") or []
+    requirement = _brief_text("%s: %s" % (", ".join(str(r) for r in rids),
+                                          one_line(task.get("title"))))
+    diff = shlex.join(review_diff_argv(worktree, base, head))
+    values = {BRIEF_SLOT_ID: _brief_text(task.get("id")),
+              BRIEF_SLOT_TITLE: _brief_text(task.get("title")),
+              BRIEF_SLOT_REQUIREMENT: requirement,
+              BRIEF_SLOT_STEPS: "".join(shown) + "\n",
+              BRIEF_SLOT_CONSTRAINTS: constraints,
+              BRIEF_SLOT_DIFF: "run this exact command; it only reads:\n" + diff}
+    slots = re.compile("|".join(re.escape(k) for k in sorted(values, key=len, reverse=True)))
+    text = slots.sub(lambda m: values[m.group(0)], REVIEWER_BRIEF)
+    return "".join(ln.rstrip() + "\n" for ln in text.splitlines())
+
+
+def _brief_fail(message):
+    sys.stderr.write("brief: %s\n" % message)
+    return 2
+
+
+def cmd_brief(args):
+    """Print the reviewer brief for one task of a plan envelope, filled from the plan,
+    with the diff command against --base. Needs no run, takes no lock and writes no file.
+    Exit 2 for an unreadable or invalid plan, a stale plan, an unknown task or a base or
+    head ref that git cannot resolve."""
+    root = os.path.abspath(args.root)
+    if not os.path.isdir(root):
+        return _brief_fail("root %s is not a directory" % root)
+    plan_path = os.path.abspath(args.plan)
+    if not os.path.isfile(plan_path):
+        return _brief_fail("cannot read plan %s" % plan_path)
+    rep = CC.check_envelope(plan_path, root=root)
+    if rep["violations"]:
+        for n, detail in rep["violations"]:
+            sys.stderr.write("FAIL: C%d: %s\n" % (n, detail))
+        return _brief_fail("invalid plan envelope %s" % plan_path)
+    if rep["stale"]:
+        return _brief_fail("the plan %s is stale: %s changed since it was written"
+                           % (plan_path, ", ".join(rep["stale"])))
+    with open(plan_path, "rb") as f:
+        doc = json.loads(f.read())
+    if doc.get("predicateType") != TASK_PLAN_KIND:
+        return _brief_fail("%s is a %s envelope, not task-plan/v1"
+                           % (plan_path, doc.get("predicateType")))
+    plan = doc["predicate"]["payload"]
+    try:
+        _, tasks = _plan_tasks(plan)
+    except PlanError as e:
+        return _brief_fail("invalid plan: %s" % e)
+    task = tasks.get(args.task)
+    if task is None:
+        return _brief_fail("unknown task %s: the plan has %s"
+                           % (args.task, ", ".join(sorted(tasks)) or "no tasks"))
+    for ref in (args.base, args.head):
+        r = None if ref.startswith("-") else subprocess.run(
+            ["git", "-C", root, "rev-parse", "--verify", "--quiet", "%s^{commit}" % ref],
+            capture_output=True, text=True)
+        if r is None or r.returncode != 0:
+            return _brief_fail("git cannot resolve %r to a commit in %s" % (ref, root))
+    sys.stdout.write(fill_reviewer_brief(task, root, args.base, args.head,
+                                         _brief_constraints(plan)))
+    return 0
 
 
 def cmd_review(args):
@@ -4893,6 +5048,14 @@ def main(argv=None):
     s.add_argument("--pr-cmd", default=None)
     s.add_argument("--retry-remote", action="store_true")
     s.set_defaults(fn=cmd_finish)
+    s = sub.add_parser("brief")
+    s.add_argument("kind", choices=("reviewer",))
+    s.add_argument("task")
+    s.add_argument("--plan", required=True)
+    s.add_argument("--base", required=True)
+    s.add_argument("--head", default="HEAD")
+    s.add_argument("--root", default=".")
+    s.set_defaults(fn=cmd_brief, no_lock=True)  # reads only: no run, no lock, no lease
     s = sub.add_parser("usage")
     s.add_argument("task", nargs="?", default=None)
     s.add_argument("--root", default=".")

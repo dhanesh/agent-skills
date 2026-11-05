@@ -15,6 +15,8 @@ The spec grammar for every section named here is in `references/spec-format.md`.
 - [The grant summary](#the-grant-summary)
 - [answers.json](#answersjson)
 - [What a grant can never cover](#what-a-grant-can-never-cover)
+- [The pipeline grant: `--pipeline`](#the-pipeline-grant---pipeline)
+- [Per-plan grants: `--under-pipeline`](#per-plan-grants---under-pipeline)
 
 ## The full loop
 
@@ -357,6 +359,107 @@ Revoke this grant at any time with
 `python3 "$SKILL_DIR/assets/contract_check.py" revoke-grant --root <repo> --id <grant id>`
 (the id is the grant file's name without `.json`). From then on, `check-grant` answers ASK
 for it, and every step it gated asks again. The same command with no `--id` is the kill
-switch: it revokes every live grant in the repo, an in-flight release's grant included, so
-that release stops too and ends only with `release abandon`. It tries every grant and prints
+switch: it revokes every live grant in the repo, of both kinds. That is each pipeline grant
+and each autonomy grant, derived or not, an in-flight release's grant included, so that
+release stops too and ends only with `release abandon`. It tries every grant and prints
 `REVOKED: <id>` or `FAILED: <id> <why>` for each, exiting non-zero if any failed.
+
+## The pipeline grant: `--pipeline`
+
+A pipeline grant (`pipeline-grant/v1`) is a standing grant. The owner accepts it once.
+Later, the pipeline derives one autonomy grant for each plan from it, inside its caps. A
+pipeline grant covers no action by itself. The rules for it are in the skill-contract
+SPEC, section "The pipeline grant".
+
+Show the owner the same kind of summary as for an autonomy grant: the gate table, the
+branch pattern, the expiry, the caps and the budget. Wait for an explicit yes. Then run:
+
+```sh
+python3 "$SKILL_DIR/assets/write_grant.py" --pipeline --root <repo> \
+  --answers <answers.json> --accepted-by "<owner's name>"
+```
+
+`--pipeline` takes no `--spec` and no `--plan`. The grant pins two files by sha256:
+
+- the pick policy that the owner registered with ops-intake, `.intake/pick-policy.json`;
+- the command allowlist, `.factory/check-commands.txt`.
+
+Both files must exist. If the owner changes one of them later, the grant becomes stale and
+covers nothing until the owner accepts a new one.
+
+The answers file for `--pipeline` accepts exactly these keys and refuses any other:
+
+- `branch_pattern`, `gate_policy`, `expires_at`: the same meaning as for an autonomy grant.
+- `caps`: exactly `max_plans_per_day`, `max_open_runs` and `max_dispatches_per_day`. Each
+  is an integer of 1 or more.
+- `budget`, `stop_on`, `reentry` (optional): the same keys as for an autonomy grant.
+  The budget is the ceiling for each derived grant.
+- `pick_policy_path`, `allowlist_path` (optional): a different path, relative to `--root`,
+  for one of the two pinned files.
+
+A filled example:
+
+```json
+{
+  "branch_pattern": "factory/*",
+  "gate_policy": {"read_only": "auto", "local_reversible": "auto",
+                  "push_branch": "grant", "open_pr": "grant"},
+  "expires_at": "2026-11-07T18:00:00Z",
+  "caps": {"max_plans_per_day": 3, "max_open_runs": 1, "max_dispatches_per_day": 40},
+  "budget": {"max_parallel": 2, "max_repairs_per_task": 2, "wall_clock_min": 1440},
+  "stop_on": ["a new dependency is needed"]
+}
+```
+
+The tool uses the reference checker's own checks, so it refuses what
+`contract_check.py check-pipeline-grant` refuses. It prints `REFUSED: <reason>` and exits 1
+when, for example:
+
+- `merge`, `deploy`, `spend`, `external_message` or `delete` has a gate other than `ask`;
+- a cap is missing, extra, or not an integer of 1 or more;
+- `expires_at` is in the past, or more than 7 days after now;
+- a pinned file is missing or is outside `--root`.
+
+Without `--accepted-by`, it exits 2 and writes no file. On success it lists the grant in
+`.git/info/exclude`, prints a `REVOKE:` line (this grant alone) and a `KILL-SWITCH:` line
+(every live grant), and ends with `GRANT: <path>`.
+
+`revoke-grant --id <pipeline grant id>` revokes the pipeline grant. It also stops every grant
+derived from it: `check-grant` answers ASK with the reason `pipeline` for a derived grant
+whose pipeline grant is revoked, superseded, expired, stale, tracked or changed. The
+`KILL-SWITCH:` line revokes the pipeline grant and every derived grant.
+
+## Per-plan grants: `--under-pipeline`
+
+The pipeline derives one autonomy grant for each plan. No human is asked, because the owner
+already accepted the pipeline grant:
+
+```sh
+python3 "$SKILL_DIR/assets/write_grant.py" --under-pipeline <pipeline grant id or path> \
+  --root <repo> --plan <task-plan envelope>
+```
+
+The derived grant copies the pipeline grant's branch pattern, gate policy, budget, stop
+rules, expiry and re-entry block. Its `derived_from` field names the pipeline grant by id
+and sha256. Its `grant-accepted` assertion names the owner who accepted the pipeline grant.
+
+The tool prints `REFUSED: <reason>`, exits 1 and writes nothing when one of these is true:
+
+- `check-pipeline-grant` does not answer VALID for the pipeline grant.
+- The allowlist file changed since the pipeline grant pinned it.
+- The plan is not a fresh task-plan envelope, or its spec fails
+  `spec_lint.py --unattended`. A derived grant runs unattended, so the light lint is not
+  enough. The tool prints each lint issue on a `FAIL:` line.
+- The plan did not come from an autopicked item or a `go` idea. An autopicked item has, as
+  its latest `pick` in `.skill-contract/intake/intake-log.jsonl`, `by: policy:<sha256>`
+  equal to the pipeline grant's pick-policy digest. A `go` idea has an `idea-brief/v1`
+  envelope with a `go` decision under `.skill-contract/ideas/envelopes/`. A hand-written
+  plan and a hand-picked item wait for the owner.
+- A check command does not match the allowlist, or a verify step has no command. The
+  plan waits for the owner's read.
+- `max_plans_per_day` grants already derive from this pipeline grant on today's UTC date.
+- `max_open_runs` derived grants have no run-result envelope yet.
+
+Every check fails closed. A file that the tool cannot read (the intake log, an idea
+envelope, an envelope that it counts) is a refusal, never a pass. On success it prints the
+`REVOKE:` and `KILL-SWITCH:` lines and ends with `GRANT: <path>`.

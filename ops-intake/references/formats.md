@@ -19,7 +19,7 @@ only as one-line code spans.
 | `gh-issues-json` | `gh issue list --repo OWNER/REPO --state all --limit 100 --json number,title,body,labels,state,createdAt,updatedAt,url` | any configured name | an item per issue |
 | `gh-runs-json` | `gh run list --branch <default> --json databaseId,workflowName,headBranch,headSha,event,status,conclusion,createdAt,updatedAt,url,attempt` | any configured name | failing runs, held until their jobs come in |
 | `gh-run-jobs-json` | `gh run view <run id> --json jobs`, imported with `--run <run id>` | any configured name | an item per failing job |
-| `git-rev-list` | `git rev-list <release commit>`, imported with `--commit <release commit>` | none (no `--source`) | the release history, for loop closing |
+| `git-rev-list` | `git rev-list <release commit>` (with subjects: see below), imported with `--commit <release commit>` | none (no `--source`) | the release history, for loop closing |
 | `intake-signals-jsonl` | your own transform, one signal per line | any configured name | an item per line, `trust: low` (flag `+low-trust`) |
 | `feedback-jsonl` | your transform of an inbox, review or form export, one message per line | any configured name | an item per topic, kind `feedback`, `trust: low` (flag `+low-trust`) |
 
@@ -93,6 +93,15 @@ There is no `jira-mcp`, `jira-acli` or `linear-mcp` format. The owner decided on
 
 - One 40-hex sha per line, as `git rev-list` prints them (newest first). The first line must
   be the `--commit` value. If it is not, nothing is stored.
+- A line can also hold the commit subject after the sha and one space or tab. Sync's `NEXT:`
+  line asks for this form: `git rev-list <commit> --no-commit-header --format=%H%x20%s`. Git
+  before 2.33 has no `--no-commit-header`; its `commit <sha>` header lines are skipped.
+- Intake keeps no subject text. When a subject ends with `(#<n>)`, as a GitHub squash merge
+  writes it (`Add X (#42)`), intake stores n in the history's `prs` list. A run-result whose
+  `pr.number` is n then resolves its item on that verified release. The match is exact: `(#4)`
+  and `(#142)` do not match PR 42, and a number before the end of the subject does not count.
+- The run-result field is optional: `"pr": {"number": 42}`, or null. Any other value is a
+  `PROBLEM:` and sync skips that envelope.
 - Empty output means the commit is not in this clone. Sync then prints, once,
   `NEXT: git fetch, then re-import: …` and the item waits at `needs-resolve`.
 - At most 20000 shas are kept per commit. Histories no planned item needs are dropped.
@@ -110,12 +119,21 @@ One JSON object per line:
  "evidence": [{"text": "p99 up", "key": "a"}]}
 ```
 
-- `source` must equal `--source`. `kind` is `release`, `ci` or `issue`. `severity` is 1 to 4.
+- `source` must equal `--source`. `kind` is `release`, `ci`, `issue` or `incident`. `severity`
+  is 1 to 4.
 - `evidence` is optional. A missing `key` becomes a hash of the text.
 - `trust` is always `low`. A `trust` field in the record is ignored.
 - Times: RFC 3339 with `Z`, `+HH:MM` or `+HHMM` (Jira's form), with or without fractions.
 - `kind` cannot be `feedback`. Only `feedback-jsonl` redacts customer text, so feedback comes
   in only through that format.
+- Kind `incident` was added on 2026-11-04 (an added value only, spec decision D8). incident-watch
+  writes one such line to `.skill-contract/incidents/signals.jsonl` when it opens an incident
+  record. Its `source` is `incident-watch`, its `source_id` is the record id and its severity
+  is 4. To read it, add the source `incident-watch` with the format `intake-signals-jsonl` to
+  the config. Then run
+  `intake import --format intake-signals-jsonl --source incident-watch .skill-contract/incidents/signals.jsonl`.
+  A second import of the same file adds no item and no count, because the item key and the
+  evidence key stay the same.
 
 ### feedback-jsonl
 
@@ -244,7 +262,8 @@ Write it with `intake init --answers <file>`. It is committed. It holds only dat
   is refused. So are `command`, `base_url` and `*_env` inside a section.
 - A source name is 1 to 50 letters, digits, `_`, `.` or `-`, and starts with a letter or digit.
   The name goes into `NEXT:` lines that you run in a shell, so other characters are refused.
-- Each source has exactly `enabled` (true or false) and `formats` (a non-empty list).
+- Each source has `enabled` (true or false) and `formats` (a non-empty list), and can have
+  `sweep` (see below). No other key is allowed.
 - The name `release` is only for `release-envelope` and `release-status`, and those two
   formats are only allowed there.
 - `git-rev-list` is auxiliary. No source can list it.
@@ -252,6 +271,56 @@ Write it with `intake init --answers <file>`. It is committed. It holds only dat
 - `github.repo` looks like `owner/name`. `jira.jql`, `linear.team` and `linear.filter` are
   short strings. You use them when you run the CLI or MCP tool; intake does not.
 - `weights` maps configured source names to numbers. The default is 1.
+- A source can also have `sweep`: a list of 1 to 10 entries. Each entry has exactly `format`
+  and `argv`. `format` is one of the source's formats. It cannot be `release-envelope` or
+  `gh-run-jobs-json`. `argv` is a list of 1 to 64 strings with no control characters, and the
+  first string is not a flag. `intake sweep` runs each `argv` with no shell, in the repo root,
+  with no stdin, for at most 300 seconds. It imports what the command prints as that format.
+  The owner writes these entries. Item content never adds one.
+
+  ```json
+  "github": {"enabled": true, "formats": ["gh-issues-json"],
+             "sweep": [{"format": "gh-issues-json",
+                        "argv": ["gh", "issue", "list", "--repo", "owner/name", "--state", "all",
+                                 "--limit", "100", "--json",
+                                 "number,title,body,labels,state,createdAt,updatedAt,url"]}]}
+  ```
+
+## Pick policy: `.intake/pick-policy.json`
+
+The owner writes it and registers it with `register-policy --by <name>` before any
+`autopick`. It is committed, like the config. It holds only data.
+
+```json
+{"kinds": ["ci", "release"], "min_rank": 300,
+ "formats": ["gh-run-jobs-json", "release-status"], "max_picks_per_day": 2}
+```
+
+- All four keys are required. Any other key is refused.
+- `kinds` is a non-empty list of distinct kinds: `release`, `ci`, `issue`, `feedback`,
+  `incident`.
+- `min_rank` is a number of 0 or more. An item matches only when its rank is at least this.
+- `formats` is a list of distinct source formats (`git-rev-list` is not one). It can be empty.
+- `max_picks_per_day` is a whole number from 1 to 100.
+- A registration pins the sha256 of the file's bytes, the owner's name and the time, in the
+  git-ignored `.skill-contract/intake/policy-registration.json`. A name that starts with the
+  word "agent" (`agent:claude`) is refused.
+- Any edit to the file changes its sha256, a whitespace edit too. `autopick` then stops with
+  `STOP: policy-changed` (exit 2) until the owner registers again.
+- A low-trust item (`intake-signals-jsonl`, `feedback-jsonl`) matches only when `formats`
+  names every format the item was imported from. Each item records these formats in its
+  `formats` field. An item imported before this field existed has no recorded format, so it
+  never matches. The format does not filter a normal-trust item.
+- `autopick` lists the `new` items whose kind, rank and format are inside the policy. Then it
+  picks them, highest rank first and by id on a tie, until `max_picks_per_day` is reached.
+  The maximum counts the picks of the UTC calendar day across runs: the intake log lines
+  with event `pick` and a `by` that starts with `policy:`. A hand `pick` does not count.
+- The count fails closed. A log line that is not a JSON record, or a `pick` line without a
+  string `by` and a UTC `at`, stops `autopick` with `STOP: log-unreadable: <log> line <n> …`
+  (exit 2). It picks nothing until the owner repairs that line. Each log append first ends
+  a torn last line, so a new record never merges onto it.
+- Each autopick writes the same intake-item/v1 envelope as `pick`. The log line has
+  `by: policy:<sha256>`, with the sha256 of the registration in force.
 
 ## Ranking
 
@@ -292,6 +361,9 @@ drops it flags `plan-superseded`.
 | `drop-run <run id> --by NAME --reason TEXT` | `NEXT: run <id> dropped`; logs a `drop-run` event; `STOP:` (exit 2) for an unknown or non-digit id |
 | `link <keep> <other>` | `NEXT: merged <other> into <keep>`; `STOP:` when `<other>` is `picked` or `planned`. Later signals for `<other>` go to `<keep>` |
 | `status` | `SYNC: <n> items … regressed=<r>` |
+| `register-policy --by NAME [--reason TEXT]` | `REGISTERED: <sha256> by <name> at <time>`, or `REGISTERED: <sha256> (no change since the last registration)`; logs a `register-policy` event; `STOP: policy: …` (exit 2) for a missing or invalid policy or an `agent` name |
+| `autopick` | `POLICY: <sha256> by <name> at <time>`, one `MATCH: <id> <flag> <rank> <title>` per item inside the policy, then `ITEM:` and `NEXT: run spec-first-planning with <envelope path>` per pick, `DAILY: <UTC date> picked <k> of <max>` and `AUTOPICK: matched <n> picked <p>`; logs a `pick` event with `by: policy:<sha256>` per pick; `STOP: policy-unregistered` or `STOP: policy-changed` (exit 2) when the file has no registration that matches it; `STOP: log-unreadable` (exit 2, no pick) when a log line cannot be counted |
+| `sweep` | for each sweep entry of an enabled source, in source-name order: the `IMPORT:` and `PROBLEM:` lines of its import, or `PROBLEM: sweep <source> <format>: <reason>` when the command cannot start, times out, exits non-zero or its import is refused; then `SWEEP: <n> commands ok <k> failed <f>`. Exit 3 when a command failed or an import had problems. `STOP:` (exit 2) when no enabled source has a sweep entry |
 | `formats` | `FORMAT:` lines (needs no config) |
 
 The flag is `<state>`, plus `+regressed`, plus for `picked` and `planned` items one of
@@ -308,6 +380,8 @@ config, unknown format, refused input or an unreadable queue (`STOP:` line, noth
 | Path | Committed | What |
 |---|---|---|
 | `.intake/config.json` | yes | the config |
+| `.intake/pick-policy.json` | yes | the pick policy the owner registers |
+| `.skill-contract/intake/policy-registration.json` | no | every pick-policy registration: sha256, name, time, reason |
 | `.skill-contract/intake/queue.json` | no (git-ignored) | the queue, written by atomic replace |
 | `.skill-contract/intake/intake-log.jsonl` | no | an append-only log of every change |
 | `.skill-contract/intake/items/<id>.json` | no | the snapshot that `pick` pins |
