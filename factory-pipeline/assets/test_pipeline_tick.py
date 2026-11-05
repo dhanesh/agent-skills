@@ -24,8 +24,8 @@ import pipeline_testkit as K  # noqa: E402
 TOOL = os.path.join(HERE, "pipeline.py")
 ORDER = ["sweep", "growth-review", "idea-follow-up", "autopick", "plan", "derive-grant",
          "build", "release-stage", "digest"]
-PENDING = {"idea-follow-up": "pending-R20", "build": "pending-R18",
-           "release-stage": "pending-R19", "digest": "pending-R21"}
+PENDING = {"idea-follow-up": "pending-R20", "release-stage": "pending-R19",
+           "digest": "pending-R21"}
 
 
 class Fixture(unittest.TestCase):
@@ -87,6 +87,8 @@ class TestTick(Fixture):
             self.assertEqual(res[stage][0], word, stage)
         # R17: the grant names no planner, so the plan stage plans nothing.
         self.assertEqual(res["plan"], ["unavailable", "no-planner", "picked=1"])
+        # R18: build ships; with no derived grant it has nothing to build.
+        self.assertEqual(res["build"], ["idle", "grants=0"])
 
     def test_growth_bytes_reach_intake_import_on_stdin(self):
         self.tick()

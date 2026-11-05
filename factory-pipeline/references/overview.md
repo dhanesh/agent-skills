@@ -1,7 +1,7 @@
 # factory-pipeline: the stages of one tick
 
-Status: partly built. `pipeline tick` ships. Four of its nine stages are not built yet and
-report `pending-R<n>`. The design is `docs/factory/2026-11-04-autonomous-factory-spec.md`
+Status: partly built. `pipeline tick` ships. Three of its nine stages are not built yet
+and report `pending-R<n>`. The design is `docs/factory/2026-11-04-autonomous-factory-spec.md`
 in the agent-skills repository (requirements R12 to R21).
 
 ## The lock, before everything else
@@ -69,12 +69,12 @@ A detail can follow the result, for example `exit=3` or `picked=2`.
 | `autopick` | Picks items inside the registered pick policy. The tick keeps each picked intake-item envelope for the plan stage. | `ops-intake`: `intake autopick` |
 | `plan` | For each picked envelope, writes the spec skeleton into the git-ignored spec directory, runs the owner's planner to complete it, and hands the plan on only when lint and the allowlist pass (R17). See "The plan stage". With no pick, the result is `idle`. | `spec-first-planning`: `intake_request.py` (or `idea_request.py`), `spec_lint.py --unattended`, `spec_to_tasks.py --allowlist`, `spec_to_tasks.py --envelope`; the planner from the grant's `planner` field |
 | `derive-grant` | For each plan that the plan stage hands on, derives a per-plan grant from the pipeline grant. With no plan, the result is `idle`. | `spec-first-planning`: `write_grant.py --under-pipeline <grant> --root <repo> --plan <plan>` |
-| `build` | Not built yet (R18). Result: `pending-R18`. | (`factory-conductor`, later) |
+| `build` | Starts one factory-conductor run for the oldest derived grant that no run names yet, while no run in the root is unfinished (R18). See "The build stage". With nothing to build, the result is `idle`. | `factory-conductor`: `conductor init --plan <plan> --root <repo>`, then `conductor reentry install --root <repo>` when the grant has a reentry block; `spec-first-planning`: `contract_check.py check-grant` |
 | `release-stage` | Not built yet (R19). Result: `pending-R19`. | (`release-conductor`, later) |
 | `digest` | Not built yet (R21). Result: `pending-R21`. | none |
 
-The one-tick lock (R14), the caps (R15), the plan stage (R17) and the schedule (R16) ship;
-see their sections.
+The one-tick lock (R14), the caps (R15), the plan stage (R17), the build stage (R18) and
+the schedule (R16) ship; see their sections.
 
 ## The plan stage
 
@@ -260,6 +260,104 @@ from the exit codes and output of `spec_lint.py` and `spec_to_tasks.py`.
 Before each plan after the first, the tick checks the caps again. At a cap, the rest of
 the picks wait.
 
+## The build stage
+
+The build stage (R18) hands one derived grant to factory-conductor. The tick does not
+drive the run. The conductor's own loop and its re-entry timer do that.
+
+factory-conductor works on one run in each repository: every command acts on the newest
+run, and a newer run makes the timer of an older unfinished run remove itself. A second
+run in the same tick would strand the first one. So the stage starts at most one run in
+each tick. A grant that does not get built waits, and a later tick builds it.
+
+1. The stage lists the unbuilt grants. These are the grants derived from the tick's
+   pipeline grant (in this tick or in an earlier one) that no
+   `.skill-contract/runs/<run>/state.json` names in `grant_id`. A crashed tick, a
+   dispatch-cap stop or a busy root can leave such a grant. The oldest grant goes first,
+   so no grant waits for ever behind newer ones.
+2. When there is a grant to build, the tick checks the dispatch cap once, before the one
+   init (see "The caps").
+3. When a conductor run in the root is not finished (its `state.json` has no `finished`
+   value), every grant waits with `unfinished-run=<run id>`.
+4. When `git status --porcelain` shows a change or an untracked file, every grant waits
+   with `root-dirty`.
+5. For each grant, oldest first, the stage finds its plan: the grant subject that is a
+   `task-plan/v1` envelope. Then it runs spec-first-planning's `contract_check.py
+   check-grant --action local_reversible --subject <plan> --json`. This is the same
+   check that `conductor init` makes. It catches a revoked, superseded, expired or stale
+   grant, a pipeline grant that the kill switch revoked, a detached HEAD, a default
+   branch and a branch outside the grant's `branch_pattern`. `write_grant.py
+   --under-pipeline` copies that pattern from the pipeline grant. A grant that is not
+   covered waits with `grant-<reason>`, and the stage tries the next grant.
+6. The stage checks the evidence gate (see below). A mismatch waits, and the stage tries
+   the next grant.
+7. The stage runs `conductor init --plan <plan> --root <repo>` for the first grant that
+   passes. It prints `BUILD: started <grant> run=<run id> gate=<on|off> plan=<plan>`.
+   Every later grant waits with `unfinished-run=<the new run id>`.
+8. When the grant has a `reentry` block, the stage then runs
+   `conductor reentry install --root <repo>`. This is the step that factory-conductor
+   documents right after `init` for an unattended start: the owner's timer resumes the
+   run.
+
+Each grant that waits prints `BUILD: waiting <grant> <reason>` and goes on the digest
+list. The reasons are:
+
+| Reason | Meaning |
+|---|---|
+| `unfinished-run=<run id>` | A conductor run in the root is not finished. |
+| `root-dirty` | The work tree has a change or an untracked file. |
+| `root-unknown` | git cannot report the status of the work tree. |
+| `grant-<reason>` | `check-grant` does not cover the plan, for example `grant-revoked`, `grant-default-branch`, `grant-branch` or `grant-pipeline`. |
+| `evidence-gate-off` | The repository has a verify skill, but the plan has no `verification` block. |
+| `verify-skill-missing` | The plan's `verification` block names a verify skill that is not in the repository. |
+| `verification-invalid` | The plan's `verification` block is not an object with a `skill` string. |
+| `no-plan`, `grant-unreadable`, `plan-unreadable` | The stage cannot read the grant or its plan. |
+| `init-exit=<n>` | `conductor init` failed. A later tick tries again. |
+| `one-build-per-tick` | Another grant's init failed in this tick. |
+| `no-factory-conductor` | factory-conductor is not installed. |
+
+The stage itself never checks out, creates or resets a branch, and it never edits a
+plan. `conductor init` cuts the run branch `factory/<plan slug>` from the branch that the
+root has checked out. The owner keeps the root on a branch that the grant's
+`branch_pattern` covers.
+
+The STAGE line is one of these:
+
+- `STAGE: build ok built=1 waiting=<n> gate=<on|off>`, with `reentry=<result>` when the
+  stage ran `reentry install`;
+- `STAGE: build attention built=0 waiting=<n>` when every grant waits;
+- `STAGE: build idle grants=0` when there is nothing to build;
+- `STAGE: build unavailable factory-conductor grants=<n>`;
+- the result word of `conductor init` when it fails, for example
+  `STAGE: build refused built=0 waiting=1 init exit=2`.
+
+### The evidence gate
+
+factory-conductor has no `init` flag for its evidence gate. The gate is on only when the
+plan envelope has a `verification` block (`{"skill": <verify skill dir>}`).
+spec-first-planning writes that block from the spec's `Verify skill:` line. The derived
+grant pins the sha256 of the plan, so the stage cannot add or remove the block. The
+stage thus builds:
+
+- a plan with a `verification` block only when the block names a `verify-<app>`
+  directory in the repository with `SKILL.md` and `features/` (gate on);
+- a plan with no block only when the repository has no verify skill under
+  `.claude/skills/verify-*` or `.agents/skills/verify-*` (gate off).
+
+In practice, every plan from the real plan stage is gated, because
+`spec_lint.py --unattended` refuses a spec with no `Verify skill:` line.
+
+### The tamper baseline of the build stage
+
+The build stage runs factory-conductor's code after the planner. So every file of the
+factory-conductor skill is in the same tamper baseline as spec-first-planning's files, at
+its real path, with every symlink on the way. A planner that changes `conductor.py`, or
+any file beside it, poisons the tick before any conductor call:
+`STOP: planner-tamper tools` and `STAGE: build skipped planner-tamper=tools`. The stage
+checks the baseline again before each conductor call and before `check-grant`. Every
+conductor call runs as `python -I -S -B` with the pinned interpreter. After a planner,
+it also runs with the private `PATH`.
+
 ## The caps, before each stage that starts a plan or run
 
 The pipeline grant has three caps (R15). Each is an integer of 1 or more, and each counts
@@ -297,8 +395,8 @@ When a count is equal to or more than its cap, the tick:
 4. runs the stages that only read, sweep or report, and ends
    `TICK: done stages=9 cap=<name>[,<name>]` with exit 0.
 
-The tick checks the dispatch cap before a build starts. It does not stop a build that is
-already running. A build that starts below the cap can thus pass it: factory-conductor's
+The tick checks the dispatch cap once before a build starts, because a tick starts at most
+one build. It does not stop a build that is already running. A build that starts below the cap can thus pass it: factory-conductor's
 own per-run `max_dispatches` budget bounds that run. So one tick passes the daily cap by
 at most that budget, and the next build, or the next tick, stops.
 
@@ -383,6 +481,7 @@ them is called.
 | `timeout` | The tool ran for more than 3600 seconds. |
 | `unavailable` | The skill is not installed. |
 | `pending-R<n>` | The stage is not built yet. |
+| `built=<n> waiting=<n>` | The build stage started `n` runs (0 or 1) and left `n` grants waiting. |
 | `skipped` | A cap stopped the tick before this stage, which would start a plan or run. The detail is `cap=<name>`. |
 
 A result that is not `ok` does not stop the tick. The tick goes on to the next stage, and

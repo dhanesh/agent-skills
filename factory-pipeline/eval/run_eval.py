@@ -13,14 +13,17 @@ grant (none, or revoked), the tick runs no stage, prints `STOP: no-grant`, and e
 The promise of R15: with an open run at max_open_runs 1, the tick prints `STOP: cap
 max_open_runs`, skips autopick, plan and derive-grant (no new plan starts), does not
 gate build on that cap, and still runs the rest. The promise of R17: with no planner in
-the grant, the plan stage says `unavailable no-planner` and hands on no plan.
+the grant, the plan stage says `unavailable no-planner` and hands on no plan. The promise
+of R18: a derived grant is built once by a stub `conductor init`, with the evidence gate
+on exactly when the repository has a verify skill, and the next tick does not build it
+again.
 The harness builds stub skills with assets/pipeline_testkit.py in a tempdir, writes a real
 pipeline grant into the fixture repo with the testkit, runs the shipped
 assets/pipeline.py against them, and a model-free grader checks the transcript. The docs check keeps every path the
 docs name real, and keeps the old skeleton line out.
 
 Negative fixtures feed the grader known-bad transcripts (order swapped, a stage missing,
-a fake `ok` for an unbuilt stage, a plan stage that hands on a plan with no planner, a non-zero exit, a no-grant tick that ran a stage or
+a fake `ok` for an unbuilt stage, a build with the wrong evidence gate or two inits, a plan stage that hands on a plan with no planner, a non-zero exit, a no-grant tick that ran a stage or
 exited 0, a cap stop with no STOP line, a stage that ran after a cap stop, a reporting
 stage skipped by a cap, a build skipped by an open-runs cap) and a docs copy that names a missing
 script, and require the grader to reject each one.
@@ -43,8 +46,8 @@ TOOL = os.path.join(SKILL, "assets", "pipeline.py")
 STALE = "no command ships yet"
 ORDER = ["sweep", "growth-review", "idea-follow-up", "autopick", "plan", "derive-grant",
          "build", "release-stage", "digest"]
-PENDING = {"idea-follow-up": "pending-R20", "build": "pending-R18",
-           "release-stage": "pending-R19", "digest": "pending-R21"}
+PENDING = {"idea-follow-up": "pending-R20", "release-stage": "pending-R19",
+           "digest": "pending-R21"}
 WORDS = {"ok", "idle", "attention", "refused", "failed", "timeout", "unavailable"}
 PATH_RE = re.compile(r"(?<![\w.-])((?:references|assets|scripts|eval)/[\w./-]*\w)")
 GRAPH_BLOCK = re.compile(r"<!-- skill-graph:start -->.*?<!-- skill-graph:end -->", re.S)
@@ -139,7 +142,7 @@ def cap_errors(stdout, code, cap):
                 errors.append("%s says %s after a cap stop" % (s[0], " ".join(s[1:])))
             if stops and i < stops[0]:
                 errors.append("%s ran before the STOP line" % s[0])
-        elif s[0] == "build" and s[1:2] != ["pending-R18"]:
+        elif s[0] == "build" and s[1:2] == ["skipped"]:
             errors.append("build says %s, but a plans or open-runs cap does not gate it"
                           % " ".join(s[1:]))
         elif len(s) > 1 and s[1] == "skipped":
@@ -161,6 +164,35 @@ def plan_errors(stdout):
     if res.get("derive-grant", [])[:1] != ["idle"]:
         errors.append("derive-grant says %s, want idle" % " ".join(res.get("derive-grant", [])))
     return errors
+
+
+def build_errors(stdout, inits, gate):
+    """Model-free grader for a tick that builds one derived grant (R18): build says `ok
+    built=1 ... gate=<gate>`, and the stub conductor got exactly one init, whose plan
+    carries the evidence gate `gate` (on: a `verification` block)."""
+    errors = []
+    res = {ln.split()[1]: ln.split()[2:] for ln in stdout.splitlines()
+           if ln.startswith("STAGE: ")}
+    b = res.get("build", [])
+    if b[:2] != ["ok", "built=1"] or "gate=%s" % gate not in b:
+        errors.append("build says %s, want ok built=1 gate=%s" % (" ".join(b), gate))
+    if len(inits) != 1:
+        errors.append("%d conductor inits, want 1" % len(inits))
+    elif inits[0].get("gate") != gate:
+        errors.append("the conductor got gate=%s, want %s" % (inits[0].get("gate"), gate))
+    return errors
+
+
+def build_tick(tmp, label, verify):
+    """A build fixture (pipeline_testkit.build_repo) with one derived grant whose plan is
+    gated exactly when the repo has a verify skill; returns (repo, skills, run)."""
+    repo, sk, pid = K.build_repo(os.path.join(tmp, label), verify=verify)
+    K.built_grant(repo, pid, gated=verify)
+    return repo, sk, lambda: subprocess.run(
+        [sys.executable, TOOL, "--root", repo, "--skills-dir", sk, "tick"],
+        capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
+        env=dict(os.environ, FACTORY_CONDUCTOR_TIMER_DRYRUN="1",
+                 FACTORY_CONDUCTOR_TIMER_HOME=os.path.join(tmp, label, "timer")))
 
 
 def stop_errors(stdout, code):
@@ -262,6 +294,33 @@ def main():
               "starts", not errs and "autopick" not in [c["key"] for c in K.calls(sk)],
               "; ".join(errs)[:120])
 
+        for label, verify, gate in (("build-gated", True, "on"),
+                                    ("build-plain", False, "off")):
+            _repo, sk, run = build_tick(tmp, label, verify)
+            cp = run()
+            inits = [c for c in K.conductor_calls(sk) if c["argv"][0] == "init"]
+            errs = build_errors(cp.stdout, inits, gate)
+            check("build %s a verify skill: one conductor init, evidence gate %s"
+                  % ("with" if verify else "without", gate), not errs,
+                  "; ".join(errs)[:120])
+            if verify:
+                first = cp.stdout
+                cp = run()
+                again = [c for c in K.conductor_calls(sk) if c["argv"][0] == "init"]
+                check("the next tick does not init the built grant again",
+                      len(again) == 1 and "STAGE: build idle grants=0" in cp.stdout,
+                      "%d inits" % len(again))
+                for nlabel, out, got, want in (
+                    ("build-wrong-gate", first, [dict(inits[0], gate="off")], "want on"),
+                    ("build-two-inits", "STAGE: build ok built=1 waiting=0 gate=on",
+                     inits * 2, "2 conductor inits"),
+                    ("build-not-ok", "STAGE: build pending-R18 grants=1", inits,
+                     "build says"),
+                ):
+                    bad = build_errors(out, got, "on")
+                    check("grader rejects negative fixture %s" % nlabel,
+                          any(want in e for e in bad), "; ".join(bad)[:100])
+
         cp, sk = run_tick(tmp, "no-grant", grant=False)
         errs = stop_errors(cp.stdout, cp.returncode)
         check("no pipeline grant: STOP: no-grant, exit 2, no stage ran",
@@ -288,8 +347,8 @@ def main():
         for label, out, code, want in (
             ("order-swapped", swapped, 0, "stages"),
             ("digest-missing", good.rsplit("\n", 1)[0], 0, "stages"),
-            ("fake-ok-build", good.replace("build pending-R18", "build ok"), 0,
-             "build says ok"),
+            ("fake-ok-release", good.replace("release-stage pending-R19",
+                                             "release-stage ok"), 0, "release-stage says ok"),
             ("non-zero-exit", good, 1, "exit 1"),
         ):
             bad = tick_errors(out, code)
@@ -310,7 +369,7 @@ def main():
             ["STAGE: sweep ok", "STAGE: growth-review ok", "STAGE: idea-follow-up pending-R20",
              "STOP: cap max_open_runs count=1 limit=1 stage=autopick"]
             + ["STAGE: %s skipped cap=max_open_runs" % s for s in GATED]
-            + ["STAGE: build pending-R18 grants=0", "STAGE: release-stage pending-R19",
+            + ["STAGE: build idle grants=0", "STAGE: release-stage pending-R19",
                "STAGE: digest pending-R21"])
         for label, out, want in (
             ("cap-no-stop-line", capped.replace("STOP: cap", "NOTE: cap"), "0 STOP"),
@@ -319,7 +378,7 @@ def main():
             ("cap-digest-skipped", capped.replace("digest pending-R21",
                                                   "digest skipped cap=max_open_runs"),
              "digest was skipped"),
-            ("cap-build-deadlock", capped.replace("build pending-R18 grants=0",
+            ("cap-build-deadlock", capped.replace("build idle grants=0",
                                                   "build skipped cap=max_open_runs"),
              "does not gate it"),
         ):
