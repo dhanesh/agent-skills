@@ -32,7 +32,12 @@ per stage, optionally followed by a detail such as `exit=3` or `picked=2`:
   growth-review   growth-review `growth auto --source NAME`, whose stdout bytes go to
                   ops-intake `intake import --format intake-signals-jsonl --source NAME`
                   (two argv subprocesses; the bytes pass through Python, no shell pipe)
-  idea-follow-up  not built yet (R20): `pending-R20`
+  idea-follow-up  idea-validation `ideas list` and `ideas status <slug>` (read-only, no
+                  --today): one `IDEA: due` line and one digest entry per undecided idea
+                  with an assumption due within 3 days or expired; then each go
+                  idea-brief envelope that `check-envelope` accepts and that has no plan
+                  yet (no spec, no task-plan naming it, no idea-plans.jsonl record) joins
+                  the plan stage's list (R20; see stage_idea_follow_up())
   autopick        ops-intake `intake autopick`; each picked intake-item envelope is kept
                   for the plan stage
   plan            for each picked envelope (R17), spec-first-planning's intake_request.py
@@ -283,7 +288,9 @@ class Tick:
         self.grant_path = None  # the pipeline grant file check_grant() judged VALID
         self.planner = None     # payload.planner of that grant: the owner's argv (R17)
         self.allowlist = None   # payload.allowlist of that grant: {path, sha256} (R17)
-        self.picked = []    # intake-item envelopes autopick wrote (for the plan stage)
+        self.picked = []    # intake-item envelopes autopick wrote, and the go idea-brief
+                            # envelopes the idea stage hands on (for the plan stage)
+        self.ideas = {}     # {idea envelope in picked: slug} (R20)
         self.plans = []     # task-plan envelopes the plan stage hands on (R17)
         self.grants = []    # (plan, derived grant) pairs for the build stage (R18)
         self.derived = None  # the derived grant ids of the newest cap count (R18)
@@ -489,8 +496,239 @@ def stage_growth_review(tick):
                                     "import " + exit_detail(icode) if icode else "")
 
 
+# ── the idea follow-up stage (R20) ──────────────────────────────────────────────────────
+# The stage only reads idea-validation's state. It runs that skill's read-only commands
+# (IDEA_READ: `list` and `status <slug>`) through py(), never a writing one (register,
+# record, decide, handoff, new) and never `--today`: experiments and decisions stay the
+# human's (B1). It runs before the first planner, so it is outside the tamper tripwire
+# (D18). Two jobs:
+#   due:  every undecided, registered idea with an assumption whose deadline is 0 to
+#         IDEA_DUE_DAYS days away (status not pass, fail or expired), or that expired
+#         (status `expired`, or a deadline before today with no pass or fail). Each such
+#         idea prints one `IDEA: due ...` line and waits in the digest with the command
+#         the owner runs next (`ideas status <slug>`). The status comes from `ideas
+#         status`; the deadline from the idea's state.json (the documented storage).
+#   go:   every idea-brief/v1 envelope under IDEA_ENVELOPES whose decision is `go` and
+#         whose slug has no plan yet (planned()) goes to tick.picked, next to the
+#         envelopes autopick picks, so the plan stage's lint, allowlist, caps and tamper
+#         rules apply unchanged. Each envelope is checked first with spec-first-planning's
+#         `contract_check.py check-envelope --root R`; a bad one waits with a reason.
+IDEAS = ("idea-validation", "assets/ideas.py")
+IDEA_READ = ("list", "status")  # the only ideas.py commands the tick ever runs
+IDEA_DUE_DAYS = 3
+IDEA_ENVELOPES = ".skill-contract/ideas/envelopes"
+IDEA_STATE = ".skill-contract/ideas/%s/state.json"
+IDEA_PLANNED = "idea-plans.jsonl"  # in PIPELINE_DIR: the go ideas whose plan was handed on
+IDEA_LIST_LINE = re.compile(r"^IDEA: (\S+) (\S+) decision=(\S+)( closed)?(?: |$)")
+ASSUMPTION_LINE = re.compile(r"^ASSUMPTION: (A[1-9][0-9]{0,3}) (\S+) ")
+ENVELOPE_ID = re.compile(r"^idea-brief-v1-[0-9A-Za-z-]{1,80}\.json\Z")
+
+
+def idea_dates(tick, slug):
+    """{assumption id: deadline date} of the idea's latest registration, read from its
+    state.json (inside the root, no symlink out of it), or {} when it cannot be read."""
+    rel = IDEA_STATE % slug
+    if inside(tick.root, rel) != rel:
+        return {}
+    st = _load_json(os.path.join(tick.root, *rel.split("/")))
+    try:
+        reg = st["registrations"][-1]["assumptions"]
+        out = {}
+        for aid, a in reg.items():
+            d = datetime.date.fromisoformat(a["by"])
+            out[aid] = d
+        return out
+    except (TypeError, KeyError, IndexError, ValueError, AttributeError):
+        return {}
+
+
+def idea_due(tick, tool, slug, today):
+    """[(assumption id, deadline, 'due' or 'expired')] of one idea, from `ideas status`."""
+    _w, code, out = run_tool(tick, "idea-follow-up", py(tool, "--root", tick.root,
+                                                       "status", slug), echo_stdout=False)
+    if code != 0:
+        return None
+    dates = idea_dates(tick, slug)
+    rows = []
+    for line in out.decode("utf-8", "replace").splitlines():
+        m = ASSUMPTION_LINE.match(line)
+        if not m or m.group(1) not in dates:
+            continue
+        aid, status, by = m.group(1), m.group(2), dates[m.group(1)]
+        if status in ("pass", "fail"):
+            continue
+        if status == "expired" or by < today:
+            rows.append((aid, by, "expired"))
+        elif (by - today).days <= IDEA_DUE_DAYS:
+            rows.append((aid, by, "due"))
+    return rows
+
+
+def ideas_due(tick, tool):
+    """List the ideas with an assumption due within IDEA_DUE_DAYS days or expired. Return
+    (count of such ideas, the worst result word of the tool calls)."""
+    word, code, out = run_tool(tick, "idea-follow-up", py(tool, "--root", tick.root, "list"),
+                               echo_stdout=False)
+    if code != 0:
+        return 0, word
+    today = datetime.date.today()  # the same clock ideas.py reads without --today
+    n = 0
+    for line in out.decode("utf-8", "replace").splitlines():
+        m = IDEA_LIST_LINE.match(line)
+        if not m or not IDEA_SLUG.match(m.group(1)):
+            continue
+        slug, verdict, decision, closed = m.groups()
+        if verdict in ("unregistered", "unreadable") or decision != "none" or closed:
+            continue  # nothing to test yet, or the human already decided
+        rows = idea_due(tick, tool, slug, today)
+        if rows is None:
+            word = worse(word, "attention")
+            continue
+        if not rows:
+            continue
+        n += 1
+        what = ",".join("%s@%s%s" % (aid, by.isoformat(), "(expired)" if k == "expired"
+                                     else "") for aid, by, k in rows)
+        nxt = "ideas status %s" % slug
+        print("IDEA: due %s %s next: %s" % (slug, what, nxt))
+        tick.waiting.append(("idea", slug, "assumptions due or expired: %s; run `%s`"
+                             % (what, nxt)))
+    return n, word
+
+
+def idea_planned_slugs(root):
+    """The slugs the idea stage recorded as planned in PIPELINE_DIR/IDEA_PLANNED."""
+    out = set()
+    try:
+        with open(os.path.join(_pipeline_dir(root), IDEA_PLANNED), encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and isinstance(rec.get("slug"), str):
+                    out.add(rec["slug"])
+    except OSError:
+        pass
+    return out
+
+
+def record_idea_plan(tick, slug, envelope, plan):
+    """Append that the plan stage handed on a plan for this idea, so no later tick plans it
+    again even when the owner moves the spec away."""
+    try:
+        fd = os.open(os.path.join(_pipeline_dir(tick.root), IDEA_PLANNED),
+                     os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": _now(), "slug": slug, "envelope": envelope,
+                                "plan": plan}, sort_keys=True) + "\n")
+    except OSError as e:
+        echo("plan", "cannot append to %s: %s" % (IDEA_PLANNED, type(e).__name__))
+
+
+def planned(tick, slug, recorded):
+    """True when the idea already has a plan, in this tick or an earlier one: its spec
+    exists (the plan stage's own `spec-exists`), a task-plan/v1 envelope names that spec,
+    or IDEA_PLANNED records the slug."""
+    spec = "%s/%s.md" % (SPEC_DIRS["idea"], slug)
+    if slug in recorded or os.path.lexists(os.path.join(tick.root, *spec.split("/"))):
+        return True
+    envs = os.path.join(tick.root, ".skill-contract", "envelopes")
+    try:
+        names = sorted(n for n in os.listdir(envs) if n.startswith("task-plan-v1-"))
+    except OSError:
+        return False
+    for n in names:
+        doc = _load_json(os.path.join(envs, n))
+        if doc and doc.get("predicateType") == TASK_PLAN_KIND and any(
+                isinstance(s, dict) and s.get("name") == spec for s in doc.get("subject") or []):
+            return True
+    return False
+
+
+def _mtime(path):
+    try:
+        return os.lstat(path).st_mtime_ns
+    except OSError:
+        return 0
+
+
+def idea_envelope(tick, checker, rel):
+    """(slug, None) for a valid go idea-brief/v1 envelope, else (None, reason)."""
+    if inside(tick.root, rel) != rel:
+        return None, "envelope-outside-root"
+    doc = _load_json(os.path.join(tick.root, *rel.split("/")))
+    if doc is None or doc.get("predicateType") != IDEA_KIND:
+        return None, "not-an-idea-brief"
+    p = (doc.get("predicate") or {}).get("payload") if isinstance(doc.get("predicate"),
+                                                                  dict) else None
+    if not isinstance(p, dict) or not (isinstance(p.get("slug"), str)
+                                       and IDEA_SLUG.match(p["slug"])):
+        return None, "envelope-unreadable"
+    dec = p.get("decision")
+    if not isinstance(dec, dict) or dec.get("verdict") != "go":
+        return None, "not-go"
+    if checker is None:
+        return None, "checker-unavailable"
+    _w, code, _ = run_tool(tick, "idea-follow-up", py(checker, "check-envelope", rel,
+                                                      "--root", tick.root),
+                           echo_stdout=False)
+    if code != 0:
+        return None, "check-envelope-failed"
+    return p["slug"], None
+
+
+def ideas_go(tick):
+    """Hand each go envelope with no plan yet to the plan stage (tick.picked). Return
+    (handed on, waiting)."""
+    base = os.path.join(tick.root, *IDEA_ENVELOPES.split("/"))
+    try:
+        names = sorted(n for n in os.listdir(base) if n.endswith(".json"))
+    except OSError:
+        return 0, 0
+    checker = find_tool(tick.roots, CHECKER[0], CHECKER[1])
+    recorded = idea_planned_slugs(tick.root)
+    go = waiting = 0
+    seen = set()
+    # Newest first, so a slug with two go envelopes plans from its latest handoff.
+    for n in sorted(names, key=lambda x: _mtime(os.path.join(base, x)), reverse=True):
+        rel = "%s/%s" % (IDEA_ENVELOPES, n)
+        if not ENVELOPE_ID.match(n):
+            continue
+        slug, reason = idea_envelope(tick, checker, rel)
+        if reason == "not-go":
+            continue  # a kill or pivot envelope is the human's record, not a request
+        if slug is None:
+            waiting += 1
+            print("IDEA: waiting %s reason=%s" % (shown(rel), reason))
+            tick.waiting.append(("idea-envelope", shown(rel),
+                                 "idea envelope waits: reason=%s" % reason))
+            continue
+        if slug in seen or planned(tick, slug, recorded):
+            seen.add(slug)
+            continue
+        seen.add(slug)
+        go += 1
+        tick.ideas[rel] = slug
+        tick.picked.append(rel)
+        print("IDEA: plan %s envelope=%s" % (slug, rel))
+    return go, waiting
+
+
 def stage_idea_follow_up(tick):
-    return "pending-R20", ""
+    """R20: list the ideas due or expired, then hand each go envelope with no plan yet to
+    the plan stage of this tick. See the comment above."""
+    tool = find_tool(tick.roots, IDEAS[0], IDEAS[1])
+    due, word = (0, "ok") if tool is None else ideas_due(tick, tool)
+    go, waiting = ideas_go(tick)
+    detail = join("due=%d go=%d" % (due, go), "waiting=%d" % waiting if waiting else "")
+    if tool is None:
+        return "unavailable", join("idea-validation", detail)
+    if word == "ok" and waiting:
+        word = "attention"
+    if word == "ok" and not (due or go):
+        return "idle", ""
+    return word, detail
 
 
 def stage_autopick(tick):
@@ -498,11 +736,13 @@ def stage_autopick(tick):
     if intake is None:
         return "unavailable", "ops-intake"
     word, code, out = run_tool(tick, "autopick", py(intake, "--root", tick.root, "autopick"))
+    picked = 0
     for line in out.decode("utf-8", "replace").splitlines():
         m = NEXT_PLAN.match(line)
         if m:
             tick.picked.append(m.group(1))
-    return word, join(exit_detail(code), "picked=%d" % len(tick.picked))
+            picked += 1
+    return word, join(exit_detail(code), "picked=%d" % picked)
 
 
 def stage_plan(tick):
@@ -549,6 +789,8 @@ def stage_plan(tick):
         if plan:
             ready += 1
             tick.plans.append(plan)
+            if env in tick.ideas:  # R20: no later tick plans this idea again
+                record_idea_plan(tick, tick.ideas[env], env, plan)
             print("PLAN: ready %s spec=%s" % (plan, what))
         else:
             waiting += 1

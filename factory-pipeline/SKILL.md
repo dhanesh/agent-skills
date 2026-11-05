@@ -3,18 +3,19 @@ name: factory-pipeline
 description: >-
   The factory's scheduled driver. Use when the user asks for factory-pipeline,
   to "tick the pipeline" or to "run the whole factory on a schedule". One `pipeline tick`
-  walks the stages in order: sweep, growth review, idea follow-up, autopick, plan, derive
-  grant, build, release stage and digest, and prints one `STAGE: <name> <result>` line per
-  stage. It calls each sibling skill's tool (ops-intake, growth-review,
+  runs, in order: sweep, growth review, idea follow-up, autopick, plan, derive
+  grant, build, release stage and digest, one `STAGE: <name> <result>` line each.
+  It calls each sibling skill's tool (ops-intake, growth-review, idea-validation,
   spec-first-planning, factory-conductor, release-conductor) with no shell; a missing one
-  is unavailable. No live grant gives `STOP: no-grant`, a held lock `STOP: locked`, a cap
-  `STOP: cap <name>`. Plan hands a plan on only when spec_lint and the allowlist pass.
-  Build runs one `conductor init` per tick. Release stage runs `release stage` once, after
-  the owner merged the release PR. `schedule install` sets a timer. Partly built: idea
-  follow-up and digest report `pending-R<n>`. Human gates stay with the owner. Not
-  for driving one plan to a PR (factory-conductor) or writing a plan (spec-first-planning).
+  is unavailable. No live grant, a held lock or a cap prints `STOP:` (`no-grant`,
+  `locked`, `cap`). Idea follow-up lists due ideas and plans a go idea once. Plan hands
+  a plan on only when spec_lint and the allowlist pass. Build runs one `conductor init`
+  per tick. Release stage runs `release stage` once, after the owner merged the release
+  PR. `schedule install` sets a timer. Partly built: digest is `pending-R21`. Human gates
+  stay with the owner. Not for one plan to a PR (factory-conductor) or planning
+  (spec-first-planning).
 license: MIT
-compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, offline. The stages call the sibling skills ops-intake, growth-review, spec-first-planning, factory-conductor and release-conductor when they are installed.
+compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, offline. The stages call the sibling skills ops-intake, growth-review, idea-validation, spec-first-planning, factory-conductor and release-conductor when they are installed.
 metadata:
   author: dhanesh
   version: "0.1.0"
@@ -45,8 +46,10 @@ the stages that the cap gates. The build stage (R18, shipped) starts factory-con
 `conductor init` for at most one derived grant per tick; see "The build stage" below. The
 release stage (R19, shipped) runs release-conductor's `release stage` once per release,
 only after the owner merged the release pull request and while the owner's release grant
-covers it; see "The release stage" below. The idea follow-up and digest stages report
-`pending-R<n>`. `pipeline schedule install` (R16, shipped) puts
+covers it; see "The release stage" below. The idea follow-up stage (R20, shipped) lists
+the ideas with an assumption due within 3 days or expired, and hands each `go` idea with no
+plan yet to the plan stage; see "The idea follow-up stage" below. The digest stage reports
+`pending-R21`. `pipeline schedule install` (R16, shipped) puts
 the tick on a timer; see "The schedule" below. The
 design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R12 to R21) in the
 agent-skills repository.
@@ -114,7 +117,8 @@ carrying a merged change to production is `release-conductor`.
 The stage list, what each stage calls today and the result words are in
 [references/overview.md](references/overview.md). In short: sweep runs `intake sweep`;
 growth review runs `growth auto --source <name>` and hands its stdout to `intake import
---format intake-signals-jsonl --source <name>` as two separate processes; autopick runs
+--format intake-signals-jsonl --source <name>` as two separate processes; idea follow-up
+runs idea-validation's read-only `ideas list` and `ideas status <slug>` (below); autopick runs
 `intake autopick`; plan drafts and checks a spec for each picked item (below); derive
 grant runs `write_grant.py --under-pipeline <grant> --root <repo> --plan <plan>` for each
 plan the plan stage hands on; build runs factory-conductor's `conductor init --plan <plan>
@@ -122,6 +126,38 @@ plan the plan stage hands on; build runs factory-conductor's `conductor init --p
 `release stage --root <repo> --unattended` once for a merged, granted release (below). The tick finds each sibling skill
 by its directory name in the roots that skill-contract `discover` searches. A missing
 skill gives `STAGE: <name> unavailable`, and the tick goes on.
+
+## The idea follow-up stage
+
+The idea follow-up stage (R20) runs before autopick and before any planner. It runs only
+idea-validation's read-only commands, `ideas list` and `ideas status <slug>`, through the
+same isolated interpreter as every other tool, and never with `--today`, because idea
+experiments and idea decisions stay with the owner.
+
+- **Due ideas.** For each registered idea with no decision, it reads each assumption's
+  status from `ideas status` and its deadline from the idea's `state.json`. An assumption
+  that is not `pass` or `fail` and whose deadline is 0 to 3 days away is due; one that is
+  `expired`, or whose deadline is past, is expired. Each such idea prints
+  `IDEA: due <slug> A1@<date>[(expired)],... next: ideas status <slug>` and goes on the
+  digest list with that command.
+- **Go ideas.** For each `idea-brief/v1` envelope in `.skill-contract/ideas/envelopes/`
+  whose decision is `go`, it runs spec-first-planning's `contract_check.py check-envelope
+  <envelope> --root <repo>`. A refused envelope prints `IDEA: waiting <envelope>
+  reason=<reason>` and waits in the digest. An accepted one whose idea has no plan yet
+  (no spec at `.skill-contract/ideas/specs/<slug>.md`, no task-plan envelope that names
+  that spec, and no line in `.skill-contract/pipeline/idea-plans.jsonl`) prints
+  `IDEA: plan <slug> envelope=<envelope>` and joins the plan stage's list next to the
+  autopicked items. The plan stage's lint, allowlist, caps and tamper rules apply to it
+  unchanged, and a plan it hands on is recorded in `idea-plans.jsonl`, so no later tick
+  plans that idea again.
+
+The stage line is `STAGE: idea-follow-up ok due=<n> go=<n>`, `attention` when an envelope
+waits, `idle` when there is nothing to list or plan, and `unavailable idea-validation`
+when that skill is not installed.
+
+You MUST NOT run idea-validation's `register`, `record`, `decide` or `handoff` for an idea
+that the tick lists, because experiments and idea decisions stay with the owner (spec
+constraint B1). Report each listed idea with its `ideas status <slug>` command instead.
 
 ## The plan stage
 
@@ -382,6 +418,8 @@ each result that is not `ok` or `idle`, and the owner's next step for each `STOP
 - The report shows nine stages in the order of the tick.
 - Each stage that is not `ok` or `idle` has a plain reason.
 - No stage that says `pending-R<n>` is called done or run.
+- Each `IDEA: due` line is reported with its `ideas status <slug>` command, and no idea
+  experiment or decision is run for the owner.
 - Each `PLAN: waiting` line is reported with its spec path and reason, and no waiting
   plan is called handed on.
 - A `STOP: cap` line is reported with its cap and the stage it stopped before, and no
@@ -391,5 +429,5 @@ The outcome eval (`eval/run_eval.py`) runs the tick on stub skills from
 `assets/pipeline_testkit.py` and grades the nine lines; the unit suites are
 `assets/test_pipeline_tick.py`, `assets/test_pipeline_lock.py`,
 `assets/test_pipeline_caps.py`, `assets/test_pipeline_plan.py`,
-`assets/test_pipeline_build.py`, `assets/test_pipeline_release.py` and
-`assets/test_pipeline_schedule.py`.
+`assets/test_pipeline_build.py`, `assets/test_pipeline_release.py`,
+`assets/test_pipeline_ideas.py` and `assets/test_pipeline_schedule.py`.

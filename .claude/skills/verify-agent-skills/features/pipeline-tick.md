@@ -2,7 +2,7 @@
 
 - id: pipeline-tick
 - proven: no
-- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-pipeline/assets/pipeline.py:stage_plan, factory-pipeline/assets/pipeline.py:plan_one, factory-pipeline/assets/pipeline.py:run_planner, factory-pipeline/assets/pipeline.py:snapshot, factory-pipeline/assets/pipeline.py:git, factory-pipeline/assets/pipeline.py:program_roots, factory-pipeline/assets/pipeline.py:program_digest, factory-pipeline/assets/pipeline.py:make_pathdir, factory-pipeline/assets/pipeline.py:seal, factory-pipeline/assets/pipeline.py:programs_trusted, factory-pipeline/assets/pipeline.py:py, factory-pipeline/assets/pipeline.py:tools_walk, factory-pipeline/assets/pipeline.py:_resolve, factory-pipeline/assets/pipeline.py:_walk_real, factory-pipeline/assets/pipeline.py:write_marker, factory-pipeline/assets/pipeline.py:read_marker, factory-pipeline/assets/pipeline.py:cmd_tamper_clear, factory-pipeline/assets/pipeline.py:stage_build, factory-pipeline/assets/pipeline.py:unbuilt_grants, factory-pipeline/assets/pipeline.py:run_states, factory-pipeline/assets/pipeline.py:evidence_gate, factory-pipeline/assets/pipeline.py:grant_covers, factory-pipeline/assets/pipeline.py:trusted_tools, factory-pipeline/assets/pipeline.py:stage_release_stage, factory-pipeline/assets/pipeline.py:release_probe, factory-pipeline/assets/pipeline.py:release_wait, factory-pipeline/assets/pipeline.py:release_dirs, release-conductor/assets/release.py:_stage_commit, release-conductor/assets/release.py:_grant_pins, release-conductor/assets/release.py:find_release_commit, spec-first-planning/assets/write_grant.py:build_pipeline_grant, factory-conductor/assets/reentry_timer.py:cron_schedule
+- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-pipeline/assets/pipeline.py:stage_plan, factory-pipeline/assets/pipeline.py:plan_one, factory-pipeline/assets/pipeline.py:run_planner, factory-pipeline/assets/pipeline.py:snapshot, factory-pipeline/assets/pipeline.py:git, factory-pipeline/assets/pipeline.py:program_roots, factory-pipeline/assets/pipeline.py:program_digest, factory-pipeline/assets/pipeline.py:make_pathdir, factory-pipeline/assets/pipeline.py:seal, factory-pipeline/assets/pipeline.py:programs_trusted, factory-pipeline/assets/pipeline.py:py, factory-pipeline/assets/pipeline.py:tools_walk, factory-pipeline/assets/pipeline.py:_resolve, factory-pipeline/assets/pipeline.py:_walk_real, factory-pipeline/assets/pipeline.py:write_marker, factory-pipeline/assets/pipeline.py:read_marker, factory-pipeline/assets/pipeline.py:cmd_tamper_clear, factory-pipeline/assets/pipeline.py:stage_build, factory-pipeline/assets/pipeline.py:unbuilt_grants, factory-pipeline/assets/pipeline.py:run_states, factory-pipeline/assets/pipeline.py:evidence_gate, factory-pipeline/assets/pipeline.py:grant_covers, factory-pipeline/assets/pipeline.py:trusted_tools, factory-pipeline/assets/pipeline.py:stage_release_stage, factory-pipeline/assets/pipeline.py:release_probe, factory-pipeline/assets/pipeline.py:release_wait, factory-pipeline/assets/pipeline.py:release_dirs, factory-pipeline/assets/pipeline.py:stage_idea_follow_up, factory-pipeline/assets/pipeline.py:ideas_due, factory-pipeline/assets/pipeline.py:idea_due, factory-pipeline/assets/pipeline.py:ideas_go, factory-pipeline/assets/pipeline.py:idea_envelope, factory-pipeline/assets/pipeline.py:planned, factory-pipeline/assets/pipeline.py:record_idea_plan, idea-validation/assets/ideas.py:cmd_list, idea-validation/assets/ideas.py:cmd_status, release-conductor/assets/release.py:_stage_commit, release-conductor/assets/release.py:_grant_pins, release-conductor/assets/release.py:find_release_commit, spec-first-planning/assets/write_grant.py:build_pipeline_grant, factory-conductor/assets/reentry_timer.py:cron_schedule
 
 ## What it is
 
@@ -43,7 +43,12 @@ release, only after the owner merged the release pull request into the local def
 branch and while the release grant that the owner accepted at `release prep` covers it;
 until then it runs nothing and prints `STAGE: release-stage waiting
 reason=release-merge` (or `release-grant`). It never writes or accepts a release grant
-and runs no other release command. The other two stages print `pending-R<n>`.
+and runs no other release command. The idea follow-up stage (R20) runs idea-validation's
+read-only `ideas list` and `ideas status <slug>` (never a writing command, never
+`--today`). It lists each undecided idea with an assumption due within 3 days or expired
+(`IDEA: due ...`, with `ideas status <slug>` as the owner's next command), and hands each
+`go` idea-brief envelope that `check-envelope` accepts and that has no plan yet to the
+plan stage of the same tick, once. The digest stage prints `pending-R21`.
 `pipeline schedule install --every <minutes>` (R16) installs one timer that runs the tick,
 with factory-conductor's own `reentry_timer.py`, at 15 to 1440 minutes; another interval
 exits 2 and installs nothing. The design is
@@ -86,6 +91,14 @@ origin, the PR command `true`), so the release pull request is open. It prints `
 `SKILLS:`, `RELEASE: 1.2.0` and `GRANT: <release grant id>`.
 `pipeline_testkit.py merge <repo>` merges `release/1.2.0` into `main` (the owner's merge,
 as `git pull` brings it) and prints `MERGED: <commit>`.
+`factory-pipeline/assets/pipeline_testkit.py ideafix <dir>` builds an idea-stage fixture:
+the plan fixture (a stub planner in `good` mode) with an autopick that picks nothing, and
+a stub idea-validation that logs each call to `<dir>/skills/idea-calls.jsonl` and then
+runs a copy of the real `ideas.py`. The real `ideas.py` (without `--today`) writes three
+registered ideas, whose deadlines come from the real date: `soon` (A1 due in 2 days),
+`later` (every deadline 10 days or more away) and `late` (A1 due yesterday). It also
+writes one `go` idea, `go-list`, with passing results, a `go` decision and a handoff
+envelope. It prints `REPO:` and `SKILLS:`.
 
 Shipped:
 
@@ -160,10 +173,19 @@ Shipped:
   runs (`STAGE: release-stage skipped planner-tamper=tools`). The tick never runs
   `prep`, `deploy`, `verify-prod`, `rollback` or `abandon`.
 
+- The idea follow-up stage (R20): `IDEA: due <slug> A1@<date>[(expired)] next: ideas
+  status <slug>` for each undecided idea with an assumption due within 3 days or expired,
+  and a digest entry with that command; an idea due later is not listed. `IDEA: plan
+  <slug> envelope=<envelope>` for a `go` envelope with no plan yet: the plan stage plans
+  it in the same tick, and a later tick does not plan it again (its spec, a task plan
+  that names the spec, or a line in `.skill-contract/pipeline/idea-plans.jsonl` says it
+  has a plan). An envelope that `check-envelope` refuses waits (`IDEA: waiting <envelope>
+  reason=check-envelope-failed`); a kill or pivot envelope is not planned. The stage runs
+  only `ideas list` and `ideas status`, as `python -I -S -B`, and never `--today`.
+  `STAGE: idea-follow-up ok due=<n> go=<n>`, or `idle`, or `unavailable idea-validation`.
+
 Planned (not yet shipped):
 
-- The idea stage lists ideas due within 3 days or expired, and starts the plan stage for
-  a `go` envelope with no plan (R20).
 - The digest: `.skill-contract/pipeline/digest.md` lists each waiting human gate (a pull
   request to merge, a release grant to accept, a production deploy, a rollback, a plan
   waiting for a read, an idea decision) with the exact command the owner runs next (R21).
@@ -194,7 +216,8 @@ python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-revok
 - `pt-no-grant`: exit 2. The output holds `STOP: no-grant reason=none` and no `STAGE:`
   line, and `$PT/skills/calls.jsonl` does not exist yet (no stage tool ran).
 - `pt-tick`: exit 0. It prints `TICK: grant pipeline-grant-v1-<...> expires_at <time>`.
-  The `STAGE:` lines are, in order: `sweep ok`, `growth-review ok signals=1`, `idea-follow-up pending-R20`, `autopick ok picked=1`,
+  The `STAGE:` lines are, in order: `sweep ok`, `growth-review ok signals=1`, `idea-follow-up unavailable
+  idea-validation due=0 go=0` (the stubs hold no idea-validation), `autopick ok picked=1`,
   `plan unavailable no-planner picked=1` (the testkit grant names no planner),
   `derive-grant idle plans=0`, `build idle grants=0`,
   `release-stage idle` (no release-conductor and no release), `digest pending-R21
@@ -259,7 +282,8 @@ cp "$CR/repo/.skill-contract/pipeline/cap-stops.jsonl" "$WT/.verify-run/$INSTANC
   line. `autopick`, `plan` and `derive-grant` each say `skipped cap=max_open_runs`, and
   `build` says `unavailable factory-conductor grants=1` (that cap does not gate build, so
   the stage tries the derived grant, and the stubs hold no `conductor.py`).
-  `sweep` and `growth-review` say `ok`, `release-stage` says `idle`, and `digest` says
+  `sweep` and `growth-review` say `ok`, `idea-follow-up` says `unavailable
+  idea-validation due=0 go=0`, `release-stage` says `idle`, and `digest` says
   `pending-R21`.
   The last line is `TICK: done stages=9 cap=max_open_runs`.
 - `pt-cap-calls.jsonl` holds no ops-intake `autopick` line and no `under-pipeline` line.
@@ -483,7 +507,43 @@ in a tick where a planner ran are proven by `factory-pipeline/assets/test_pipeli
 `STAGE: release-stage idle deferred=planner-ran release=1.2.0`, then one stage in the next
 tick).
 
-The R20 and R21 recipes join this section as each ships.
+The idea follow-up stage (R20). Build the idea fixture, never with `--today` or a writing
+ideas command from the tick. Run two ticks:
+
+```sh
+ID="$WT/.verify-run/$INSTANCE/id"
+python3 factory-pipeline/assets/pipeline_testkit.py ideafix "$ID" > "$WT/.verify-run/$INSTANCE/pt-idea-fixture.txt"
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-idea-first -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$ID/repo" --skills-dir "$ID/skills" tick
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-idea-second -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$ID/repo" --skills-dir "$ID/skills" tick
+cp "$ID/skills/idea-calls.jsonl" "$WT/.verify-run/$INSTANCE/pt-idea-calls.jsonl"
+cp "$ID/agent/calls.jsonl" "$WT/.verify-run/$INSTANCE/pt-idea-planner-calls.jsonl"
+cp "$ID/repo/.skill-contract/pipeline/idea-plans.jsonl" "$WT/.verify-run/$INSTANCE/pt-idea-plans.jsonl"
+```
+
+- `pt-idea-first`: exit 0. The output holds `IDEA: due soon A1@<today + 2> next: ideas
+  status soon`, `IDEA: due late A1@<today - 1>(expired) next: ideas status late`, no
+  `IDEA:` line that names `later`, and `IDEA: plan go-list
+  envelope=.skill-contract/ideas/envelopes/idea-brief-v1-<...>.json`. Then
+  `STAGE: idea-follow-up ok due=2 go=1`, `STAGE: autopick ok picked=0`,
+  `PLAN: ready .skill-contract/envelopes/task-plan-v1-<...>.json
+  spec=.skill-contract/ideas/specs/go-list.md`, `STAGE: plan ok ready=1 waiting=0` and
+  `STAGE: derive-grant ok derived=1 refused=0`.
+- `pt-idea-second`: exit 0. The same two `IDEA: due` lines, no `IDEA: plan` line,
+  `STAGE: idea-follow-up ok due=2 go=0` and `STAGE: plan idle picked=0`.
+- `pt-idea-planner-calls.jsonl`: exactly one line (the planner ran once over two ticks).
+- `pt-idea-plans.jsonl`: one line with `"slug": "go-list"`.
+- `pt-idea-calls.jsonl`: only `list` and `status <slug>` calls, each with
+  `"isolated": 1` and `"no_site": 1`, and no `--today`, `new`, `register`, `record`,
+  `decide` or `handoff`.
+
+The refused envelope and the kill envelope are proven by
+`factory-pipeline/assets/test_pipeline_ideas.py` (`IDEA: waiting <envelope>
+reason=check-envelope-failed`, `STAGE: idea-follow-up attention due=2 go=0 waiting=1`, and
+no planner call).
+
+The R21 recipe joins this section when it ships.
 
 ## Proof
 
@@ -491,14 +551,16 @@ The `pt-no-grant`, `pt-tick`, `pt-missing`, `pt-revoked`, `pt-locked`, `pt-unloc
 `pt-cap`, `pt-plan-unlisted`, `pt-plan-good`, `pt-plan-cap`, `pt-link-edit`,
 `pt-link-retarget`, `pt-tamper-persisted`, `pt-tamper-clear-noby`, `pt-tamper-clear`,
 `pt-build-gated`, `pt-build-second`, `pt-build-again`, `pt-build-plain`,
-`pt-release-open`, `pt-release-merged`, `pt-release-again`, `pt-sched-15`, `pt-sched-1440`, `pt-sched-10`, `pt-sched-1500` and
+`pt-release-open`, `pt-release-merged`, `pt-release-again`, `pt-idea-first`,
+`pt-idea-second`, `pt-sched-15`, `pt-sched-1440`, `pt-sched-10`, `pt-sched-1500` and
 `pt-sched-uninstall` captures (their `STOP:`, `STAGE:` and `SCHEDULE:` lines and exit
 codes), `pt-calls.jsonl`, `pt-locked-calls.jsonl`, `pt-cap-calls.jsonl`,
 `pt-cap-stops.jsonl`, `pt-plan-ignored.txt`, `pt-plan-cap-envelopes.txt`,
 `pt-sched-files.txt`, `pt-link-edit-files.txt`, `pt-link-retarget-files.txt`,
 `pt-link-marker.json`, `pt-tamper-log.jsonl`, `pt-build-gated-calls.jsonl`,
 `pt-build-plain-calls.jsonl`, `pt-release-calls.jsonl`, `pt-release-state.json`,
-`pt-release-fixture.txt`, `pt-release-merged.txt`, the two build fixture files and the two
+`pt-release-fixture.txt`, `pt-release-merged.txt`, `pt-idea-fixture.txt`,
+`pt-idea-calls.jsonl`, `pt-idea-planner-calls.jsonl`, `pt-idea-plans.jsonl`, the two build fixture files and the two
 queue hashes. After the planned parts ship: the content of `.skill-contract/pipeline/digest.md`.
 
 ## Gotchas

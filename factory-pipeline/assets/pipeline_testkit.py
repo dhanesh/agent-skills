@@ -68,6 +68,8 @@ CLI: python3 pipeline_testkit.py stubs <dir>   (prints STUBS: <dir>)
                                                   SKILLS:, RELEASE: 1.2.0 and GRANT: <id>)
      python3 pipeline_testkit.py merge <repo>   (merges the release pull request into
                                                   main; prints MERGED: <commit>)
+     python3 pipeline_testkit.py ideafix <dir>  (an idea fixture, R20: prints REPO: and
+                                                  SKILLS:)
 
 The build stage (R18): conductor_stub(skills) writes a stub factory-conductor
 `assets/conductor.py` that logs its argv, PATH and interpreter flags to
@@ -750,7 +752,117 @@ def calls(d):
         return []
 
 
+# ── the idea follow-up stage (R20) ──────────────────────────────────────────────────────
+# The stub idea-validation. Its ideas.py logs {argv, isolated, no_site} as one JSON line to
+# <skills dir>/idea-calls.jsonl and then runs a copy of the REAL ideas.py (with its
+# vendored contract_check.py) from <skills>/idea-validation/assets/real/, so the stage reads
+# the real `list` and `status` output. The fixture ideas are written with the real tool,
+# run without --today: their deadlines are computed from the real date.
+IDEA_ASSETS = os.path.join(os.path.dirname(SKILL_DIR), "idea-validation", "assets")
+IDEA_WRITERS = ("new", "register", "record", "decide", "handoff")
+IDEA_STUB = r'''import json, os, runpy, sys
+HOME = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+with open(os.path.join(HOME, "idea-calls.jsonl"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "isolated": sys.flags.isolated,
+                        "no_site": sys.flags.no_site}) + "\n")
+real = os.path.join(os.path.dirname(os.path.abspath(__file__)), "real", "ideas.py")
+sys.path.insert(0, os.path.dirname(real))
+sys.argv = [real] + sys.argv[1:]
+runpy.run_path(real, run_name="__main__")
+'''
+
+
+def idea_stub(skills):
+    """Write the stub idea-validation under skills and return its ideas.py path."""
+    d = os.path.join(skills, "idea-validation", "assets")
+    os.makedirs(os.path.join(d, "real"), exist_ok=True)
+    with open(os.path.join(skills, "idea-validation", "SKILL.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: idea-validation\ndescription: stub for the pipeline tests\n---\n")
+    for name in ("ideas.py", "contract_check.py"):
+        shutil.copyfile(os.path.join(IDEA_ASSETS, name), os.path.join(d, "real", name))
+    with open(os.path.join(d, "ideas.py"), "w", encoding="utf-8") as f:
+        f.write(IDEA_STUB)
+    return os.path.join(d, "ideas.py")
+
+
+def idea_calls(skills):
+    try:
+        with open(os.path.join(skills, "idea-calls.jsonl"), encoding="utf-8") as f:
+            return [json.loads(ln) for ln in f]
+    except OSError:
+        return []
+
+
+def ideas(repo, *argv):
+    """Run the REAL ideas.py (never --today) in repo; return its stdout or raise."""
+    cp = subprocess.run([sys.executable, os.path.join(IDEA_ASSETS, "ideas.py"), "--root", repo]
+                        + list(argv), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        timeout=60, check=False)
+    out = cp.stdout.decode("utf-8", "replace")
+    if cp.returncode != 0:
+        raise RuntimeError("ideas.py %s: %s" % (" ".join(argv), out))
+    return out
+
+
+def idea_brief(title, days):
+    """A brief whose three deadlines are today + days[0], days[1] and days[2]."""
+    today = datetime.date.today()
+    by = [(today + datetime.timedelta(days=d)).isoformat() for d in days]
+    return ("# Idea: %s\n\n## Problem\nFlatmates buy the same items twice.\n\n"
+            "## Target user\nPeople who share a flat.\n\n## Value proposition\n"
+            "One shared list.\n\n## Riskiest assumptions\n"
+            "- A1 [critical] [problem]: Flatmates lose money to duplicate purchases (test: "
+            "10 interviews; metric: interviewees who report it; pass: >= 6; kill: < 3; "
+            "by: %s)\n"
+            "- A2 [critical] [demand]: Flatmates sign up early (test: landing page; metric: "
+            "sign-ups; pass: >= 20; kill: < 5; by: %s)\n"
+            "- A3 [normal] [channel]: Groups allow posts (test: read the rules; metric: "
+            "groups that allow posts; pass: >= 2; kill: < 1; by: %s)\n\n"
+            "## Experiments\n- Interviews about last month's shopping. Tests A1.\n"
+            "- [outward] Landing page shared in two groups. Tests A2.\n"
+            "- Desk check of five groups. Tests A3.\n\n## Out of scope\n- Payments.\n"
+            % (title, by[0], by[1], by[2]))
+
+
+def register_idea(repo, slug, days):
+    write_rel(repo, "ideas/%s.md" % slug, idea_brief(slug.replace("-", " "), days))
+    ideas(repo, "register", "ideas/%s.md" % slug, "--by", "Dana")
+
+
+def go_idea(repo, slug="go-list"):
+    """Register an idea, record passing experiments for its critical assumptions, decide
+    go and hand it off with the real tool. Return the envelope's repo-relative path."""
+    register_idea(repo, slug, (20, 25, 30))
+    today = datetime.date.today().isoformat()
+    for aid, value in (("A1", 8), ("A2", 30)):
+        ideas(repo, "record", slug, aid, "--value", str(value), "--kind", "experiment",
+              "--source", "interviews", "--observed", today, "--by", "Dana")
+    ideas(repo, "decide", slug, "--verdict", "go", "--by", "Dana", "--reason", "demand")
+    out = ideas(repo, "handoff", slug, "--by", "Dana")
+    return next(ln.split(" ", 1)[1] for ln in out.splitlines() if ln.startswith("ENVELOPE: "))
+
+
+def idea_fixture(d):
+    """(repo, skills, agent dir) for the idea stage under d: the plan fixture with a stub
+    autopick that picks nothing, the stub idea-validation, and three ideas written with
+    the real tool: `soon` (A1 due in 2 days), `later` (every deadline 10 days or more
+    away) and `late` (A1 expired yesterday), plus one go idea `go-list` handed off."""
+    repo, skills, agent = plan_fixture(d, "good", 3)
+    behave(skills, "ops-intake", "autopick", stdout="AUTOPICK: matched 0 picked 0\n")
+    idea_stub(skills)
+    register_idea(repo, "soon", (2, 20, 30))
+    register_idea(repo, "later", (10, 20, 30))
+    register_idea(repo, "late", (-1, 20, 30))
+    go_idea(repo)
+    return repo, skills, agent
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "ideafix":
+        repo, skills, _ = idea_fixture(os.path.abspath(sys.argv[2]))
+        print("REPO: %s" % repo)
+        print("SKILLS: %s" % skills)
+        sys.exit(0)
     if len(sys.argv) == 5 and sys.argv[1] == "buildfix" and sys.argv[3] in ("gated", "plain") \
             and sys.argv[4].isdigit():
         gated = sys.argv[3] == "gated"

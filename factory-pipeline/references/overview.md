@@ -1,7 +1,7 @@
 # factory-pipeline: the stages of one tick
 
-Status: partly built. `pipeline tick` ships. Two of its nine stages are not built yet
-and report `pending-R<n>`. The design is `docs/factory/2026-11-04-autonomous-factory-spec.md`
+Status: partly built. `pipeline tick` ships. One of its nine stages (digest) is not built
+yet and reports `pending-R21`. The design is `docs/factory/2026-11-04-autonomous-factory-spec.md`
 in the agent-skills repository (requirements R12 to R21).
 
 ## The lock, before everything else
@@ -65,8 +65,8 @@ A detail can follow the result, for example `exit=3` or `picked=2`.
 |---|---|---|
 | `sweep` | Runs the sweep commands of the owner's committed intake config. | `ops-intake`: `intake sweep` |
 | `growth-review` | Reviews the watched export when it changed, and imports each breach into the queue. The tick runs two processes and passes the bytes between them. It uses no shell pipe. | `growth-review`: `growth auto --source <name>`, then `ops-intake`: `intake import --format intake-signals-jsonl --source <name>` |
-| `idea-follow-up` | Not built yet (R20). Result: `pending-R20`. | (`idea-validation`, later) |
-| `autopick` | Picks items inside the registered pick policy. The tick keeps each picked intake-item envelope for the plan stage. | `ops-intake`: `intake autopick` |
+| `idea-follow-up` | Lists each undecided idea with an assumption due within 3 days or expired, and hands each `go` idea-brief envelope with no plan yet to the plan stage (R20). See "The idea follow-up stage". With nothing to list or plan, the result is `idle`. | `idea-validation`: `ideas list` and `ideas status <slug>` (read-only); `spec-first-planning`: `contract_check.py check-envelope` |
+| `autopick` | Picks items inside the registered pick policy. The plan stage plans them after the go ideas of the idea stage. The tick keeps each picked intake-item envelope for the plan stage. | `ops-intake`: `intake autopick` |
 | `plan` | For each picked envelope, writes the spec skeleton into the git-ignored spec directory, runs the owner's planner to complete it, and hands the plan on only when lint and the allowlist pass (R17). See "The plan stage". With no pick, the result is `idle`. | `spec-first-planning`: `intake_request.py` (or `idea_request.py`), `spec_lint.py --unattended`, `spec_to_tasks.py --allowlist`, `spec_to_tasks.py --envelope`; the planner from the grant's `planner` field |
 | `derive-grant` | For each plan that the plan stage hands on, derives a per-plan grant from the pipeline grant. With no plan, the result is `idle`. | `spec-first-planning`: `write_grant.py --under-pipeline <grant> --root <repo> --plan <plan>` |
 | `build` | Starts one factory-conductor run for the oldest derived grant that no run names yet, while no run in the root is unfinished (R18). See "The build stage". With nothing to build, the result is `idle`. | `factory-conductor`: `conductor init --plan <plan> --root <repo>`, then `conductor reentry install --root <repo>` when the grant has a reentry block; `spec-first-planning`: `contract_check.py check-grant` |
@@ -74,7 +74,62 @@ A detail can follow the result, for example `exit=3` or `picked=2`.
 | `digest` | Not built yet (R21). Result: `pending-R21`. | none |
 
 The one-tick lock (R14), the caps (R15), the plan stage (R17), the build stage (R18), the
-release stage (R19) and the schedule (R16) ship; see their sections.
+release stage (R19), the idea follow-up stage (R20) and the schedule (R16) ship; see their
+sections.
+
+## The idea follow-up stage
+
+The idea follow-up stage (R20) runs after growth review and before autopick. It runs
+before the first planner, so it is outside the tamper tripwire (D18). It still runs
+idea-validation's tool with `python -I -S -B`, as it runs every tool.
+
+The stage reads idea-validation's state and changes none of it. It runs only two
+commands: `ideas list` and `ideas status <slug>`. It never runs `new`, `register`,
+`record`, `decide` or `handoff`, and it never passes `--today` (idea-validation refuses
+`--today` outside its own tests). Experiments and idea decisions stay with the owner (B1).
+
+**Due ideas.**
+
+1. The stage runs `ideas list` and keeps each registered idea that has no decision and is
+   not closed.
+2. For each such idea, it runs `ideas status <slug>` and reads each `ASSUMPTION:` line. It
+   reads the deadline (`by`) of each assumption from the idea's
+   `.skill-contract/ideas/<slug>/state.json` (the latest registration).
+3. An assumption is due when its status is not `pass`, `fail` or `expired` and its
+   deadline is 0 to 3 days after today. It is expired when its status is `expired`, or
+   when its deadline is before today and its status is not `pass` or `fail`.
+4. For each idea with a due or expired assumption, the stage prints
+   `IDEA: due <slug> A1@<date>[(expired)],... next: ideas status <slug>` and adds a
+   waiting entry for the owner to the digest list. The entry names `ideas status <slug>`
+   as the next command.
+
+**Go ideas.**
+
+1. The stage lists `.skill-contract/ideas/envelopes/*.json`, newest first.
+2. It skips an envelope whose decision is not `go`: a kill or a pivot is the owner's
+   record, not a request.
+3. It runs spec-first-planning's `contract_check.py check-envelope <envelope> --root
+   <repo>`. When the checker refuses the envelope, the stage prints `IDEA: waiting
+   <envelope> reason=check-envelope-failed`, and the envelope waits in the digest.
+4. It skips an idea that has a plan already. The idea has a plan when one of these is
+   true: the spec `.skill-contract/ideas/specs/<slug>.md` exists, a task-plan envelope in
+   `.skill-contract/envelopes/` names that spec as its subject, or
+   `.skill-contract/pipeline/idea-plans.jsonl` has a line for the slug. The plan stage
+   writes that line when it hands on a plan for the idea. So no later tick plans the same
+   idea again, even when the owner moves the spec away.
+5. Otherwise the stage prints `IDEA: plan <slug> envelope=<envelope>` and adds the
+   envelope to the plan stage's list, before the envelopes that autopick picks. The plan
+   stage's lint, allowlist, caps and tamper rules apply to it unchanged.
+
+The stage line is one of these:
+
+| Line | Meaning |
+|---|---|
+| `STAGE: idea-follow-up ok due=<n> go=<n>` | `<n>` ideas listed as due, `<n>` go ideas handed to the plan stage. |
+| `STAGE: idea-follow-up attention due=<n> go=<n> waiting=<n>` | An envelope waits, or an `ideas status` call failed. |
+| `STAGE: idea-follow-up idle` | Nothing to list and nothing to plan. |
+| `STAGE: idea-follow-up unavailable idea-validation due=0 go=<n>` | idea-validation is not installed. Go envelopes are still handed on. |
+| `STAGE: idea-follow-up refused due=0 go=<n>` (or `failed`) | `ideas list` refused or failed. Go envelopes are still handed on. |
 
 ## The plan stage
 
