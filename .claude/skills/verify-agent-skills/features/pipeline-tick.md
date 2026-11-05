@@ -2,7 +2,7 @@
 
 - id: pipeline-tick
 - proven: no
-- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-pipeline/assets/pipeline.py:stage_plan, factory-pipeline/assets/pipeline.py:plan_one, factory-pipeline/assets/pipeline.py:run_planner, factory-pipeline/assets/pipeline.py:snapshot, factory-pipeline/assets/pipeline.py:git, factory-pipeline/assets/pipeline.py:program_roots, factory-pipeline/assets/pipeline.py:program_digest, factory-pipeline/assets/pipeline.py:make_pathdir, factory-pipeline/assets/pipeline.py:seal, factory-pipeline/assets/pipeline.py:programs_trusted, factory-pipeline/assets/pipeline.py:py, spec-first-planning/assets/write_grant.py:build_pipeline_grant, factory-conductor/assets/reentry_timer.py:cron_schedule
+- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-pipeline/assets/pipeline.py:stage_plan, factory-pipeline/assets/pipeline.py:plan_one, factory-pipeline/assets/pipeline.py:run_planner, factory-pipeline/assets/pipeline.py:snapshot, factory-pipeline/assets/pipeline.py:git, factory-pipeline/assets/pipeline.py:program_roots, factory-pipeline/assets/pipeline.py:program_digest, factory-pipeline/assets/pipeline.py:make_pathdir, factory-pipeline/assets/pipeline.py:seal, factory-pipeline/assets/pipeline.py:programs_trusted, factory-pipeline/assets/pipeline.py:py, factory-pipeline/assets/pipeline.py:tools_walk, factory-pipeline/assets/pipeline.py:_resolve, factory-pipeline/assets/pipeline.py:_walk_real, factory-pipeline/assets/pipeline.py:write_marker, factory-pipeline/assets/pipeline.py:read_marker, factory-pipeline/assets/pipeline.py:cmd_tamper_clear, spec-first-planning/assets/write_grant.py:build_pipeline_grant, factory-conductor/assets/reentry_timer.py:cron_schedule
 
 ## What it is
 
@@ -99,6 +99,15 @@ Shipped:
   after it, every tool gets a private `PATH` of wrappers only, so a `git` planted on the
   owner's `PATH` never runs, and a changed pinned git gives `planner-changed-programs`
   before it runs again.
+  The skill files are hashed at their real paths, and every symlink on the way (a
+  symlinked skill directory, as the `skills` CLI installs it, or a symlinked file inside
+  it) is recorded by its target, so an edit through a link, a retargeted link or a new
+  link poisons the tick too (R2). A poison outlives its tick: the tick writes
+  `.skill-contract/pipeline/tamper.json`, and every later tick prints
+  `STOP: planner-tamper persisted <reason>`, runs no stage and exits 4, until the owner
+  runs `pipeline tamper-clear --by <name>` (exit 2 without `--by`; the clear is logged in
+  `tamper-log.jsonl`). A planner that plants, edits or removes the marker poisons its own
+  tick (`planner-changed-state`).
   These are tripwires, not a sandbox; the snapshot skips `.skill-contract/runs/`.
 
 - The schedule (R16): `schedule install --every <minutes>` with 15 to 1440 installs one
@@ -288,16 +297,80 @@ ls "$PL/cap/repo/.skill-contract/envelopes" > "$WT/.verify-run/$INSTANCE/pt-plan
 - `pt-plan-cap-envelopes.txt`: one `autonomy-grant-v1-` file, two `task-plan-v1-` files
   and the pipeline grant.
 
+The symlinked skill and the persisted tamper (R2). Build two plan fixtures, and make
+each one's spec-first-planning a symlink to a store directory, as the `skills` CLI
+installs it. In the first, the stub planner edits `write_grant.py` through the link. In
+the second, it retargets the link to a tampered copy. Each tampered `write_grant.py`
+writes a `PWNED` file when it runs:
+
+```sh
+ST="$WT/.verify-run/$INSTANCE/st"
+for F in edit retarget; do
+  python3 factory-pipeline/assets/pipeline_testkit.py planfix "$ST/$F" good 3 I0000000001
+  mkdir -p "$ST/$F/store"
+  mv "$ST/$F/skills/spec-first-planning" "$ST/$F/store/"
+  ln -s "$ST/$F/store/spec-first-planning" "$ST/$F/skills/spec-first-planning"
+done
+cat > "$ST/edit/agent/extra.py" <<'EOF'
+wg = os.path.join(root, '..', 'skills', 'spec-first-planning', 'assets', 'write_grant.py')
+src = open(wg).read()
+open(wg, 'w').write("open(%r, 'a').write('ran')\n" % os.path.join(os.path.dirname(root), 'PWNED') + src)
+EOF
+cp -R "$ST/retarget/store" "$ST/retarget/evil"
+WG="$ST/retarget/evil/spec-first-planning/assets/write_grant.py"
+{ printf "open('%s', 'a').write('ran')\n" "$ST/retarget/PWNED"; cat "$WG"; } > "$WG.new" && mv "$WG.new" "$WG"
+cat > "$ST/retarget/agent/extra.py" <<'EOF'
+link = os.path.join(root, '..', 'skills', 'spec-first-planning')
+os.remove(link)
+os.symlink(os.path.join(root, '..', 'evil', 'spec-first-planning'), link)
+EOF
+for F in edit retarget; do
+  python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-link-$F -- \
+    python3 factory-pipeline/assets/pipeline.py --root "$ST/$F/repo" --skills-dir "$ST/$F/skills" tick
+  ls "$ST/$F" > "$WT/.verify-run/$INSTANCE/pt-link-$F-files.txt"
+done
+cp "$ST/edit/repo/.skill-contract/pipeline/tamper.json" "$WT/.verify-run/$INSTANCE/pt-link-marker.json"
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-tamper-persisted -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$ST/edit/repo" --skills-dir "$ST/edit/skills" tick
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-tamper-clear-noby -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$ST/edit/repo" tamper-clear
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-tamper-clear -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$ST/edit/repo" tamper-clear --by Owner
+cp "$ST/edit/repo/.skill-contract/pipeline/tamper-log.jsonl" "$WT/.verify-run/$INSTANCE/pt-tamper-log.jsonl"
+```
+
+- `pt-link-edit`: exit 4. The output holds `  plan| changed: tools:<real store
+  path>/spec-first-planning/assets/write_grant.py`, `STOP: planner-tamper tools:`,
+  `PLAN: waiting .skill-contract/intake/specs/I0000000001.md
+  reason=planner-changed-tools`, `STAGE: derive-grant skipped planner-tamper=tools` and
+  `STAGE: build skipped planner-tamper=tools`. The last line is
+  `TICK: done stages=9 tamper=tools`.
+- `pt-link-retarget`: the same stop, and the output holds
+  `  plan| changed: tools:link:<real path of $ST/retarget/skills>/spec-first-planning`.
+- `pt-link-edit-files.txt` and `pt-link-retarget-files.txt` hold no `PWNED` (no derived
+  grant: the tampered `write_grant.py` never ran).
+- `pt-link-marker.json`: `"reason": "tools"`, an `at` time, and a `changed` list that
+  names `write_grant.py` at its real path.
+- `pt-tamper-persisted`: exit 4, `STOP: planner-tamper persisted tools`, and no `STAGE:`
+  line and no `TICK: done` line.
+- `pt-tamper-clear-noby`: exit 2 and `STOP: tamper-clear needs --by <name>`; the marker
+  stays.
+- `pt-tamper-clear`: exit 0 and `TAMPER: cleared tools by Owner`.
+- `pt-tamper-log.jsonl`: two lines, a `"event": "poison"` line, then a
+  `"event": "clear"` line with `"by": "Owner"`.
+
 The R18 to R21 recipes join this section as each ships.
 
 ## Proof
 
 The `pt-no-grant`, `pt-tick`, `pt-missing`, `pt-revoked`, `pt-locked`, `pt-unlocked`,
-`pt-cap`, `pt-plan-unlisted`, `pt-plan-good`, `pt-plan-cap`, `pt-sched-15`, `pt-sched-1440`, `pt-sched-10`, `pt-sched-1500` and
+`pt-cap`, `pt-plan-unlisted`, `pt-plan-good`, `pt-plan-cap`, `pt-link-edit`,
+`pt-link-retarget`, `pt-tamper-persisted`, `pt-tamper-clear-noby`, `pt-tamper-clear`, `pt-sched-15`, `pt-sched-1440`, `pt-sched-10`, `pt-sched-1500` and
 `pt-sched-uninstall` captures (their `STOP:`, `STAGE:` and `SCHEDULE:` lines and exit
 codes), `pt-calls.jsonl`, `pt-locked-calls.jsonl`, `pt-cap-calls.jsonl`,
 `pt-cap-stops.jsonl`, `pt-plan-ignored.txt`, `pt-plan-cap-envelopes.txt`,
-`pt-sched-files.txt` and the two queue hashes. After the planned parts ship: the content of `.skill-contract/pipeline/digest.md`.
+`pt-sched-files.txt`, `pt-link-edit-files.txt`, `pt-link-retarget-files.txt`,
+`pt-link-marker.json`, `pt-tamper-log.jsonl` and the two queue hashes. After the planned parts ship: the content of `.skill-contract/pipeline/digest.md`.
 
 ## Gotchas
 
@@ -313,6 +386,9 @@ codes), `pt-calls.jsonl`, `pt-locked-calls.jsonl`, `pt-cap-calls.jsonl`,
 - `pending-R<n>` is the honest result of a stage that is not built. It is not `ok`.
 - The lock file stays on disk after a tick. That is correct: only a held `flock` blocks a
   tick, and the kernel drops it when the holder dies. Do not delete the file to "unlock".
+- `STOP: planner-tamper persisted` holds every later tick until the owner clears it. Do
+  not run `tamper-clear` to make a recipe pass: inspect the files that `tamper.json`
+  names first, and restore them, because the next tick trusts what is there.
 - `proven: no` stays until the recipe is driven with SHA-bound evidence.
 - The schedule installs a real timer unless reentry_timer's dry-run hooks are set. A
   factory run installs no timer and starts no service (decision D9); drive it only with

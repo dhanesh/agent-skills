@@ -98,7 +98,7 @@ the digest list as waiting for the owner's read, and hands nothing on.
 | 3 | Writes the skeleton with `intake_request.py` (or `idea_request.py`). | `request-refused`, `spec-write` |
 | 3a | Takes the tamper snapshot. When the repository is too large for it, the planner does not run. | `snapshot-too-large-files`, `snapshot-too-large-bytes` |
 | 4 | Runs the planner with no shell, in its own process group, with the tick's timeout. Then it kills what the planner left running. | `planner-exit=<n>`, `planner-timeout`, `planner-failed` |
-| 5 | Takes the tamper snapshot again and compares it with the one taken before the planner (see below). Then it makes sure that the spec is still a regular file, and that the allowlist still has the pinned sha256. | `planner-changed-the-repo`, `planner-changed-git`, `planner-changed-tools`, `spec-replaced`, `allowlist-changed` |
+| 5 | Takes the tamper snapshot again and compares it with the one taken before the planner (see below). Then it makes sure that the spec is still a regular file, and that the allowlist still has the pinned sha256. | `planner-changed-the-repo`, `planner-changed-git`, `planner-changed-tools`, `planner-changed-state`, `spec-replaced`, `allowlist-changed` |
 | 6 | Runs `spec_lint.py --unattended <spec>` with `python -I -S -B`, only when the tool's files and the program roots match the baseline. | `lint-failed`, `planner-tamper` |
 | 7 | Runs `spec_to_tasks.py <spec> --allowlist <allowlist>`. | `allowlist-unlisted` (exit 3), `allowlist-error` (exit 2), `allowlist-failed` |
 | 8 | Runs `spec_to_tasks.py <spec> --envelope <repo>` and reads its `ENVELOPE:` line. | `envelope-failed` |
@@ -113,9 +113,24 @@ The tamper snapshot holds the sha256 of these files:
 - `~/.gitconfig`, the XDG git config, and every `core.hooksPath` directory that one of
   these config files names;
 - every file of the spec-first-planning skill that the stage runs, `__pycache__`
-  included.
+  included, at its real path;
+- the tamper marker `.skill-contract/pipeline/tamper.json` (see below), or the fact that
+  it is not there.
 
-A symlink is recorded by its target and is not followed. The snapshot stops at 200000
+In the work tree and the git files, a symlink is recorded by its target and is not
+followed. The skill files are different. The `skills` CLI installs each skill directory
+as a symlink (for example `~/.claude/skills/spec-first-planning` ->
+`~/.agents/skills/spec-first-planning`). So the tick resolves the skill directory and
+each tool path one part at a time. It records every symlink that it finds on the way,
+with its `readlink` target: a parent directory, the skill directory itself, and a file or
+a directory inside the skill. Then it follows the link and hashes every file at its real
+path. These changes all poison the tick:
+
+- an edit to a tool file through the link;
+- a link that points to a new target;
+- a new link in the skill or on the way to it.
+
+The snapshot stops at 200000
 files or 2 GiB. Past that limit, the plan waits before the planner starts. A repository
 that large plans by hand, or keeps its bulk out of the work tree.
 
@@ -140,7 +155,35 @@ tick:
 - prints `STAGE: <name> skipped planner-tamper=<what>` for autopick, plan, derive grant
   and build;
 - still runs release stage and digest, because they run no spec-first-planning code;
-- ends `TICK: done stages=9 tamper=<what>` and exits 4.
+- ends `TICK: done stages=9 tamper=<what>` and exits 4;
+- writes the tamper marker `.skill-contract/pipeline/tamper.json` (the time, the reason
+  and the changed paths), and appends a `poison` line to `tamper-log.jsonl`.
+
+### A poison outlives the tick
+
+Without the marker, the next tick would take a fresh baseline from the changed files and
+trust them. So every later tick reads the marker right after the grant check, before any
+stage. While the marker exists, the tick:
+
+- prints `STOP: planner-tamper persisted <reason>` and the paths that changed;
+- runs no stage and calls no tool;
+- exits 4.
+
+Only the owner clears the marker:
+
+```sh
+python3 factory-pipeline/assets/pipeline.py --root <repo> tamper-clear --by <name>
+```
+
+The command removes the marker and appends a `clear` line with the name to
+`tamper-log.jsonl`. It prints `TAMPER: cleared <reason> by <name>`, or `TAMPER: none`
+when there is no marker, and exits 0. Without `--by`, it exits 2 and keeps the marker.
+While a tick holds the lock, it exits 3. The owner must inspect every file that the
+marker names, and restore it, before clearing it. The next tick trusts what those files
+hold.
+
+The marker is in the tamper snapshot. A planner that writes, edits or removes it during
+a tick poisons that tick with `planner-changed-state`.
 
 Every Python tool that the tick starts runs as `python -I -S -B`. Python then loads no
 `site` module, so it reads no `site-packages` directory, no `.pth` file, no
@@ -345,7 +388,7 @@ them is called.
 A result that is not `ok` does not stop the tick. The tick goes on to the next stage, and
 exits 0 when every stage ran. Exit 2 is a usage error (for example a `--root` that is not
 a directory), `STOP: state-dir` or `STOP: no-grant`. Exit 3 is `STOP: locked`. Exit 4 is
-`STOP: planner-tamper`. The
+`STOP: planner-tamper` or `STOP: planner-tamper persisted`. The
 schedule's exits are in its section.
 
 ## How the tick finds a skill

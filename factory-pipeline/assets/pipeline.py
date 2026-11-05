@@ -4,6 +4,7 @@
 Usage: pipeline.py [--root R] [--skills-dir D ...] tick [--grant G] [--growth-source NAME]
        pipeline.py [--root R] [--skills-dir D ...] schedule install --every MINUTES
        pipeline.py [--root R] [--skills-dir D ...] schedule status|uninstall
+       pipeline.py [--root R] tamper-clear --by NAME
 
 Before any stage runs, the tick checks the pipeline grant (R13). It runs spec-first-planning's
 vendored `contract_check.py check-pipeline-grant --root R [--id G]`, which judges the newest
@@ -113,7 +114,15 @@ list and no shell. Stdlib only, Python 3.10+, POSIX. Exits: 0 every stage ran; 2
 directory that is not git-ignored, or no live pipeline grant; 3 another tick holds the
 pipeline lock; 4 a planner tamper poisoned the tick (`STOP: planner-tamper <what>`: no
 further spec-first-planning tool runs, no grant is derived, no build starts, every plan
-of the tick waits; see poison()).
+of the tick waits; see poison()), or an earlier tick's tamper is not cleared yet.
+
+A poison outlives its tick (R2): poison() writes .skill-contract/pipeline/tamper.json (the
+time, the reason and the changed keys). Every later tick reads it right after the grant
+check, prints `STOP: planner-tamper persisted <reason>`, runs no stage and exits 4, until
+the owner inspects the changed files and runs `tamper-clear --by <name>`. That command
+removes the marker, appends who cleared it to tamper-log.jsonl and exits 0 (`TAMPER: none`
+when there is nothing to clear); without a --by name it exits 2, and while a tick holds
+the lock it exits 3.
 
 `schedule install --every MINUTES` (R16) installs one OS timer that runs `pipeline tick` for
 this repo every MINUTES. It checks 15 <= MINUTES <= 1440 (a whole number) before it does
@@ -174,6 +183,12 @@ GATED = tuple(STAGE_CAPS)
 # start work is skipped. release-stage and digest run no spec-first-planning code.
 TAMPER_SKIP = ("autopick", "plan", "derive-grant", "build")
 CAP_STOPS = "cap-stops.jsonl"
+# R2: a planner tamper outlives its tick. poison() writes TAMPER_MARKER in the git-ignored
+# state directory, and every later tick stops right after the grant check while it exists
+# (`STOP: planner-tamper persisted <reason>`, exit 4). Only the owner clears it, with
+# `pipeline tamper-clear --by <name>`, which appends to TAMPER_LOG.
+TAMPER_MARKER = "tamper.json"
+TAMPER_LOG = "tamper-log.jsonl"
 RUNS_DIR = ".skill-contract/runs"   # factory-conductor's run directories
 RUN_ID = re.compile(r"^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\Z")  # conductor's RUN_ID_RE
 RUN_STATE = "state.json"
@@ -618,8 +633,14 @@ def ignored(tick, rel):
 #            git dir and the common dir (never objects/), the files that the global
 #            config can live in, and every core.hooksPath directory any of them names;
 #   tools:   every file of the spec-first-planning skill whose tools the plan stage and
-#            derive-grant run (its __pycache__ included, since Python loads it).
-# Symlinks are recorded by target and never followed. The cost is bounded: past
+#            derive-grant run (its __pycache__ included, since Python loads it), at its
+#            real path, and every symlink on the way to it or inside it (tools_walk());
+#   state:   the tamper marker, so a planner that plants, edits or removes it poisons.
+# In repo and git, symlinks are recorded by target and never followed. In tools, the
+# `skills` CLI installs a skill directory as a symlink, so every link met (a parent
+# directory, the skill directory, a file inside it) is recorded by its os.readlink target
+# and then followed, and every file is hashed at its real path: an edit through a link, a
+# retargeted link and a new link all change the snapshot. The cost is bounded: past
 # SNAP_MAX_FILES files or SNAP_MAX_BYTES bytes the snapshot stops, and the plan waits
 # with `snapshot-too-large-<files|bytes>` before the planner starts. A repository that
 # large plans by hand, or keeps its bulk out of the work tree.
@@ -720,6 +741,110 @@ def skill_dir_of(tool):
     return os.path.dirname(os.path.dirname(tool))
 
 
+LINK_HOPS = 40  # the most symlinks one path may pass through (the kernel's own bound)
+
+
+def _resolve(out, budget, path):
+    """The real path of path, found one component at a time, recording every symlink met on
+    the way (`tools:link:<link path>` = its os.readlink target) at every level: a parent
+    directory, the skill directory, a file. A loop or a link that cannot be read is
+    recorded too, and then path itself is returned unresolved."""
+    todo = [p for p in os.path.abspath(path).split(os.sep) if p]
+    cur, hops = os.sep, 0
+    while todo:
+        name = todo.pop(0)
+        if name == ".":
+            continue
+        if name == "..":
+            cur = os.path.dirname(cur)
+            continue
+        nxt = os.path.join(cur, name)
+        if not os.path.islink(nxt):
+            cur = nxt
+            continue
+        hops += 1
+        budget[0] += 1
+        if budget[0] > SNAP_MAX_FILES:
+            raise TooLarge("files")
+        try:
+            target = os.readlink(nxt)
+        except OSError as e:
+            out["tools:link:" + nxt] = "error:%s" % type(e).__name__
+            return path
+        out["tools:link:" + nxt] = target
+        if hops > LINK_HOPS:
+            out["tools:link:" + nxt] = "loop:" + target
+            return path
+        if os.path.isabs(target):
+            cur = os.sep
+        todo = [p for p in target.split(os.sep) if p] + todo
+    return cur
+
+
+def _walk_real(out, budget, path, seen):
+    """Record path at its real path (see _resolve()) and, for a directory, every file under
+    it by sha256, keyed `tools:<real path>`. A symlink inside the tree is recorded and then
+    followed to its real path, so a symlinked file or directory inside a skill is hashed
+    too. seen holds the real paths already walked, so a link loop ends."""
+    real = _resolve(out, budget, path)
+    if real in seen:
+        return
+    seen.add(real)
+    if not os.path.lexists(real):
+        out["tools:" + real] = "missing"
+        return
+    _record(out, budget, "tools:" + real, real)
+    if os.path.islink(real) or not os.path.isdir(real):
+        return
+    for dirpath, dirnames, filenames in os.walk(real, followlinks=False):
+        keep = []
+        for name in sorted(dirnames):
+            p = os.path.join(dirpath, name)
+            if os.path.islink(p):
+                _walk_real(out, budget, p, seen)
+            else:
+                _record(out, budget, "tools:" + p, p)
+                keep.append(name)
+        dirnames[:] = keep
+        for name in sorted(filenames):
+            p = os.path.join(dirpath, name)
+            if os.path.islink(p):
+                _walk_real(out, budget, p, seen)
+            else:
+                _record(out, budget, "tools:" + p, p)
+
+
+def trusted_tools(tick):
+    """{skill: [tool paths]} of every skill whose tools the tick runs after a planner, or
+    None when spec-first-planning is not installed. Today that is spec-first-planning only:
+    the plan stage's tools, write_grant.py (caps and derive-grant) and contract_check.py."""
+    rels = [TOOLS[PLANNING], CHECKER[1]] + sorted(PLAN_TOOLS.values())
+    found = [find_tool(tick.roots, PLANNING, rel) for rel in rels]
+    if found[0] is None:
+        return None
+    return {PLANNING: [t for t in found if t]}
+
+
+def tools_walk(out, budget, tick):
+    """Record every file of each skill in trusted_tools() at its real path, and every
+    symlink on the way to it and inside it (see _walk_real()). Returns False when
+    spec-first-planning is not installed."""
+    skills = trusted_tools(tick)
+    if skills is None:
+        return False
+    seen = set()
+    for skill, tools in sorted(skills.items()):
+        out["tools:skill:" + skill] = _resolve(out, budget, skill_dir_of(tools[0]))
+        _walk_real(out, budget, skill_dir_of(tools[0]), seen)
+        for tool in tools:
+            out["tools:tool:" + tool] = _resolve(out, budget, tool)
+    return True
+
+
+def marker_path(root):
+    return os.path.join(_pipeline_dir(root), TAMPER_MARKER)
+
+
 def snapshot(tick, spec, tools):
     """{key: digest} of what the planner must not change. See the comment above."""
     out, budget = {}, [0, 0]
@@ -741,21 +866,38 @@ def snapshot(tick, spec, tools):
         configs.append(cfg)
     for hooks in _hooks_paths(tick, configs):
         _walk(out, budget, "git:hooksPath:" + hooks, hooks)
-    sk = skill_dir_of(tools["lint"])
-    _walk(out, budget, "tools:" + sk, sk)
+    if not tools_walk(out, budget, tick):
+        out["tools"] = "missing"
+    # The tamper marker lives in the skipped state directory, so it is recorded on its
+    # own: a planner that writes, edits or removes it poisons the tick (`state`).
+    mk = marker_path(tick.root)
+    if os.path.lexists(mk):
+        _record(out, budget, "state:%s/%s" % (PIPELINE_DIR, TAMPER_MARKER), mk)
+    else:
+        out["state:%s/%s" % (PIPELINE_DIR, TAMPER_MARKER)] = "missing"
     return out
 
 
-def changed_reason(before, after):
-    """None when nothing changed, else `planner-changed-<repo|git|tools|snapshot>`. The
-    changed paths are echoed (sanitised) so the owner knows where to look."""
+def echo_changed(keys):
+    """Echo the first five changed keys, a changed symlink or skill directory first (the
+    retarget is what the owner reads first), then the rest in order."""
+    first = [k for k in keys if k.startswith(("tools:link:", "tools:skill:"))]
+    for k in (first + [k for k in keys if k not in first])[:5]:
+        echo("plan", "changed: %s" % shown(k))
+
+
+def changed_reason(before, after, changed=None):
+    """None when nothing changed, else `planner-changed-<repo|git|tools|state|snapshot>`.
+    The changed paths are echoed (sanitised) so the owner knows where to look, and added
+    to the list `changed` when one is given (for the tamper marker)."""
     if after is None:
         return "planner-changed-snapshot"
     keys = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
     if not keys:
         return None
-    for k in keys[:5]:
-        echo("plan", "changed: %s" % shown(k))
+    if changed is not None:
+        changed.extend(keys)
+    echo_changed(keys)
     first = keys[0].split(":", 1)[0].split("/", 1)[0]
     kinds = {k.split(":", 1)[0].split("/", 1)[0] for k in keys}
     for kind in ("git", "tools", "repo"):  # the worst first
@@ -931,21 +1073,20 @@ def programs_trusted(tick):
     base = {k: v for k, v in (tick.baseline or {}).items() if k.startswith("programs")}
     if now == base:
         return True
-    for k in sorted(k for k in set(base) | set(now) if base.get(k) != now.get(k))[:5]:
-        echo("plan", "changed: %s" % shown(k))
-    poison(tick, "programs")
+    keys = sorted(k for k in set(base) | set(now) if base.get(k) != now.get(k))
+    echo_changed(keys)
+    poison(tick, "programs", keys)
     return False
 
 
 def tool_digest(tick):
-    """{key: digest} of every file of the spec-first-planning skill the tick runs and of
-    the program roots, or None when that skill is not installed."""
-    tool = find_tool(tick.roots, PLANNING)
-    if tool is None:
-        return None
+    """{key: digest} of every file of the skills the tick runs (trusted_tools()), at their
+    real paths with every symlink on the way, and of the program roots, or None when
+    spec-first-planning is not installed."""
     out = {}
     try:
-        _walk(out, [0, 0], "tools", skill_dir_of(tool))
+        if not tools_walk(out, [0, 0], tick):
+            return None
     except TooLarge:
         out["tools"] = "too-large"
     try:
@@ -965,14 +1106,13 @@ def tools_trusted(tick):
     now = tool_digest(tick)
     if now != tick.baseline:
         if tick.baseline is None or now is None:  # no baseline, or the skill went away
-            poison(tick, "tools")
+            poison(tick, "tools", ["tools"])
             return False
-        keys = [k for k in set(tick.baseline) | set(now)
-                if tick.baseline.get(k) != now.get(k)]
-        for k in sorted(keys)[:5]:
-            echo("plan", "changed: %s" % shown(k))
+        keys = sorted(k for k in set(tick.baseline) | set(now)
+                      if tick.baseline.get(k) != now.get(k))
+        echo_changed(keys)
         poison(tick, "programs" if any(k.startswith("programs") for k in keys)
-               else "tools")
+               else "tools", keys)
         return False
     return True
 
@@ -989,22 +1129,78 @@ def programs_ok(tick):
     return None
 
 
-def poison(tick, what):
+def poison(tick, what, changed=()):
     """A planner changed something the tick relies on: trust nothing for the rest of the
-    tick. Print `STOP: planner-tamper <what>`, and move every plan and every grant of this
-    tick to the digest list, so nothing is derived or built."""
+    tick. Print `STOP: planner-tamper <what>`, write the tamper marker (so every later
+    tick stops too, until the owner runs tamper-clear), and move every plan and every grant
+    of this tick to the digest list, so nothing is derived or built."""
     if tick.tampered:
         return
     tick.tampered = what
-    print("STOP: planner-tamper %s: no grant is derived and no build starts in this tick; "
-          "the owner reads what changed" % what)
+    print("STOP: planner-tamper %s: no grant is derived and no build starts in this tick "
+          "or any later one until the owner reads what changed and runs "
+          "`pipeline tamper-clear --by <name>`" % what)
     sys.stdout.flush()
+    write_marker(tick, what, changed)
     why = "waiting for owner's read: reason=planner-tamper-%s" % what
     for plan in tick.plans:
         tick.waiting.append(("plan-read", plan, why))
     for plan, grant in tick.grants:
         tick.waiting.append(("plan-read", grant, why))
     tick.plans, tick.grants = [], []
+
+
+def write_marker(tick, what, changed):
+    """Write <state dir>/TAMPER_MARKER (the time, the reason and up to 50 changed keys) and
+    append a `poison` line to TAMPER_LOG. The marker replaces whatever is at that path (a
+    planner may have planted one) through a temp file and a rename, so a symlink there is
+    replaced, never followed. A marker that cannot be written is reported; the tick still
+    exits 4."""
+    rec = {"at": _now(), "event": "poison", "reason": what, "grant": tick.grant,
+           "changed": [shown(k) for k in list(changed)[:50]]}
+    d = _pipeline_dir(tick.root)
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".tamper-", dir=d)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(rec, sort_keys=True, indent=1) + "\n")
+        mk = marker_path(tick.root)
+        if os.path.isdir(mk) and not os.path.islink(mk):
+            shutil.rmtree(mk)
+        os.replace(tmp, mk)
+    except OSError as e:
+        echo("plan", "cannot write the tamper marker %s/%s: %s"
+             % (PIPELINE_DIR, TAMPER_MARKER, type(e).__name__))
+    log_tamper(tick.root, rec)
+
+
+def log_tamper(root, rec):
+    try:
+        fd = os.open(os.path.join(_pipeline_dir(root), TAMPER_LOG),
+                     os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, sort_keys=True) + "\n")
+    except OSError as e:
+        echo("tamper", "cannot append to %s: %s" % (TAMPER_LOG, type(e).__name__))
+
+
+def read_marker(root):
+    """None when there is no tamper marker, else (reason, marker dict or None). Anything
+    at the marker path counts, a symlink or a directory too: a reason it cannot read is
+    `unreadable`."""
+    mk = marker_path(root)
+    if not os.path.lexists(mk):
+        return None
+    try:
+        if os.path.islink(mk) or not os.path.isfile(mk):
+            raise ValueError("not a file")
+        with open(mk, "rb") as f:
+            rec = json.loads(f.read().decode("utf-8"))
+        reason = rec["reason"]
+        if not (isinstance(reason, str) and REASON.match(reason)):
+            raise ValueError("reason")
+        return reason, rec
+    except (OSError, ValueError, TypeError, KeyError):
+        return "unreadable", None
 
 
 def request_of(tick, env):
@@ -1123,9 +1319,10 @@ def plan_one(tick, env, tools, allow):
         after = snapshot(tick, spec, tools)
     except TooLarge:
         after = None
-    changed = changed_reason(before, after)
+    keys = []
+    changed = changed_reason(before, after, keys)
     if changed:
-        poison(tick, changed[len("planner-changed-"):])
+        poison(tick, changed[len("planner-changed-"):], keys or ["snapshot"])
         return None, spec, changed
     if os.path.islink(spec_path) or not os.path.isfile(spec_path):
         return None, spec, "spec-replaced"
@@ -1554,6 +1751,18 @@ def _run_tick(a, tick):
         return 2
     tick.grant = gid
     print("TICK: grant %s expires_at %s" % (gid, tick.grant_expires))
+    # R2: a tamper caught in an earlier tick holds until the owner clears it. The next
+    # tick's baseline would trust the changed files, so no stage runs at all.
+    marked = read_marker(tick.root)
+    if marked is not None:
+        reason, rec = marked
+        changed = (rec or {}).get("changed")
+        print("STOP: planner-tamper persisted %s: no stage runs until the owner inspects "
+              "what changed (%s/%s%s) and runs `pipeline tamper-clear --by <name>`"
+              % (reason, PIPELINE_DIR, TAMPER_MARKER,
+                 ": " + ", ".join(shown(str(c)) for c in changed[:5])
+                 if isinstance(changed, list) and changed else ""))
+        return 4
     load_grant_payload(tick)  # R17: the owner's planner and the pinned allowlist
     # R17: spec-first-planning's files before any planner runs. Every later run of one of
     # its tools (caps, plan, derive-grant) first checks that nothing changed since.
@@ -1684,6 +1893,40 @@ def cmd_schedule(a):
     return 0
 
 
+def cmd_tamper_clear(a):
+    """The owner's step (R2): remove the tamper marker and log who removed it. Exit 2
+    without a --by name, 3 while a tick holds the lock, else 0."""
+    by = (a.by or "").strip()
+    if not by or not all(c.isprintable() for c in by) or len(by) > 200:
+        print("STOP: tamper-clear needs --by <name>: the owner who inspected what changed")
+        return 2
+    try:
+        with tick_lock(a.root):
+            marked = read_marker(a.root)
+            if marked is None:
+                print("TAMPER: none")
+                return 0
+            reason, rec = marked
+            mk = marker_path(a.root)
+            if os.path.isdir(mk) and not os.path.islink(mk):
+                shutil.rmtree(mk)
+            else:
+                os.unlink(mk)
+            log_tamper(a.root, {"at": _now(), "event": "clear", "by": by, "reason": reason,
+                                "marker": rec})
+            print("TAMPER: cleared %s by %s" % (reason, shown(by)))
+            return 0
+    except Refused as e:
+        print("STOP: state-dir reason=%s dir=%s" % (e, PIPELINE_DIR))
+        return 2
+    except Locked:
+        print("STOP: locked: another pipeline tick holds %s/%s" % (PIPELINE_DIR, LOCK_FILE))
+        return 3
+    except OSError as e:
+        print("STOP: tamper-clear cannot remove the marker: %s" % type(e).__name__)
+        return 2
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="pipeline")
     p.add_argument("--root", default=".")
@@ -1696,6 +1939,9 @@ def main(argv=None):
                         "of the newest live one")
     s.add_argument("--growth-source", default="growth",
                    help="the intake source name for growth signals (default growth)")
+    s = sub.add_parser("tamper-clear",
+                       help="the owner clears a persisted planner tamper (after reading it)")
+    s.add_argument("--by", default=None, help="the owner's name (required)")
     s = sub.add_parser("schedule")
     acts = s.add_subparsers(dest="action", required=True)
     inst = acts.add_parser("install")
@@ -1719,7 +1965,8 @@ def main(argv=None):
     if not os.path.isdir(a.root):
         print("STOP: --root %s is not a directory" % a.root)
         return 2
-    return {"tick": cmd_tick, "schedule": cmd_schedule}[a.cmd](a)
+    return {"tick": cmd_tick, "schedule": cmd_schedule,
+            "tamper-clear": cmd_tamper_clear}[a.cmd](a)
 
 
 if __name__ == "__main__":

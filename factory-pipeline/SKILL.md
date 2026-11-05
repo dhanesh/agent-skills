@@ -147,8 +147,11 @@ Before and after the planner, the stage takes a tamper snapshot: the sha256 of e
 in the work tree (tracked, untracked and git-ignored, except the spec and the tick's and
 the conductor's state directories), of `.git/config`, `HEAD`, `refs/`, `hooks/` and
 `info/` (not `objects/`, which is large and runs nothing), of the global git config and every `core.hooksPath`
-directory, and of every file in the spec-first-planning skill that it runs. Any change
-makes the plan wait. spec_lint and spec_to_tasks run (as `python -I -S -B`) only when their
+directory, and of every file in the spec-first-planning skill that it runs. Those skill
+files are hashed at their real paths, and every symlink on the way is recorded by its
+target: the skill directory that the `skills` CLI installs as a symlink, a parent
+directory, or a file inside the skill. So an edit through a link, a retargeted link or a
+new link is a change too. Any change makes the plan wait. spec_lint and spec_to_tasks run (as `python -I -S -B`) only when their
 bytes match the snapshot. Every git call of the tick runs with `core.fsmonitor=false`,
 `core.hooksPath=/dev/null`, no replace objects, no system config and no `GIT_*` variable
 from the caller, and every tool gets the same switches through `GIT_CONFIG_COUNT`.
@@ -163,6 +166,14 @@ check, no derive grant), moves every plan of the tick (the ready ones too) and e
 derived grant to the digest list as waiting for the owner's read, prints
 `STAGE: <name> skipped planner-tamper=<what>` for autopick, plan, derive grant and build,
 still runs release stage and digest (they run no spec-first-planning code), and exits 4.
+The poison outlives the tick: the tick writes `.skill-contract/pipeline/tamper.json` (the
+time, the reason and the changed paths), and every later tick prints
+`STOP: planner-tamper persisted <reason>` right after the grant check, runs no stage and
+exits 4, until the owner runs
+`python3 "$SKILL_DIR/assets/pipeline.py" --root <repo> tamper-clear --by <name>`. That
+command removes the marker, logs who cleared it in `tamper-log.jsonl`, and exits 2
+without `--by`. The marker is part of the tamper snapshot, so a planner that writes,
+edits or removes it poisons its own tick (`planner-changed-state`).
 Before every run of a spec-first-planning tool, the tick checks every file of that skill,
 and every program root, against that baseline. The program roots are every program and
 code root the tick runs after a planner: the interpreter the tools run with (its binary,
@@ -192,7 +203,7 @@ hooks and fsmonitor are off for every tool the tick runs, the sweep commands inc
 
 Anything else prints `PLAN: waiting <spec> reason=<reason>` and hands nothing on. The
 reasons include `planner-exit=<n>`, `planner-timeout`, `planner-changed-the-repo`,
-`planner-changed-git`, `planner-changed-tools`, `snapshot-too-large-<files|bytes>`,
+`planner-changed-git`, `planner-changed-tools`, `planner-changed-state`, `snapshot-too-large-<files|bytes>`,
 `allowlist-changed`, `lint-failed`, `allowlist-unlisted` (a check command is not on the
 allowlist), `spec-exists` and `spec-not-ignored`. The plan then
 waits for the owner's read, and the digest lists it. Before each plan after the first,
@@ -242,7 +253,12 @@ removed (decision D9 of the factory spec: a run installs no timer).
    that start with two spaces and `<stage>|` are the stage tool's own output. When the tick
    prints `STOP: planner-tamper <what>` and exits 4, a planner changed what the tick relies
    on: report every waiting plan, tell the owner to inspect the `  plan| changed:` paths
-   before the next tick, and do not derive or build anything by hand. When the tick
+   before the next tick, and do not derive or build anything by hand. When it prints
+   `STOP: planner-tamper persisted <reason>`, no stage ran: report the reason and the
+   paths that `tamper.json` names. The owner MUST inspect every file that `tamper.json`
+   names before anyone runs `tamper-clear`, because the next tick takes a fresh baseline
+   from those files and trusts whatever a planner left in them. Run `tamper-clear --by
+   <name>` only when the owner asks for it in this session and gives their own name. When the tick
    prints `STOP: no-grant reason=<reason>` and exits 2, no stage ran: report the reason
    (`none`, `revoked`, `expired`, `stale`, `tracked` and so on), and tell the owner that a
    new pipeline grant is theirs to accept (`write_grant.py --pipeline` in
