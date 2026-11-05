@@ -64,6 +64,10 @@ CLI: python3 pipeline_testkit.py stubs <dir>   (prints STUBS: <dir>)
                                      GRANT: <id> per derived grant, oldest first)
      python3 pipeline_testkit.py finish <repo>  (marks every conductor run finished;
                                                   prints FINISHED: <run id> for each)
+     python3 pipeline_testkit.py relfix <dir>   (a release fixture, R19: prints REPO:,
+                                                  SKILLS:, RELEASE: 1.2.0 and GRANT: <id>)
+     python3 pipeline_testkit.py merge <repo>   (merges the release pull request into
+                                                  main; prints MERGED: <commit>)
 
 The build stage (R18): conductor_stub(skills) writes a stub factory-conductor
 `assets/conductor.py` that logs its argv, PATH and interpreter flags to
@@ -73,6 +77,14 @@ The build stage (R18): conductor_stub(skills) writes a stub factory-conductor
 commit, a git-ignored .skill-contract/, a pipeline grant, the stubs and the stub
 conductor, and (verify=True) a verify skill. built_grant(repo, pipeline_id, gated) writes
 a spec, a plan and a real grant derived from the pipeline grant that pins both.
+
+The release stage (R19): release_stub(skills) writes a stub release-conductor whose
+release.py is the real one with its command line replaced: each command logs its argv,
+PATH and interpreter flags to <skills>/release-calls.jsonl, `stage` only records the
+release commit (status staging_verify), and every other command exits 2.
+release_fixture(d) builds a repo where the REAL `release prep` prepared release 1.2.0 (a
+real release grant, release/1.2.0 pushed to a local bare origin, the PR command `true`),
+so the release pull request is open. release_merge(repo) merges it into main.
 """
 import datetime
 import json
@@ -585,6 +597,139 @@ def plan_fixture(d, mode="good", max_plans=3, items=(), with_planner=True):
     return repo, skills, agent
 
 
+# ── the release stage (R19) ─────────────────────────────────────────────────────────────
+# The stub release-conductor. Its release.py is the real one (so the tick's probe asks the
+# real merged-check and grant check) with the command line replaced: every command logs
+# {argv, path, exe, isolated, no_site} as one JSON line to <skills dir>/release-calls.jsonl
+# and runs nothing real. `stage` records what the real stage records before it runs
+# anything (the release commit in `stage`, status staging_verify) and prints
+# `STAGE: <v> built <commit>`. Every other command exits 2.
+RELEASE_ASSETS = os.path.join(os.path.dirname(SKILL_DIR), "release-conductor", "assets")
+RELEASE_MAIN = 'if __name__ == "__main__":\n    sys.exit(main())\n'
+RELEASE_STUB_MAIN = r'''if __name__ == "__main__":
+    _home = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    _args = sys.argv[1:]
+    with open(os.path.join(_home, "release-calls.jsonl"), "a", encoding="utf-8") as _f:
+        _f.write(json.dumps({"argv": _args, "path": os.environ.get("PATH"),
+                             "exe": sys.executable, "isolated": sys.flags.isolated,
+                             "no_site": sys.flags.no_site}) + "\n")
+    if _args[:1] != ["stage"]:
+        sys.exit(2)
+    _root = os.path.abspath(_args[_args.index("--root") + 1])
+    _rel = _stage_release(_root)
+    _path, _pinned, _gv = _grant_pins(_root, _rel)
+    import argparse as _ap
+    _commit = _stage_commit(_root, _rel, _ap.Namespace(commit=None), _pinned, _gv)
+    _rel.stage = {"commit": _commit, "stub": True}
+    _rel.release_commit = _commit
+    _rel.set_status("staging_verify")
+    _rel.save()
+    print("STAGE: %s built %s" % (_rel.version, _commit))
+    print("NEXT: dispatch-verifier %s" % _commit)
+    sys.exit(0)
+'''
+
+
+def release_stub(skills):
+    """Write the stub release-conductor (SKILL.md, release.py, contract_check.py) under
+    skills and return the stub release.py path."""
+    d = os.path.join(skills, "release-conductor", "assets")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(skills, "release-conductor", "SKILL.md"), "w",
+              encoding="utf-8") as f:
+        f.write("---\nname: release-conductor\ndescription: stub for the pipeline tests\n---\n")
+    with open(os.path.join(RELEASE_ASSETS, "release.py"), encoding="utf-8") as f:
+        src = f.read()
+    if not src.endswith(RELEASE_MAIN):
+        raise RuntimeError("release.py does not end with its __main__ block")
+    path = os.path.join(d, "release.py")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(src[:-len(RELEASE_MAIN)] + RELEASE_STUB_MAIN)
+    shutil.copyfile(os.path.join(RELEASE_ASSETS, "contract_check.py"),
+                    os.path.join(d, "contract_check.py"))
+    return path
+
+
+def release_calls(skills):
+    try:
+        with open(os.path.join(skills, "release-calls.jsonl"), encoding="utf-8") as f:
+            return [json.loads(ln) for ln in f if ln.strip()]
+    except OSError:
+        return []
+
+
+RELEASE_VERSION = "1.2.0"
+RELEASE_GIT = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+               "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+
+def release_recipe():
+    """A valid release recipe whose commands run nothing (the stub stage never runs them)."""
+    return {"build": ["true"], "deploy_staging": ["true"], "deploy_prod": ["true"],
+            "rollback": ["true", "{version}"], "health": ["true"],
+            "version_probe": ["true"], "staging_checks": [["true"]],
+            "prod_smoke": [["true"]], "version": {"file": "package.json", "key": "version"},
+            "bump": "minor", "artifact": "rebuild", "deploy_timeout": 5,
+            "verify_skill": ".claude/skills/verify-app"}
+
+
+def release_git(repo, *args):
+    return subprocess.run(["git", "-C", repo, "-c", "core.hooksPath=/dev/null",
+                           "-c", "commit.gpgsign=false"] + list(args), check=True,
+                          timeout=60, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                          env=dict(os.environ, **RELEASE_GIT)).stdout.decode().strip()
+
+
+def release_fixture(d, planner=None):
+    """(repo, skills, release grant id) for the release stage under d: a git repo on main
+    at version 1.1.0 with a committed recipe and verify skill, a pipeline grant, the
+    stubs, the stub release-conductor, and a local bare origin. The REAL release.py
+    (beside factory-pipeline) runs `release prep` (its PR command is `true`), so the
+    release 1.2.0 is prepped with a real release grant and its pull request is open:
+    release/1.2.0 is pushed and not merged. release_merge() merges it."""
+    d = os.path.abspath(d)
+    repo, skills, origin = (os.path.join(d, n) for n in ("repo", "skills", "origin.git"))
+    os.makedirs(repo, exist_ok=True)
+    release_git(repo, "init", "-q", "-b", "main")
+    write_rel(repo, ".gitignore", ".skill-contract/\n")
+    write_rel(repo, "package.json", json.dumps({"version": "1.1.0"}) + "\n")
+    verify_skill(repo)
+    write_rel(repo, ".release/recipe.json", json.dumps(release_recipe(), indent=2) + "\n")
+    stubs(skills)
+    release_stub(skills)
+    pipeline_grant(repo, planner=planner, allowlist=PLAN_ALLOWLIST)
+    release_git(repo, "add", "-A")
+    release_git(repo, "commit", "-q", "-m", "fixture")
+    subprocess.run(["git", "init", "-q", "--bare", origin], check=True, timeout=60,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    release_git(repo, "remote", "add", "origin", origin)
+    cp = subprocess.run([sys.executable, os.path.join(RELEASE_ASSETS, "release.py"), "prep",
+                         "--root", repo, "--driver", "agent-1", "--approved-by", "Owner",
+                         "--pr-cmd", '["true"]'], capture_output=True, text=True,
+                        timeout=180, env=dict(os.environ, **RELEASE_GIT))
+    if cp.returncode != 0:
+        raise RuntimeError("release prep failed:\n" + cp.stdout + cp.stderr)
+    with open(os.path.join(repo, ".skill-contract", "releases", RELEASE_VERSION,
+                           "state.json"), encoding="utf-8") as f:
+        gid = json.load(f)["grant"]["id"]
+    return repo, skills, gid
+
+
+def release_merge(repo):
+    """The owner merges the release pull request: a --no-ff merge of release/1.2.0 into
+    the local main (as `git pull` brings it). Returns the merge commit."""
+    release_git(repo, "merge", "-q", "--no-ff", "release/%s" % RELEASE_VERSION,
+                "-m", "Merge release %s" % RELEASE_VERSION)
+    return release_git(repo, "rev-parse", "HEAD")
+
+
+def release_status(repo, version=RELEASE_VERSION):
+    with open(os.path.join(repo, ".skill-contract", "releases", version, "state.json"),
+              encoding="utf-8") as f:
+        return json.load(f)
+
+
 def hold(repo, seconds):
     """Hold the pipeline lock of repo for `seconds`, the way a running tick holds it."""
     import pipeline  # noqa: E402  (same directory)
@@ -616,6 +761,16 @@ if __name__ == "__main__":
             print("GRANT: %s" % built_grant(repo, pid, gated=gated, tag=str(i),
                                             now=datetime.datetime.now(datetime.timezone.utc)
                                             + datetime.timedelta(seconds=i)))
+        sys.exit(0)
+    if len(sys.argv) == 3 and sys.argv[1] == "relfix":
+        repo, skills, gid = release_fixture(os.path.abspath(sys.argv[2]))
+        print("REPO: %s" % repo)
+        print("SKILLS: %s" % skills)
+        print("RELEASE: %s" % RELEASE_VERSION)
+        print("GRANT: %s" % gid)
+        sys.exit(0)
+    if len(sys.argv) == 3 and sys.argv[1] == "merge":
+        print("MERGED: %s" % release_merge(os.path.abspath(sys.argv[2])))
         sys.exit(0)
     if len(sys.argv) == 3 and sys.argv[1] == "finish":
         runs = os.path.join(os.path.abspath(sys.argv[2]), ".skill-contract", "runs")

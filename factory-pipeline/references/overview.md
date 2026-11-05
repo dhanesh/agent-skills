@@ -1,6 +1,6 @@
 # factory-pipeline: the stages of one tick
 
-Status: partly built. `pipeline tick` ships. Three of its nine stages are not built yet
+Status: partly built. `pipeline tick` ships. Two of its nine stages are not built yet
 and report `pending-R<n>`. The design is `docs/factory/2026-11-04-autonomous-factory-spec.md`
 in the agent-skills repository (requirements R12 to R21).
 
@@ -70,11 +70,11 @@ A detail can follow the result, for example `exit=3` or `picked=2`.
 | `plan` | For each picked envelope, writes the spec skeleton into the git-ignored spec directory, runs the owner's planner to complete it, and hands the plan on only when lint and the allowlist pass (R17). See "The plan stage". With no pick, the result is `idle`. | `spec-first-planning`: `intake_request.py` (or `idea_request.py`), `spec_lint.py --unattended`, `spec_to_tasks.py --allowlist`, `spec_to_tasks.py --envelope`; the planner from the grant's `planner` field |
 | `derive-grant` | For each plan that the plan stage hands on, derives a per-plan grant from the pipeline grant. With no plan, the result is `idle`. | `spec-first-planning`: `write_grant.py --under-pipeline <grant> --root <repo> --plan <plan>` |
 | `build` | Starts one factory-conductor run for the oldest derived grant that no run names yet, while no run in the root is unfinished (R18). See "The build stage". With nothing to build, the result is `idle`. | `factory-conductor`: `conductor init --plan <plan> --root <repo>`, then `conductor reentry install --root <repo>` when the grant has a reentry block; `spec-first-planning`: `contract_check.py check-grant` |
-| `release-stage` | Not built yet (R19). Result: `pending-R19`. | (`release-conductor`, later) |
+| `release-stage` | Runs `release stage` once for the release that `release prep` prepared, only after the owner merged its release pull request and while the release grant covers it (R19). See "The release stage". With no release, the result is `idle`. | `release-conductor`: `release stage --root <repo> --unattended`; a read-only probe that asks release-conductor's own merged-check and grant check |
 | `digest` | Not built yet (R21). Result: `pending-R21`. | none |
 
-The one-tick lock (R14), the caps (R15), the plan stage (R17), the build stage (R18) and
-the schedule (R16) ship; see their sections.
+The one-tick lock (R14), the caps (R15), the plan stage (R17), the build stage (R18), the
+release stage (R19) and the schedule (R16) ship; see their sections.
 
 ## The plan stage
 
@@ -152,9 +152,9 @@ tick:
 - runs no further spec-first-planning tool;
 - moves every plan of this tick, the ready ones too, and every derived grant to the
   digest list, with the reason `planner-tamper-<what>`;
-- prints `STAGE: <name> skipped planner-tamper=<what>` for autopick, plan, derive grant
-  and build;
-- still runs release stage and digest, because they run no spec-first-planning code;
+- prints `STAGE: <name> skipped planner-tamper=<what>` for autopick, plan, derive grant,
+  build and release stage;
+- still runs digest, because it runs no sibling code;
 - ends `TICK: done stages=9 tamper=<what>` and exits 4;
 - writes the tamper marker `.skill-contract/pipeline/tamper.json` (the time, the reason
   and the changed paths), and appends a `poison` line to `tamper-log.jsonl`.
@@ -358,6 +358,70 @@ checks the baseline again before each conductor call and before `check-grant`. E
 conductor call runs as `python -I -S -B` with the pinned interpreter. After a planner,
 it also runs with the private `PATH`.
 
+## The release stage
+
+The release stage (R19) starts release-conductor's `release stage` for a release that the
+owner prepared with `release prep`. The tick never writes or accepts a release grant, never
+merges a pull request, and runs no other release command: no `prep`, `deploy`,
+`verify-prod`, `rollback` or `abandon` (B1, D19). The production deploy and the rollback
+stay with the owner.
+
+The tick keeps no release state of its own. release-conductor's state in
+`.skill-contract/releases/<version>/state.json` holds the truth. Before it runs anything,
+the stage asks release-conductor's own code, read-only, the questions that `release stage`
+asks itself. A small probe imports `release.py` with the pinned interpreter
+(`python -I -S -B`):
+
+1. When there is no unfinished release, the result is `idle`.
+2. When the release is past `prepped`, or its state already has a `stage` record, the
+   result is `idle release=<v> status=<status>`. `release stage` writes that record before
+   it runs anything, so a later tick never runs the stage again for the same release.
+3. When prep has steps left (no push or no pull request yet), the release waits with
+   `release-prep`.
+4. Merged: release.py's own check. The release commit is the first-parent commit on the
+   local default branch where the version file becomes the version that the grant pins.
+   The owner's merge reaches the local branch with `git pull`. The tick fetches nothing
+   and calls no forge. When the commit is not there, the release waits with
+   `release-merge`.
+5. Granted: release-conductor's vendored `contract_check.check_grant` for
+   `local_reversible` (the first gate of `release stage`), with the grant named by its
+   path and the recipe as the subject, on the branch `release/<v>-stage`. A revoked,
+   superseded, expired, stale or tracked grant does not cover. The release then waits with
+   `release-grant`.
+
+Each gate that waits prints `RELEASE: waiting <v> <gate> <detail>` and goes on the digest
+list with the exact command that the owner runs next. When both gates hold, the stage runs
+`release stage --root <repo> --unattended` once and prints `RELEASE: staged <v>
+commit=<sha>`. release-conductor then builds the commit and asks for a verifier
+(`NEXT: dispatch-verifier`). That step, the evidence, the production deploy and the
+rollback are not the tick's.
+
+The STAGE line is one of these:
+
+- `STAGE: release-stage ok staged=1 release=<v>` (or the result word of `release stage`
+  when it exits non-zero, for example `attention staged=1 release=<v> exit=3`);
+- `STAGE: release-stage waiting reason=<gate>[,<gate>]`, for example
+  `reason=release-merge` or `reason=release-merge,release-grant`;
+- `STAGE: release-stage idle`, with `release=<v> status=<status>` when the stage has
+  started;
+- `STAGE: release-stage idle deferred=planner-ran release=<v>` (see below);
+- `STAGE: release-stage unavailable release-conductor` when a release exists but
+  release-conductor is not installed;
+- `STAGE: release-stage failed probe` when the probe gives no answer. Then the stage runs
+  nothing. The probe uses release.py's internal names, so a changed release-conductor
+  fails closed.
+
+A tick in which a planner ran gives its tools only the private `PATH` of pinned programs.
+`release stage` runs the owner's recipe commands (the build), and that `PATH` cannot find
+them. A failed build ends the release. So such a tick does not start the stage. It reports
+`idle deferred=planner-ran`, and the next tick in which no planner runs starts it.
+
+release-conductor's files are in the tamper baseline, like spec-first-planning's and
+factory-conductor's, at their real paths with every symlink on the way. A planner that
+changes `release.py`, or any file beside it, poisons the tick:
+`STAGE: release-stage skipped planner-tamper=tools`, and no release code runs. The stage
+checks the baseline again before the probe and before `release stage`.
+
 ## The caps, before each stage that starts a plan or run
 
 The pipeline grant has three caps (R15). Each is an integer of 1 or more, and each counts
@@ -481,6 +545,7 @@ them is called.
 | `timeout` | The tool ran for more than 3600 seconds. |
 | `unavailable` | The skill is not installed. |
 | `pending-R<n>` | The stage is not built yet. |
+| `waiting` | The release stage waits for a human gate: the merge of the release pull request (`release-merge`) or a live release grant (`release-grant`). |
 | `built=<n> waiting=<n>` | The build stage started `n` runs (0 or 1) and left `n` grants waiting. |
 | `skipped` | A cap stopped the tick before this stage, which would start a plan or run. The detail is `cap=<name>`. |
 

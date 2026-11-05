@@ -103,7 +103,8 @@ class PlanFixture(unittest.TestCase):
         self.assertIn("tamper=%s" % what, res["plan"])
         for stage in ("derive-grant", "build"):
             self.assertEqual(res[stage], ["skipped", "planner-tamper=%s" % what], text)
-        self.assertEqual(res["release-stage"], ["pending-R19"])
+        # S5: release-stage runs release-conductor's code, so a tamper skips it too.
+        self.assertEqual(res["release-stage"], ["skipped", "planner-tamper=%s" % what])
         self.assertEqual(res["digest"][0], "pending-R21")
         self.assertEqual(seen["plans"], [])
         self.assertEqual(seen["grants"], [])

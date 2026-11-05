@@ -397,8 +397,11 @@ report it rather than editing state.
 - **Production checks are only as good as `prod_smoke`.** verify-prod proves the probe reports
   the release and the read-only smoke checks pass; it cannot see what the smoke checks do not
   check.
-- **Nothing triggers `stage` automatically.** After the human merges the release PR, a session
-  has to run `stage`.
+- **Only factory-pipeline triggers `stage` by itself.** After the human merges the release PR,
+  a session runs `stage`, or a factory-pipeline tick starts `release stage --unattended`
+  under the human's release grant. The tick does that once per release, only when the
+  merged release commit is on the local default branch and the release grant covers it.
+  It runs no other command of this skill, and it never writes or accepts a release grant.
 - **Grant edges.** Every release gate names the release grant by its path (with the recipe as
   subject and the stage or prep worktree), so another live grant cannot answer for it. A grant
   revoked and a new one written in the same second can still tie where a gate selects by

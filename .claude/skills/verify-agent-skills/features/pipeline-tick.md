@@ -2,7 +2,7 @@
 
 - id: pipeline-tick
 - proven: no
-- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-pipeline/assets/pipeline.py:stage_plan, factory-pipeline/assets/pipeline.py:plan_one, factory-pipeline/assets/pipeline.py:run_planner, factory-pipeline/assets/pipeline.py:snapshot, factory-pipeline/assets/pipeline.py:git, factory-pipeline/assets/pipeline.py:program_roots, factory-pipeline/assets/pipeline.py:program_digest, factory-pipeline/assets/pipeline.py:make_pathdir, factory-pipeline/assets/pipeline.py:seal, factory-pipeline/assets/pipeline.py:programs_trusted, factory-pipeline/assets/pipeline.py:py, factory-pipeline/assets/pipeline.py:tools_walk, factory-pipeline/assets/pipeline.py:_resolve, factory-pipeline/assets/pipeline.py:_walk_real, factory-pipeline/assets/pipeline.py:write_marker, factory-pipeline/assets/pipeline.py:read_marker, factory-pipeline/assets/pipeline.py:cmd_tamper_clear, factory-pipeline/assets/pipeline.py:stage_build, factory-pipeline/assets/pipeline.py:unbuilt_grants, factory-pipeline/assets/pipeline.py:run_states, factory-pipeline/assets/pipeline.py:evidence_gate, factory-pipeline/assets/pipeline.py:grant_covers, factory-pipeline/assets/pipeline.py:trusted_tools, spec-first-planning/assets/write_grant.py:build_pipeline_grant, factory-conductor/assets/reentry_timer.py:cron_schedule
+- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-pipeline/assets/pipeline.py:stage_plan, factory-pipeline/assets/pipeline.py:plan_one, factory-pipeline/assets/pipeline.py:run_planner, factory-pipeline/assets/pipeline.py:snapshot, factory-pipeline/assets/pipeline.py:git, factory-pipeline/assets/pipeline.py:program_roots, factory-pipeline/assets/pipeline.py:program_digest, factory-pipeline/assets/pipeline.py:make_pathdir, factory-pipeline/assets/pipeline.py:seal, factory-pipeline/assets/pipeline.py:programs_trusted, factory-pipeline/assets/pipeline.py:py, factory-pipeline/assets/pipeline.py:tools_walk, factory-pipeline/assets/pipeline.py:_resolve, factory-pipeline/assets/pipeline.py:_walk_real, factory-pipeline/assets/pipeline.py:write_marker, factory-pipeline/assets/pipeline.py:read_marker, factory-pipeline/assets/pipeline.py:cmd_tamper_clear, factory-pipeline/assets/pipeline.py:stage_build, factory-pipeline/assets/pipeline.py:unbuilt_grants, factory-pipeline/assets/pipeline.py:run_states, factory-pipeline/assets/pipeline.py:evidence_gate, factory-pipeline/assets/pipeline.py:grant_covers, factory-pipeline/assets/pipeline.py:trusted_tools, factory-pipeline/assets/pipeline.py:stage_release_stage, factory-pipeline/assets/pipeline.py:release_probe, factory-pipeline/assets/pipeline.py:release_wait, factory-pipeline/assets/pipeline.py:release_dirs, release-conductor/assets/release.py:_stage_commit, release-conductor/assets/release.py:_grant_pins, release-conductor/assets/release.py:find_release_commit, spec-first-planning/assets/write_grant.py:build_pipeline_grant, factory-conductor/assets/reentry_timer.py:cron_schedule
 
 ## What it is
 
@@ -38,7 +38,12 @@ at most one derived grant per tick: the oldest one that no run's `state.json` na
 this tick or an earlier one, only while no conductor run in the root is unfinished. The
 plan's own `verification` block is the evidence gate: a gated plan is built only when the
 repo has the verify skill it names, and a plan with no block only when the repo has no
-verify skill. The other three stages print `pending-R<n>`.
+verify skill. The release stage (R19) runs release-conductor's `release stage` once per
+release, only after the owner merged the release pull request into the local default
+branch and while the release grant that the owner accepted at `release prep` covers it;
+until then it runs nothing and prints `STAGE: release-stage waiting
+reason=release-merge` (or `release-grant`). It never writes or accepts a release grant
+and runs no other release command. The other two stages print `pending-R<n>`.
 `pipeline schedule install --every <minutes>` (R16) installs one timer that runs the tick,
 with factory-conductor's own `reentry_timer.py`, at 15 to 1440 minutes; another interval
 exits 2 and installs nothing. The design is
@@ -71,6 +76,16 @@ skill `.claude/skills/verify-app` and each plan names it in a `verification` blo
 `plain`, there is no verify skill and no block. It prints `REPO:`, `SKILLS:` and one
 `GRANT: <id>` line per grant, oldest first. `pipeline_testkit.py finish <repo>` marks
 every conductor run finished and prints `FINISHED: <run id>` for each.
+`factory-pipeline/assets/pipeline_testkit.py relfix <dir>` builds a release-stage fixture:
+a git repo on `main` at version 1.1.0 with a committed recipe and verify skill, a pipeline
+grant, the stubs, and a stub release-conductor (the real `release.py` with its command
+line replaced: each command logs to `<dir>/skills/release-calls.jsonl`, `stage` only
+records the release commit, every other command exits 2). The REAL `release prep` then
+prepares release 1.2.0 (a real release grant, `release/1.2.0` pushed to a local bare
+origin, the PR command `true`), so the release pull request is open. It prints `REPO:`,
+`SKILLS:`, `RELEASE: 1.2.0` and `GRANT: <release grant id>`.
+`pipeline_testkit.py merge <repo>` merges `release/1.2.0` into `main` (the owner's merge,
+as `git pull` brings it) and prints `MERGED: <commit>`.
 
 Shipped:
 
@@ -133,10 +148,20 @@ Shipped:
   nothing. No live pipeline grant gives `STOP: no-grant`, exit 2. `schedule status` and
   `schedule uninstall` show and remove the timer.
 
+- The release stage (R19): while the release pull request is open, `RELEASE: waiting <v>
+  release-merge not-merged` and `STAGE: release-stage waiting reason=release-merge`, and
+  no release command runs. After the merge, with a live release grant, the tick runs
+  `release stage --root <repo> --unattended` once (`STAGE: release-stage ok staged=1
+  release=<v>`); every later tick prints `STAGE: release-stage idle release=<v>
+  status=<status>` from release-conductor's own state and runs nothing. A revoked or
+  stale release grant gives `reason=release-grant`. The merged-check and the grant check
+  are release-conductor's own code, asked read-only; the tick fetches nothing. A planner
+  that edits release-conductor's `release.py` poisons the tick before any release code
+  runs (`STAGE: release-stage skipped planner-tamper=tools`). The tick never runs
+  `prep`, `deploy`, `verify-prod`, `rollback` or `abandon`.
+
 Planned (not yet shipped):
 
-- The release stage runs `release stage` only after the release pull request is merged
-  and a release grant covers it (R19).
 - The idea stage lists ideas due within 3 days or expired, and starts the plan stage for
   a `go` envelope with no plan (R20).
 - The digest: `.skill-contract/pipeline/digest.md` lists each waiting human gate (a pull
@@ -172,7 +197,8 @@ python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-revok
   The `STAGE:` lines are, in order: `sweep ok`, `growth-review ok signals=1`, `idea-follow-up pending-R20`, `autopick ok picked=1`,
   `plan unavailable no-planner picked=1` (the testkit grant names no planner),
   `derive-grant idle plans=0`, `build idle grants=0`,
-  `release-stage pending-R19`, `digest pending-R21 waiting=1` (the pick waits). The last
+  `release-stage idle` (no release-conductor and no release), `digest pending-R21
+  waiting=1` (the pick waits). The last
   line is `TICK: done stages=9`.
 - `pt-calls.jsonl`: seven lines, in order: ops-intake `sweep`, growth-review `auto`,
   ops-intake `import` (its `stdin` is the growth signal line, and its argv holds
@@ -233,7 +259,8 @@ cp "$CR/repo/.skill-contract/pipeline/cap-stops.jsonl" "$WT/.verify-run/$INSTANC
   line. `autopick`, `plan` and `derive-grant` each say `skipped cap=max_open_runs`, and
   `build` says `unavailable factory-conductor grants=1` (that cap does not gate build, so
   the stage tries the derived grant, and the stubs hold no `conductor.py`).
-  `sweep` and `growth-review` say `ok`, and `release-stage` and `digest` say `pending-R<n>`.
+  `sweep` and `growth-review` say `ok`, `release-stage` says `idle`, and `digest` says
+  `pending-R21`.
   The last line is `TICK: done stages=9 cap=max_open_runs`.
 - `pt-cap-calls.jsonl` holds no ops-intake `autopick` line and no `under-pipeline` line.
 - `pt-cap-stops.jsonl`: one JSON line with `"cap": "max_open_runs"`, `"count": 1`,
@@ -297,9 +324,10 @@ ls "$PL/cap/repo/.skill-contract/envelopes" > "$WT/.verify-run/$INSTANCE/pt-plan
 - `pt-plan-good`: exit 0. `PLAN: ready .skill-contract/envelopes/task-plan-v1-<...>.json
   spec=.skill-contract/intake/specs/I0000000001.md`, `STAGE: plan ok ready=1 waiting=0`,
   `STAGE: derive-grant ok derived=1 refused=0` (the real `write_grant.py
-  --under-pipeline`), `STAGE: build unavailable factory-conductor grants=1` (the
-  planfix stubs hold no `conductor.py`) and
-  `STAGE: digest pending-R21 waiting=0`.
+  --under-pipeline`), `BUILD: waiting <grant> no-factory-conductor` and
+  `STAGE: build unavailable factory-conductor grants=1` (the planfix stubs hold no
+  `conductor.py`), `STAGE: release-stage idle` and `STAGE: digest pending-R21 waiting=1`
+  (the build's waiting grant).
 - `pt-plan-ignored.txt` names `.skill-contract/intake/.gitignore` as the rule that
   ignores the spec.
 - `pt-plan-cap`: exit 0. `STAGE: autopick ok picked=2`, two `PLAN: ready` lines,
@@ -356,8 +384,9 @@ cp "$ST/edit/repo/.skill-contract/pipeline/tamper-log.jsonl" "$WT/.verify-run/$I
 - `pt-link-edit`: exit 4. The output holds `  plan| changed: tools:<real store
   path>/spec-first-planning/assets/write_grant.py`, `STOP: planner-tamper tools:`,
   `PLAN: waiting .skill-contract/intake/specs/I0000000001.md
-  reason=planner-changed-tools`, `STAGE: derive-grant skipped planner-tamper=tools` and
-  `STAGE: build skipped planner-tamper=tools`. The last line is
+  reason=planner-changed-tools`, `STAGE: derive-grant skipped planner-tamper=tools`,
+  `STAGE: build skipped planner-tamper=tools` and
+  `STAGE: release-stage skipped planner-tamper=tools`. The last line is
   `TICK: done stages=9 tamper=tools`.
 - `pt-link-retarget`: the same stop, and the output holds
   `  plan| changed: tools:link:<real path of $ST/retarget/skills>/spec-first-planning`.
@@ -415,20 +444,62 @@ The dispatch cap and the conductor tamper are proven by
 fixture `conductor.py` gives `STOP: planner-tamper tools`,
 `STAGE: build skipped planner-tamper=tools` and no conductor call).
 
-The R19 to R21 recipes join this section as each ships.
+The release stage (R19). Build the release fixture, never with the real `release stage`,
+a real deploy or the network. Run a tick while the release pull request is open, merge
+it, then run two more ticks:
+
+```sh
+RS="$WT/.verify-run/$INSTANCE/rs"
+python3 factory-pipeline/assets/pipeline_testkit.py relfix "$RS" > "$WT/.verify-run/$INSTANCE/pt-release-fixture.txt"
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-release-open -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$RS/repo" --skills-dir "$RS/skills" tick
+python3 factory-pipeline/assets/pipeline_testkit.py merge "$RS/repo" > "$WT/.verify-run/$INSTANCE/pt-release-merged.txt"
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-release-merged -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$RS/repo" --skills-dir "$RS/skills" tick
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-release-again -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$RS/repo" --skills-dir "$RS/skills" tick
+cp "$RS/skills/release-calls.jsonl" "$WT/.verify-run/$INSTANCE/pt-release-calls.jsonl"
+cp "$RS/repo/.skill-contract/releases/1.2.0/state.json" "$WT/.verify-run/$INSTANCE/pt-release-state.json"
+```
+
+- `pt-release-fixture.txt` holds `RELEASE: 1.2.0` and `GRANT: <release grant id>`.
+- `pt-release-open`: exit 0. The output holds `RELEASE: waiting 1.2.0 release-merge
+  not-merged` and `STAGE: release-stage waiting reason=release-merge`, and no
+  `  release-stage| ` line. `$RS/skills/release-calls.jsonl` does not exist yet.
+- `pt-release-merged.txt` names `MERGED: <commit>`.
+- `pt-release-merged`: exit 0. The output holds `  release-stage| STAGE: 1.2.0 built
+  <commit>`, `RELEASE: staged 1.2.0 commit=<commit>` and
+  `STAGE: release-stage ok staged=1 release=1.2.0`.
+- `pt-release-again`: exit 0 and `STAGE: release-stage idle release=1.2.0
+  status=staging_verify` (the stage does not run twice).
+- `pt-release-calls.jsonl`: exactly one line, with `"argv": ["stage", "--root", "<repo>",
+  "--unattended"]`, `"isolated": 1` and `"no_site": 1`. No other release command.
+- `pt-release-state.json`: `"status": "staging_verify"` and `"release_commit": "<commit>"`.
+
+The revoked and stale release grant, the planner tamper of `release.py` and the deferral
+in a tick where a planner ran are proven by `factory-pipeline/assets/test_pipeline_release.py`
+(`reason=release-grant` and no release call; `STOP: planner-tamper tools`,
+`STAGE: release-stage skipped planner-tamper=tools` and no release call;
+`STAGE: release-stage idle deferred=planner-ran release=1.2.0`, then one stage in the next
+tick).
+
+The R20 and R21 recipes join this section as each ships.
 
 ## Proof
 
 The `pt-no-grant`, `pt-tick`, `pt-missing`, `pt-revoked`, `pt-locked`, `pt-unlocked`,
 `pt-cap`, `pt-plan-unlisted`, `pt-plan-good`, `pt-plan-cap`, `pt-link-edit`,
 `pt-link-retarget`, `pt-tamper-persisted`, `pt-tamper-clear-noby`, `pt-tamper-clear`,
-`pt-build-gated`, `pt-build-second`, `pt-build-again`, `pt-build-plain`, `pt-sched-15`, `pt-sched-1440`, `pt-sched-10`, `pt-sched-1500` and
+`pt-build-gated`, `pt-build-second`, `pt-build-again`, `pt-build-plain`,
+`pt-release-open`, `pt-release-merged`, `pt-release-again`, `pt-sched-15`, `pt-sched-1440`, `pt-sched-10`, `pt-sched-1500` and
 `pt-sched-uninstall` captures (their `STOP:`, `STAGE:` and `SCHEDULE:` lines and exit
 codes), `pt-calls.jsonl`, `pt-locked-calls.jsonl`, `pt-cap-calls.jsonl`,
 `pt-cap-stops.jsonl`, `pt-plan-ignored.txt`, `pt-plan-cap-envelopes.txt`,
 `pt-sched-files.txt`, `pt-link-edit-files.txt`, `pt-link-retarget-files.txt`,
 `pt-link-marker.json`, `pt-tamper-log.jsonl`, `pt-build-gated-calls.jsonl`,
-`pt-build-plain-calls.jsonl`, the two build fixture files and the two queue hashes. After the planned parts ship: the content of `.skill-contract/pipeline/digest.md`.
+`pt-build-plain-calls.jsonl`, `pt-release-calls.jsonl`, `pt-release-state.json`,
+`pt-release-fixture.txt`, `pt-release-merged.txt`, the two build fixture files and the two
+queue hashes. After the planned parts ship: the content of `.skill-contract/pipeline/digest.md`.
 
 ## Gotchas
 
@@ -445,6 +516,10 @@ codes), `pt-calls.jsonl`, `pt-locked-calls.jsonl`, `pt-cap-calls.jsonl`,
 - The build stage starts at most one conductor run per tick, and none while a run in the
   root is unfinished. A grant that says `BUILD: waiting ... unfinished-run=<id>` is not
   stuck: a later tick builds it once that run is finished.
+- The release stage reads the merge from the local default branch. A merge on the forge
+  reaches the tick only after the owner runs `git pull`; until then the release says
+  `release-merge`. The tick fetches nothing. In a tick where a planner ran, a ready release
+  says `idle deferred=planner-ran` and the next tick stages it.
 - The lock file stays on disk after a tick. That is correct: only a held `flock` blocks a
   tick, and the kernel drops it when the holder dies. Do not delete the file to "unlock".
 - `STOP: planner-tamper persisted` holds every later tick until the owner clears it. Do
