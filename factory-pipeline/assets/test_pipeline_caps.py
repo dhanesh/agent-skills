@@ -117,7 +117,7 @@ class CapFixture(unittest.TestCase):
         # The stages that only read, sweep or report still run, in their places.
         self.assertEqual(res["sweep"][0], "ok")
         self.assertEqual(res["growth-review"][0], "ok")
-        self.assertEqual(res["release-stage"][0], "pending-R19")
+        self.assertEqual(res["release-stage"][0], "idle")
         self.assertEqual(res["digest"][0], "pending-R21")
         self.assertIn("TICK: done stages=9 cap=%s" % cap, text)
 

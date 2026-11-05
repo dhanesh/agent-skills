@@ -16,7 +16,8 @@ gate build on that cap, and still runs the rest. The promise of R17: with no pla
 the grant, the plan stage says `unavailable no-planner` and hands on no plan. The promise
 of R18: a derived grant is built once by a stub `conductor init`, with the evidence gate
 on exactly when the repository has a verify skill, and the next tick does not build it
-again.
+again. The promise of R19: `release stage` runs once, only after the owner merged the
+release pull request, while the release grant covers it, and no other release command runs.
 The harness builds stub skills with assets/pipeline_testkit.py in a tempdir, writes a real
 pipeline grant into the fixture repo with the testkit, runs the shipped
 assets/pipeline.py against them, and a model-free grader checks the transcript. The docs check keeps every path the
@@ -25,7 +26,8 @@ docs name real, and keeps the old skeleton line out.
 Negative fixtures feed the grader known-bad transcripts (order swapped, a stage missing,
 a fake `ok` for an unbuilt stage, a build with the wrong evidence gate or two inits, a plan stage that hands on a plan with no planner, a non-zero exit, a no-grant tick that ran a stage or
 exited 0, a cap stop with no STOP line, a stage that ran after a cap stop, a reporting
-stage skipped by a cap, a build skipped by an open-runs cap) and a docs copy that names a missing
+stage skipped by a cap, a build skipped by an open-runs cap, a release staged before the
+merge, twice, or with a deploy call) and a docs copy that names a missing
 script, and require the grader to reject each one.
 """
 import os
@@ -46,9 +48,8 @@ TOOL = os.path.join(SKILL, "assets", "pipeline.py")
 STALE = "no command ships yet"
 ORDER = ["sweep", "growth-review", "idea-follow-up", "autopick", "plan", "derive-grant",
          "build", "release-stage", "digest"]
-PENDING = {"idea-follow-up": "pending-R20", "release-stage": "pending-R19",
-           "digest": "pending-R21"}
-WORDS = {"ok", "idle", "attention", "refused", "failed", "timeout", "unavailable"}
+PENDING = {"idea-follow-up": "pending-R20", "digest": "pending-R21"}
+WORDS = {"ok", "idle", "attention", "refused", "failed", "timeout", "unavailable", "waiting"}
 PATH_RE = re.compile(r"(?<![\w.-])((?:references|assets|scripts|eval)/[\w./-]*\w)")
 GRAPH_BLOCK = re.compile(r"<!-- skill-graph:start -->.*?<!-- skill-graph:end -->", re.S)
 
@@ -241,6 +242,58 @@ def run_tick(tmp, label, skills=None, behave=(), grant=True, derived=False):
     return cp, sk
 
 
+def release_errors(ticks, calls):
+    """Model-free grader for the release stage (R19, D19, B1). `ticks` is
+    [(merged, stdout)] in order; `calls` is the stub release-conductor's call log. While
+    the release pull request is open, the stage waits for the merge and runs nothing; the
+    first tick after the merge runs `release stage` once; later ticks run nothing; and no
+    other release command is ever called."""
+    errors = []
+    first = next((j for j, (m, _o) in enumerate(ticks) if m), None)
+    for i, (merged, out) in enumerate(ticks):
+        line = next((ln for ln in out.splitlines() if ln.startswith("STAGE: release-stage ")),
+                    "")
+        want = ("STAGE: release-stage waiting reason=release-merge" if not merged else
+                "STAGE: release-stage ok staged=1" if i == first else
+                "STAGE: release-stage idle")
+        if not line.startswith(want):
+            errors.append("tick %d says %r, want %r" % (i + 1, line, want))
+    if [c["argv"][0] for c in calls] != ["stage"]:
+        errors.append("release calls %s, want one stage" % [c["argv"][0] for c in calls])
+    return errors
+
+
+def release_checks(tmp):
+    d = os.path.join(tmp, "release")
+    os.makedirs(d)
+    repo, sk, _gid = K.release_fixture(d)
+
+    def tick():
+        return subprocess.run([sys.executable, TOOL, "--root", repo, "--skills-dir", sk,
+                               "tick"], capture_output=True, text=True, timeout=60,
+                              stdin=subprocess.DEVNULL).stdout
+
+    ticks = [(False, tick())]
+    open_calls = list(K.release_calls(sk))
+    K.release_merge(repo)
+    ticks += [(True, tick()), (True, tick())]
+    calls = K.release_calls(sk)
+    errs = release_errors(ticks, calls)
+    check("release stage: waits while the PR is open, stages once after the merge, "
+          "never again, and calls no other release command",
+          not errs and not open_calls, "; ".join(errs)[:120])
+    stage = calls[:1]
+    for label, t, c, want in (
+        ("release-before-merge", [(False, ticks[1][1])] + ticks[1:], stage, "tick 1"),
+        ("release-staged-twice", ticks, stage * 2, "want one stage"),
+        ("release-deploy-called", ticks, stage + [{"argv": ["deploy"]}], "want one stage"),
+        ("release-restaged", ticks[:2] + [(True, ticks[1][1])], stage, "tick 3"),
+    ):
+        bad = release_errors(t, c)
+        check("grader rejects negative fixture %s" % label,
+              any(want in e for e in bad), "; ".join(bad)[:100])
+
+
 def main():
     text = read(os.path.join(SKILL, "SKILL.md"))
     fm = frontmatter_errors(text)
@@ -321,6 +374,8 @@ def main():
                     check("grader rejects negative fixture %s" % nlabel,
                           any(want in e for e in bad), "; ".join(bad)[:100])
 
+        release_checks(tmp)
+
         cp, sk = run_tick(tmp, "no-grant", grant=False)
         errs = stop_errors(cp.stdout, cp.returncode)
         check("no pipeline grant: STOP: no-grant, exit 2, no stage ran",
@@ -347,8 +402,8 @@ def main():
         for label, out, code, want in (
             ("order-swapped", swapped, 0, "stages"),
             ("digest-missing", good.rsplit("\n", 1)[0], 0, "stages"),
-            ("fake-ok-release", good.replace("release-stage pending-R19",
-                                             "release-stage ok"), 0, "release-stage says ok"),
+            ("fake-ok-digest", good.replace("digest pending-R21", "digest ok"), 0,
+             "digest says ok"),
             ("non-zero-exit", good, 1, "exit 1"),
         ):
             bad = tick_errors(out, code)
@@ -369,7 +424,7 @@ def main():
             ["STAGE: sweep ok", "STAGE: growth-review ok", "STAGE: idea-follow-up pending-R20",
              "STOP: cap max_open_runs count=1 limit=1 stage=autopick"]
             + ["STAGE: %s skipped cap=max_open_runs" % s for s in GATED]
-            + ["STAGE: build idle grants=0", "STAGE: release-stage pending-R19",
+            + ["STAGE: build idle grants=0", "STAGE: release-stage idle",
                "STAGE: digest pending-R21"])
         for label, out, want in (
             ("cap-no-stop-line", capped.replace("STOP: cap", "NOTE: cap"), "0 STOP"),

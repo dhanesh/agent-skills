@@ -1,20 +1,20 @@
 ---
 name: factory-pipeline
 description: >-
-  The scheduled driver of the software factory. Use when the user asks for factory-pipeline,
+  The factory's scheduled driver. Use when the user asks for factory-pipeline,
   to "tick the pipeline" or to "run the whole factory on a schedule". One `pipeline tick`
-  walks the stages in order: sweep, growth review, idea follow-up,
-  autopick, plan, derive grant, build, release stage and digest, and prints one
-  `STAGE: <name> <result>` line per stage. It calls each installed sibling skill's own tool
-  (ops-intake, growth-review, spec-first-planning, factory-conductor) with no shell,
-  and reports a missing one as unavailable. No live grant gives `STOP: no-grant`, a held lock `STOP: locked`, a cap
-  `STOP: cap <name>`. Plan runs the grant's planner and hands a plan on only when
-  spec_lint and the allowlist pass. Build runs one `conductor init` per tick.
-  `pipeline schedule install` sets a timer. Partly built: idea follow-up, release stage
-  and digest report `pending-R<n>`. Every human gate stays with the owner. Not for
-  driving one plan to a PR (factory-conductor) or writing a plan (spec-first-planning).
+  walks the stages in order: sweep, growth review, idea follow-up, autopick, plan, derive
+  grant, build, release stage and digest, and prints one `STAGE: <name> <result>` line per
+  stage. It calls each sibling skill's tool (ops-intake, growth-review,
+  spec-first-planning, factory-conductor, release-conductor) with no shell; a missing one
+  is unavailable. No live grant gives `STOP: no-grant`, a held lock `STOP: locked`, a cap
+  `STOP: cap <name>`. Plan hands a plan on only when spec_lint and the allowlist pass.
+  Build runs one `conductor init` per tick. Release stage runs `release stage` once, after
+  the owner merged the release PR. `schedule install` sets a timer. Partly built: idea
+  follow-up and digest report `pending-R<n>`. Human gates stay with the owner. Not
+  for driving one plan to a PR (factory-conductor) or writing a plan (spec-first-planning).
 license: MIT
-compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, offline. The stages call the sibling skills ops-intake, growth-review, spec-first-planning and factory-conductor when they are installed.
+compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, offline. The stages call the sibling skills ops-intake, growth-review, spec-first-planning, factory-conductor and release-conductor when they are installed.
 metadata:
   author: dhanesh
   version: "0.1.0"
@@ -43,7 +43,10 @@ each plan that the plan stage hands on. Before each stage that would start a pla
 it checks the grant's caps (R15, shipped): at a cap it prints `STOP: cap <name>` and skips
 the stages that the cap gates. The build stage (R18, shipped) starts factory-conductor's
 `conductor init` for at most one derived grant per tick; see "The build stage" below. The
-idea follow-up, release stage and digest stages report `pending-R<n>`. `pipeline schedule install` (R16, shipped) puts
+release stage (R19, shipped) runs release-conductor's `release stage` once per release,
+only after the owner merged the release pull request and while the owner's release grant
+covers it; see "The release stage" below. The idea follow-up and digest stages report
+`pending-R<n>`. `pipeline schedule install` (R16, shipped) puts
 the tick on a timer; see "The schedule" below. The
 design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R12 to R21) in the
 agent-skills repository.
@@ -115,7 +118,8 @@ growth review runs `growth auto --source <name>` and hands its stdout to `intake
 `intake autopick`; plan drafts and checks a spec for each picked item (below); derive
 grant runs `write_grant.py --under-pipeline <grant> --root <repo> --plan <plan>` for each
 plan the plan stage hands on; build runs factory-conductor's `conductor init --plan <plan>
---root <repo>` for one unbuilt grant (below). The tick finds each sibling skill
+--root <repo>` for one unbuilt grant (below); release stage runs release-conductor's
+`release stage --root <repo> --unattended` once for a merged, granted release (below). The tick finds each sibling skill
 by its directory name in the roots that skill-contract `discover` searches. A missing
 skill gives `STAGE: <name> unavailable`, and the tick goes on.
 
@@ -165,8 +169,8 @@ trusts nothing for the
 rest of the tick. It runs no further spec-first-planning tool (no cap count, no plan
 check, no derive grant), moves every plan of the tick (the ready ones too) and every
 derived grant to the digest list as waiting for the owner's read, prints
-`STAGE: <name> skipped planner-tamper=<what>` for autopick, plan, derive grant and build,
-still runs release stage and digest (they run no spec-first-planning code), and exits 4.
+`STAGE: <name> skipped planner-tamper=<what>` for autopick, plan, derive grant, build and
+release stage, still runs digest (it runs no sibling code), and exits 4.
 The poison outlives the tick: the tick writes `.skill-contract/pipeline/tamper.json` (the
 time, the reason and the changed paths), and every later tick prints
 `STOP: planner-tamper persisted <reason>` right after the grant check, runs no stage and
@@ -261,6 +265,36 @@ check out a branch, edit a plan or finish a run to clear its reason, because eac
 is a guard: a second run strands the first one, and the plan and the branch are what the
 owner's grant covers.
 
+## The release stage
+
+The release stage (R19) starts release-conductor's `release stage` for the release that
+the owner prepared with `release prep`. It keeps no state of its own: release-conductor's
+`.skill-contract/releases/<version>/state.json` says which release is unfinished and
+whether its stage has started. Before it runs anything, a read-only probe asks
+release-conductor's own code the questions `release stage` asks: is the release commit on
+the local default branch (the owner merged the release PR and pulled), and does the
+release grant cover `local_reversible` on `release/<v>-stage` (not revoked, superseded,
+expired, stale or tracked)? The tick fetches nothing and calls no forge.
+
+- Both hold: it runs `release stage --root <repo> --unattended` once and prints
+  `RELEASE: staged <v> commit=<sha>` and `STAGE: release-stage ok staged=1 release=<v>`.
+  release-conductor records the stage before it runs anything, so a later tick prints
+  `STAGE: release-stage idle release=<v> status=<status>` and runs nothing.
+- The PR is not merged: `RELEASE: waiting <v> release-merge not-merged`. A grant that
+  does not cover: `RELEASE: waiting <v> release-grant grant-<reason>`. Each goes on the
+  digest list with the owner's next command, and the STAGE line is
+  `STAGE: release-stage waiting reason=<gate>[,<gate>]`.
+- No release: `STAGE: release-stage idle`. A tick in which a planner ran defers a ready
+  release to the next tick (`idle deferred=planner-ran`), because its private `PATH`
+  cannot run the recipe's build.
+
+The tick never writes or accepts a release grant, never merges the release PR, and runs no
+other release command (`prep`, `deploy`, `verify-prod`, `rollback`, `abandon`). After the
+stage, the verifier, the production deploy and any rollback go on through
+release-conductor with the owner. release-conductor's files are in the tamper baseline: a
+planner that changes `release.py` poisons the tick before any release code runs
+(`STAGE: release-stage skipped planner-tamper=tools`).
+
 ## The schedule
 
 `python3 "$SKILL_DIR/assets/pipeline.py" --root <repo> schedule install --every <minutes>`
@@ -318,7 +352,8 @@ removed (decision D9 of the factory spec: a run installs no timer).
    needs a sentence in your report: `attention` (the tool exited 3), `refused` (exit 2, for
    example no intake config or no registered growth plan), `failed`, `timeout`,
    `unavailable` (the skill is not installed), `skipped` (a cap stopped the tick before
-   that stage) or `pending-R<n>` (not built yet).
+   that stage), `waiting` (the release stage waits for the owner's merge or release
+   grant) or `pending-R<n>` (not built yet).
 3. **Follow the tool lines.** A `NEXT:` or `STOP:` line in a stage's output belongs to that
    stage's skill. Read it in that skill's terms, and give the owner the steps that are theirs.
 4. **Verify the report.** Check it against the success criteria below, then re-check.
@@ -356,4 +391,5 @@ The outcome eval (`eval/run_eval.py`) runs the tick on stub skills from
 `assets/pipeline_testkit.py` and grades the nine lines; the unit suites are
 `assets/test_pipeline_tick.py`, `assets/test_pipeline_lock.py`,
 `assets/test_pipeline_caps.py`, `assets/test_pipeline_plan.py`,
-`assets/test_pipeline_build.py` and `assets/test_pipeline_schedule.py`.
+`assets/test_pipeline_build.py`, `assets/test_pipeline_release.py` and
+`assets/test_pipeline_schedule.py`.

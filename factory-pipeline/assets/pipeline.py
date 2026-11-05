@@ -48,7 +48,12 @@ per stage, optionally followed by a detail such as `exit=3` or `picked=2`:
                   unfinished, the work tree is clean and spec-first-planning's
                   `check-grant --subject <plan>` covers it; then `conductor reentry
                   install` when the grant has a reentry block (R18; see stage_build())
-  release-stage   not built yet (R19): `pending-R19`
+  release-stage   release-conductor `release stage --root R --unattended` for the release
+                  that `release prep` prepared, at most once, only after the owner merged
+                  its release pull request (into the local default branch) and while the
+                  release grant the owner accepted at prep covers it; otherwise it runs
+                  nothing and waits (`release-merge`, `release-grant`) for the digest. It
+                  runs no other release command (R19, D19; see stage_release_stage())
   digest          not built yet (R21): `pending-R21`
 
 Before each stage that would start a new plan or run, the tick checks the pipeline
@@ -106,7 +111,8 @@ are tripwires, not a sandbox, so the owner gives the planner restricted tools.
 Result words: ok, attention (the tool exited 3, or some plans were refused), refused (the
 tool exited 2, or 1 for write_grant), failed (another exit, or the tool could not start),
 timeout, unavailable (the skill is not installed), idle (nothing to do), pending-R<n> (the
-stage is not built yet), skipped (a cap stopped the tick before it). A stage's non-zero result does not stop the tick: the tick goes
+stage is not built yet), skipped (a cap stopped the tick before it), waiting (the release
+stage waits for a human gate). A stage's non-zero result does not stop the tick: the tick goes
 on to the next stage and exits 0 when every stage ran.
 
 Each sibling skill is installed on its own, so the tick looks for it by directory name
@@ -119,7 +125,7 @@ The tick runs every tool with PYTHON (sys.executable) -I -S -B (see LAUNCH), an 
 list and no shell. Stdlib only, Python 3.10+, POSIX. Exits: 0 every stage ran; 2 usage error, a state
 directory that is not git-ignored, or no live pipeline grant; 3 another tick holds the
 pipeline lock; 4 a planner tamper poisoned the tick (`STOP: planner-tamper <what>`: no
-further spec-first-planning or factory-conductor tool runs, no grant is derived, no build
+further spec-first-planning, factory-conductor or release-conductor tool runs, no grant is derived, no build
 starts, every plan
 of the tick waits; see poison()), or an earlier tick's tamper is not cleared yet.
 
@@ -187,8 +193,9 @@ STAGE_CAPS = {"autopick": CAPS, "plan": CAPS, "derive-grant": CAPS,
               "build": ("max_dispatches_per_day",)}
 GATED = tuple(STAGE_CAPS)
 # R17: after a planner tamper, every stage that would run spec-first-planning code or
-# start work is skipped. release-stage and digest run no spec-first-planning code.
-TAMPER_SKIP = ("autopick", "plan", "derive-grant", "build")
+# start work is skipped. R19 (S5): release-stage runs release-conductor's code, which is in
+# the same baseline, so it is skipped too. Digest runs no sibling code.
+TAMPER_SKIP = ("autopick", "plan", "derive-grant", "build", "release-stage")
 CAP_STOPS = "cap-stops.jsonl"
 # R2: a planner tamper outlives its tick. poison() writes TAMPER_MARKER in the git-ignored
 # state directory, and every later tick stops right after the grant check while it exists
@@ -209,6 +216,11 @@ CONDUCTOR = ("factory-conductor", "assets/conductor.py")
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 GRANT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1"
 VERIFY_ROOTS = (".claude/skills", ".agents/skills")
+# The release stage (R19): release-conductor's own tool. Its release state lives in
+# RELEASES_DIR (release.py's RELEASES_DIR); the tick only lists that directory.
+RELEASE = ("release-conductor", "assets/release.py")
+RELEASES_DIR = ".skill-contract/releases"
+PROBE_LINE = re.compile(r"^PROBE: (\{.*\})\s*$")
 RUN_LINE = re.compile(r"^RUN: (run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6})\s*$")
 EVERY_MIN, EVERY_MAX = 15, 1440  # minutes
 WHOLE = re.compile(r"^[0-9]{1,6}\Z")
@@ -833,8 +845,9 @@ def _walk_real(out, budget, path, seen):
 def trusted_tools(tick):
     """{skill: [tool paths]} of every skill whose tools the tick runs after a planner, or
     None when spec-first-planning is not installed: spec-first-planning (the plan stage's
-    tools, write_grant.py for caps and derive-grant, and contract_check.py) and, when it
-    is installed, factory-conductor (conductor.py, which the build stage runs, R18)."""
+    tools, write_grant.py for caps and derive-grant, and contract_check.py) and, when they
+    are installed, factory-conductor (conductor.py, which the build stage runs, R18) and
+    release-conductor (release.py, which the release stage runs, R19)."""
     rels = [TOOLS[PLANNING], CHECKER[1]] + sorted(PLAN_TOOLS.values())
     found = [find_tool(tick.roots, PLANNING, rel) for rel in rels]
     if found[0] is None:
@@ -843,6 +856,9 @@ def trusted_tools(tick):
     conductor = find_tool(tick.roots, CONDUCTOR[0], CONDUCTOR[1])
     if conductor is not None:
         out[CONDUCTOR[0]] = [conductor]
+    release = find_tool(tick.roots, RELEASE[0], RELEASE[1])
+    if release is not None:
+        out[RELEASE[0]] = [release]
     return out
 
 
@@ -1658,8 +1674,172 @@ def stage_build(tick):
     return "ok", detail
 
 
+# ── the release stage (R19) ─────────────────────────────────────────────────────────────
+# The release stage starts release-conductor's `release stage` for the release that
+# `release prep` prepared, only after the owner merged its release pull request and while
+# the release grant that the owner accepted at prep still covers it (D19). The tick never
+# writes or accepts a release grant, never merges, and runs no other release command: no
+# deploy, verify-prod, rollback, abandon or prep (B1).
+#
+# It keeps no state of its own. release-conductor's state says everything: the one
+# unfinished release, its status, whether stage has started (`stage` in its state.json,
+# which stage writes before it runs anything), and the grant prep wrote. The probe below
+# asks release-conductor's own code, read-only, the same questions `release stage` asks
+# before it runs anything:
+#   - merged: release.py's _stage_commit(), the check that makes `release stage` stop
+#     with `not-merged`. The release commit is the first-parent commit on the local
+#     default branch where the version file becomes the version the grant pins. The
+#     owner's merge reaches the local branch with `git pull`; the tick fetches nothing.
+#   - granted: release-conductor's vendored contract_check.check_grant() for
+#     local_reversible (stage's first gate), with the grant named by its path and the
+#     recipe as the subject (release.py's _gate rule), on the stage branch
+#     release/<version>-stage. Revoked, superseded, expired, stale (the recipe changed)
+#     and tracked grants do not cover.
+# The probe uses release.py's private names. When they change, the probe fails and the
+# stage runs nothing (`failed probe`), so a change in release-conductor fails closed.
+#
+# At most once per release: the stage runs only while the release is `prepped` and its
+# state has no `stage` record. A later tick sees the record and runs nothing. A stage
+# that release.py refused before it wrote the record changed nothing, and a later tick
+# may start it again.
+#
+# A tick in which a planner ran is sealed: its tools get only the private PATH of pinned
+# programs. `release stage` runs the owner's recipe commands (build), which that PATH
+# cannot find, and a failed build ends the release. So a sealed tick does not start the
+# stage; it reports `idle deferred=planner-ran`, and the next tick without a planner
+# starts it.
+RELEASE_PROBE = r'''import json, os, sys
+tool, root = sys.argv[1], sys.argv[2]
+sys.path[:] = [os.path.dirname(tool)] + [p for p in sys.path if os.path.isdir(p)]
+import argparse
+import release as R
+
+
+def say(**kw):
+    print("PROBE: " + json.dumps(kw, sort_keys=True))
+    sys.exit(0)
+
+
+busy = R.unfinished_releases(root)
+if not busy:
+    say(state="none")
+if len(busy) != 1 or busy[0][1] is None:
+    say(state="stop", version=",".join(v for v, _ in busy), reason="release-unfinished",
+        detail="; ".join("%s (%s)" % (v, s or "no state") for v, s in busy),
+        next="finish or abandon the other releases with the owner")
+version, status = busy[0]
+rel = R.Release.load(root, version)
+if status != "prepped" or rel.stage is not None:
+    say(state="started", version=version, status=status)
+prep = rel.prep or {}
+if not (prep.get("pushed") and prep.get("pr")):
+    say(state="stop", version=version, reason="release-prep", detail="prep steps pending",
+        next="fix what stopped prep, then re-run release prep with the owner to resume")
+try:
+    path, pinned, gversion = R._grant_pins(root, rel)
+except R.Stop as e:
+    say(state="stop", version=version, reason="release-grant", detail=e.reason, next=e.nxt)
+rep = R.CC.check_grant(root, "local_reversible", path=path, subject=R.RECIPE_PATH,
+                       branch=R.RELEASE_BRANCH_PATTERNS[1] % version)
+grant = {"status": rep["status"], "reason": rep["reason"], "id": rep["id"]}
+try:
+    commit = R._stage_commit(root, rel, argparse.Namespace(commit=None), pinned, gversion)
+    merged = {"ok": True, "commit": commit}
+except R.Stop as e:
+    merged = {"ok": False, "reason": e.reason, "next": e.nxt}
+except R.Refused as e:
+    merged = {"ok": False, "reason": "refused", "next": str(e)}
+say(state="checked", version=version, grant=grant, merged=merged)
+'''
+
+
+def release_dirs(root):
+    """The release directories under RELEASES_DIR (release-conductor's state)."""
+    d = os.path.join(root, *RELEASES_DIR.split("/"))
+    try:
+        return sorted(n for n in os.listdir(d) if os.path.isdir(os.path.join(d, n)))
+    except OSError:
+        return []
+
+
+def release_probe(tick, tool):
+    """The probe's answer (a dict), or None when it failed or gave no answer."""
+    _w, code, out = run_tool(tick, "release-stage", [PYTHON, "-I", "-S", "-B", "-c",
+                                                     RELEASE_PROBE, tool, tick.root],
+                             echo_stdout=False)
+    for line in out.decode("utf-8", "replace").splitlines():
+        m = PROBE_LINE.match(line)
+        if m and code == 0:
+            try:
+                ans = json.loads(m.group(1))
+            except ValueError:
+                return None
+            return ans if isinstance(ans, dict) else None
+    return None
+
+
+def release_wait(tick, version, gate, detail, nxt):
+    """Print one RELEASE: waiting line and add the gate to the digest list."""
+    print("RELEASE: waiting %s %s %s" % (shown(version), gate, shown(detail)))
+    tick.waiting.append((gate, "release %s" % shown(version), nxt))
+
+
 def stage_release_stage(tick):
-    return "pending-R19", ""
+    """R19: `release stage` for the prepared release, once, only when its release pull
+    request is merged and a live release grant covers it (see the comment above)."""
+    tool = find_tool(tick.roots, RELEASE[0], RELEASE[1])
+    if tool is None:
+        return ("unavailable", "release-conductor") if release_dirs(tick.root) else ("idle", "")
+    if not tools_trusted(tick):  # poison() printed STOP: planner-tamper
+        return "refused", "tamper=%s" % tick.tampered
+    ans = release_probe(tick, tool)
+    if ans is None:
+        return "failed", "probe"
+    state, version = ans.get("state"), str(ans.get("version") or "")
+    cmd = "%s %s" % (shlex.quote(PYTHON), shlex.quote(tool))
+    if state == "none":
+        return "idle", ""
+    if state == "started":
+        return "idle", "release=%s status=%s" % (shown(version), shown(str(ans.get("status"))))
+    gates = []
+    if state == "stop":
+        reason = ans.get("reason") if REASON.match(str(ans.get("reason"))) else "release-stop"
+        gates.append((reason, str(ans.get("detail") or ""), str(ans.get("next") or "")))
+    elif state == "checked":
+        merged = ans.get("merged") if isinstance(ans.get("merged"), dict) else {}
+        grant = ans.get("grant") if isinstance(ans.get("grant"), dict) else {}
+        if not merged.get("ok"):
+            why = str(merged.get("reason") or "unknown")
+            gates.append(("release-merge" if why == "not-merged" else "release-" + why
+                          if REASON.match(why) else "release-stop", why,
+                          "%s; the next pipeline tick then runs `%s stage --root %s`"
+                          % (merged.get("next") or "merge the release pull request",
+                             cmd, shlex.quote(tick.root))))
+        if grant.get("status") != "COVERED":
+            gates.append(("release-grant", "grant-%s" % (grant.get("reason") or "none"),
+                          "the release grant %s does not cover the release: end it with "
+                          "the owner (`%s abandon --root %s --approved-by <name> --reason "
+                          "<why>`), then accept a new release grant at `%s prep --root %s "
+                          "--approved-by <name> --driver <agent id>`"
+                          % (grant.get("id") or "(none)", cmd, shlex.quote(tick.root), cmd,
+                             shlex.quote(tick.root))))
+    else:
+        return "failed", "probe"
+    if gates:
+        for gate, detail, nxt in gates:
+            release_wait(tick, version, gate, detail, nxt)
+        return "waiting", "reason=%s" % ",".join(g for g, _d, _n in gates)
+    if tick.sealed:
+        print("RELEASE: deferred %s planner-ran" % shown(version))
+        return "idle", "deferred=planner-ran release=%s" % shown(version)
+    if not tools_trusted(tick):
+        return "refused", "tamper=%s" % tick.tampered
+    word, code, _out = run_tool(tick, "release-stage",
+                                py(tool, "stage", "--root", tick.root, "--unattended"))
+    print("RELEASE: staged %s commit=%s" % (shown(version),
+                                            shown(str((ans.get("merged") or {})
+                                                      .get("commit")))))
+    return word, join("staged=1 release=%s" % shown(version), exit_detail(code))
 
 
 def stage_digest(tick):
