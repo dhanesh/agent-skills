@@ -100,7 +100,7 @@ class LockFixture(unittest.TestCase):
 
     def assertRan(self, cp):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("TICK: done stages=9", cp.stdout)
+        self.assertIn("TICK: done stages=10", cp.stdout)
 
 
 class TestLockHeld(LockFixture):

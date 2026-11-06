@@ -3,8 +3,8 @@ name: factory-pipeline
 description: >-
   The factory's scheduled driver. Use when the user asks for factory-pipeline,
   to "tick the pipeline" or to "run the whole factory on a schedule". One `pipeline tick`
-  runs, in order: sweep, growth review, idea follow-up, autopick, plan, derive
-  grant, build, release stage and digest, one `STAGE: <name> <result>` line each.
+  runs, in order: sweep, incident probe, growth review, idea follow-up, autopick, plan,
+  derive grant, build, release stage and digest, one `STAGE: <name> <result>` line each.
   It calls each sibling skill's tool (ops-intake, growth-review, idea-validation,
   spec-first-planning, factory-conductor, release-conductor) with no shell; a missing one
   is unavailable. No live grant, a held lock or a cap prints `STOP:`. Idea follow-up
@@ -15,7 +15,7 @@ description: >-
   the owner's. Not for one plan to a PR (factory-conductor) or planning
   (spec-first-planning).
 license: MIT
-compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, offline. The stages call the sibling skills ops-intake, growth-review, idea-validation, spec-first-planning, factory-conductor and release-conductor when they are installed.
+compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, offline. The stages call the sibling skills ops-intake, incident-watch, growth-review, idea-validation, spec-first-planning, factory-conductor and release-conductor when they are installed.
 metadata:
   author: dhanesh
   version: "0.1.0"
@@ -32,7 +32,7 @@ mechanical part of each stage. It stops at the human gates: merge, production de
 rollback, spend, external messages, the release grant and idea decisions stay with the
 owner.
 
-**Status: built.** `pipeline tick` ships with all nine stages. First it takes the repo's pipeline lock
+**Status: built.** `pipeline tick` ships with all ten stages. First it takes the repo's pipeline lock
 (R14, shipped), so only one tick runs at a time: a tick that finds the lock held prints
 `STOP: locked: ...`, changes nothing and exits 3. Before any stage, it checks the standing
 pipeline grant (R13, shipped): with no live grant it runs no stage, prints
@@ -117,7 +117,9 @@ carrying a merged change to production is `release-conductor`.
 
 The stage list, what each stage calls today and the result words are in
 [references/overview.md](references/overview.md). In short: sweep runs `intake sweep`;
-growth review runs `growth auto --source <name>` and hands its stdout to `intake import
+incident probe runs incident-watch's `incident probe` once when `.release/recipe.json`
+exists, and prints `STAGE: incident-probe skip no-recipe` when it does not (it runs only
+the recipe's probes, never a rollback or a deploy); growth review runs `growth auto --source <name>` and hands its stdout to `intake import
 --format intake-signals-jsonl --source <name>` as two separate processes; idea follow-up
 runs idea-validation's read-only `ideas list` and `ideas status <slug>` (below); autopick runs
 `intake autopick`; plan drafts and checks a spec for each picked item (below); derive
@@ -428,11 +430,11 @@ removed (decision D9 of the factory spec: a run installs no timer).
    `STOP: cap <name> ...`, report the cap, its count and limit and the stage it stopped
    before; for `STOP: cap uncounted`, name the file the tick could not read. The owner
    decides whether to wait for the next UTC day, close a run or accept a new grant.
-2. **Read every STAGE: line.** There are nine, in order. A result other than `ok` or `idle`
+2. **Read every STAGE: line.** There are ten, in order. A result other than `ok` or `idle`
    needs a sentence in your report: `attention` (the tool exited 3), `refused` (exit 2, for
    example no intake config or no registered growth plan), `failed`, `timeout`,
    `unavailable` (the skill is not installed), `skipped` (a cap stopped the tick before
-   that stage), `waiting` (the release stage waits for the owner's merge or release
+   that stage), `skip` (the incident probe found no recipe), `waiting` (the release stage waits for the owner's merge or release
    grant) or `pending-R<n>` (not built yet). Then read
    `.skill-contract/pipeline/digest.md` and give the owner each waiting gate with its
    command.
@@ -455,14 +457,14 @@ gate that the owner keeps (spec constraint B1).
 
 ## Deliverable
 
-A tick report: the nine `STAGE:` lines as a table (stage, result, detail), a sentence for
+A tick report: the ten `STAGE:` lines as a table (stage, result, detail), a sentence for
 each result that is not `ok` or `idle`, the owner's next step for each `STOP:` or
 `NEXT:` line a stage printed, including a `STOP: cap` line, and each digest entry with its
 command.
 
 ## Success criteria
 
-- The report shows nine stages in the order of the tick.
+- The report shows ten stages in the order of the tick.
 - Each stage that is not `ok` or `idle` has a plain reason.
 - No stage that says `pending-R<n>` is called done or run.
 - Each `IDEA: due` line is reported with its `ideas status <slug>` command, and no idea
@@ -473,8 +475,9 @@ command.
   `skipped` stage is called done.
 
 The outcome eval (`eval/run_eval.py`) runs the tick on stub skills from
-`assets/pipeline_testkit.py` and grades the nine lines; the unit suites are
+`assets/pipeline_testkit.py` and grades the ten lines; the unit suites are
 `assets/test_pipeline_tick.py`, `assets/test_pipeline_lock.py`,
 `assets/test_pipeline_caps.py`, `assets/test_pipeline_plan.py`,
 `assets/test_pipeline_build.py`, `assets/test_pipeline_release.py`,
-`assets/test_pipeline_ideas.py` and `assets/test_pipeline_schedule.py`.
+`assets/test_pipeline_ideas.py`, `assets/test_pipeline_incident.py` and
+`assets/test_pipeline_schedule.py`.
