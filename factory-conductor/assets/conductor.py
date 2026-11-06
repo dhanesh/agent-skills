@@ -2450,13 +2450,23 @@ def _run_steps(task, steps, checkout, quiet=False):
     (none when quiet: finish's integration re-run prints its own INTEGRATION: lines)."""
     python_argv = CC.resolve_python()
     skill_dirs = CC.skill_index(cwd=checkout)  # the task's own copy of a project skill
+    installed = None  # names of skills outside the checkout, read on first need
     runs = []
     for v in steps:
         cmd = v["command"]
+        shadow = None
         if not isinstance(cmd, list) or not cmd or not all(isinstance(a, str) for a in cmd):
             rc, out, err, argv = (None, "", "command is not a non-empty list of strings: %r"
                                   % (cmd,), cmd)
         else:
+            if installed is None:
+                installed = _installed_skill_names(checkout)
+            shadow = _skill_shadow(cmd, skill_dirs, checkout, installed)
+        if shadow:
+            # A committed skill claims the name of one installed outside the checkout:
+            # its copy would run as the pinned check, so the step fails unrun (S2, D21).
+            rc, out, err, argv = None, "", "skill-shadow: %s -> %s" % shadow, cmd
+        elif isinstance(cmd, list) and cmd and all(isinstance(a, str) for a in cmd):
             try:
                 argv = CC.resolve_command(cmd, python_argv, skill_dirs)
             except LookupError as e:
@@ -2471,11 +2481,47 @@ def _run_steps(task, steps, checkout, quiet=False):
             # Exit 0, but nothing was tested: the step proves nothing, so it fails.
             ok = False
             record["no_tests"] = empty
+        if shadow:
+            record["skill_shadow"] = {"skill": shadow[0], "path": shadow[1]}
         runs.append(record)
-        if not quiet:
-            print("VERIFY: %s %s %s%s" % (task, "ok" if ok else "fail", _shown(argv),
-                                         " (ran no tests: %s)" % empty if empty else ""))
+        if quiet:
+            if shadow:
+                sys.stderr.write("task %s: skill-shadow: %s -> %s\n" % ((task,) + shadow))
+        else:
+            print("VERIFY: %s %s %s%s%s" % (task, "ok" if ok else "fail", _shown(argv),
+                                           " (ran no tests: %s)" % empty if empty else "",
+                                           " (skill-shadow: %s -> %s)" % shadow
+                                           if shadow else ""))
     return runs
+
+
+def _inside(path, top):
+    """True when path (resolved) is top or lies under it (resolved)."""
+    p, t = os.path.realpath(path), os.path.realpath(top)
+    return p == t or p.startswith(t.rstrip(os.sep) + os.sep)
+
+
+def _installed_skill_names(checkout):
+    """The frontmatter names of the skills found outside the checkout: the same roots
+    skill_index searches, minus the checkout's own project roots."""
+    roots = [r for r in CC.skill_roots(cwd=checkout, warnings=[]) if r[0] != "project"]
+    return {name for _label, d, name, _fm, _err in CC.iter_skills(roots)
+            if not _inside(d, checkout)}
+
+
+def _skill_shadow(cmd, skill_dirs, checkout, installed):
+    """(name, path relative to the checkout) for the first {skill_dir:<name>} in cmd that
+    resolves inside the checkout while a skill of that name is installed outside it;
+    None when there is none. A project skill with no installed twin is not a shadow."""
+    for arg in cmd:
+        m = CC.SKILL_DIR_RE.match(arg)
+        if not m:
+            continue
+        name = m.group("name")
+        d = skill_dirs.get(name)
+        if d is not None and name in installed and _inside(d, checkout):
+            return name, os.path.relpath(os.path.realpath(d), os.path.realpath(checkout))
+    return None
 
 
 def _shown(argv):

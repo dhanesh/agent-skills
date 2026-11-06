@@ -144,6 +144,14 @@ sha256 recorded at `init`; state.json is never the source of the commands. Then:
   clone of the worktree's head, checked out with no inherited config, attributes, hooks or
   filters, and removed afterwards;
 - a committed symlink whose target is absolute or leaves the tree fails the verify;
+- a `{skill_dir:<name>}` that resolves to a skill inside the checkout fails its step with
+  `skill-shadow` when a skill of the same frontmatter name is also installed outside the
+  checkout (`SKILL_CONTRACT_PATH`, the user's `~/.agents/skills` and `~/.claude/skills`, or
+  user-scope plugins). The step does not run. Its record carries `skill_shadow` (`skill`,
+  `path`) and its line ends with `(skill-shadow: <name> -> <path>)`. A writer cannot replace
+  a pinned checker this way. A project skill with no installed twin still resolves to the
+  checkout copy. finish's integration re-run applies the same rule and writes the reason to
+  stderr;
 - each command's process group is killed when it ends (timeout 600 s);
 - a commit made while the verify ran fails it;
 - the very commit a failed review rejected fails it before any command runs ("no new commit
