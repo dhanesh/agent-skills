@@ -41,7 +41,7 @@ An exit 3 does not always mean the run stopped. Read the lines: `STOP:` means it
 | `resume` | `STATUS: run=<id> last_event=<e> at=<t>`, then any `PARK: <task> worktree-missing\|budget_dispatches`, `READY: <ids>`, one `NEXT: <task> <action>` per in-flight task and `NEXT: run next`; or `STOP: <reason>` and `NEXT: run finish`; or `GATE: ASK`, `STOP: grant_ask` and `NEXT: run ask`; on a finished run, `FINISH: <envelope>` and `NEXT: run finish\|done` (or `run ask`) | 0, including a finished run; 3 stopped (now or before) or gate asks |
 | `watch` | exactly one line: `REENTRY: disabled`, `no-run`, `done`, `superseded`, `ask`, `waiting-human`, `live`, `not-stalled`, `exhausted`, `started <n> pid=<pid>` or `failed` | 0; 2 `failed` |
 | `reentry install\|uninstall\|status` | install: `REENTRY: installed every <n> min`, `REENTRY: disabled`, a `GATE: ASK` line, or `REENTRY: failed`; uninstall: `REENTRY: uninstalled` or `REENTRY: failed`; status: `REENTRY: timer <paths or crontab line\|none>`, `REENTRY: lease <json\|null>`, `REENTRY: count <n>`, `REENTRY: last <event json\|none>` | 0; 3 `disabled` or gate asks (install); 2 `failed`, or no run |
-| `finish [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]` | in a tiered plan first one `INTEGRATION: <fail\|flaky\|unavailable\|stale-mutant\|uncaught> <task> proof <feature>:C<n>` line per proof re-run that did not pass (see "finish"), then `INTEGRATION: pass <sha>`, `INTEGRATION: fail <task> <command>` lines or `INTEGRATION: skipped grant_ask`, `FINISH: <envelope>`, then `STOP: integration_red` or `STOP: grant_ask`, or any `GATE: ASK` or `REMOTE: pending push pr (run finish --retry-remote)` | 0 all done; 3 integration red or skipped, or a remote step asked, failed or is pending; 2 refused, including a run branch that moved since the integration re-run |
+| `finish [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]` | in a tiered plan first one `INTEGRATION: <fail\|flaky\|unavailable\|stale-mutant\|uncaught> <task> proof <feature>:C<n>` line per proof re-run that did not pass (see "finish"), then `INTEGRATION: pass <sha>`, `INTEGRATION: fail <task> <command>` lines or `INTEGRATION: skipped grant_ask`, `FINISH: <envelope>`, then `STOP: integration_red` or `STOP: grant_ask`, or any `GATE: ASK` or `REMOTE: pending push pr (run finish --retry-remote)`, or `PR: <n> <envelope>` when the PR command printed a PR URL | 0 all done; 3 integration red or skipped, or a remote step asked, failed or is pending; 2 refused, including a run branch that moved since the integration re-run |
 
 ### init
 
@@ -347,6 +347,14 @@ done or the integration was red, and, for an integration skipped because the gra
   body lists proven, parked and blocked tasks, the stop, the budget and the budget note. Every
   string from the plan, a reviewer or a parker sits inside an inline code span, so it cannot add
   headings, links, @mentions or closing keywords.
+- **The PR envelope.** When the PR command's output holds a URL of the form
+  `https://<host>/<owner>/<repo>/pull/<n>`, `finish` writes a second `run-result/v1` envelope
+  and prints `PR: <n> <path>`. Its payload is the first payload plus `pr: {"number": n}` and
+  `replaces: {id, path, sha256}`, which name the first envelope. Its `wasRevisionOf` names the
+  first envelope too. Its subjects and assertions are the first envelope's. The run state then
+  points at the new envelope, and keeps the old path as `superseded`. A later `finish`,
+  `finish --retry-remote` and `resume` print and read the new envelope. When the output has no
+  PR URL, there is no second envelope. `--retry-remote` after a failed PR step writes it once.
 - **Remote steps.** The first ASK or failure skips the rest and exits 3. An exit 3 with no
   `GATE:` line means the push or PR command itself failed: its stderr says why, and a
   `--retry-remote` loop will not fix it. A later plain `finish`
