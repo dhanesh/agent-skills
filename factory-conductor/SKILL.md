@@ -154,7 +154,10 @@ Each step is one command. Read its output lines, not just the exit code.
    head. That run is the proof. A test command that exits 0 but whose runner reports that no
    test ran (cargo, go, unittest, jest/vitest, mocha; pytest already exits 5) fails its step,
    printed as `(ran no tests: …)`, because it proves nothing. An uncommitted change or a symlink that escapes the tree fails
-   it. `VERIFY: <task> pass <sha>` names the proven commit and moves the task to review.
+   it. A `{skill_dir:<name>}` that resolves to a skill committed in the checkout, while a skill
+   of the same frontmatter name is installed outside it, fails its step unrun, printed as
+   `(skill-shadow: <name> -> <path>)`: committed content cannot replace a pinned checker. A
+   project skill with no installed twin still resolves to the checkout copy. `VERIFY: <task> pass <sha>` names the proven commit and moves the task to review.
    `VERIFY: <task> fail` (exit 3) sends it back: resume the same executor with the failing
    `VERIFY:` lines and the output tails in `state.json` under
    `tasks.<task>.verify_runs[].stdout_tail` and `stderr_tail`, then verify again.
