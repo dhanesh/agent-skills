@@ -349,6 +349,12 @@ done or the integration was red, and, for an integration skipped because the gra
   lets a run end.
 - **Pull request.** It gates `open_pr`, then runs `--pr-cmd`, by default
   `["gh","pr","create","--title","{title}","--base","{base_branch}","--body-file","{body_file}"]`.
+  The allowlist is `gh pr create` followed only by `--title {title}`, `--base {base_branch}`
+  and `--body-file {body_file}`, in any order, each one time at most. `gh` is the bare
+  program name, found on PATH. Any other program, option, `--opt=value` form, `--` or extra
+  argument exits 2 with a `--pr-cmd ...` message before any push or PR step. The conductor
+  checks the command again right before the PR step runs, on `--retry-remote` too. To stub
+  the PR step in a test, put a stub `gh` first on PATH.
   The conductor never pushes the base branch, so it must already be on the remote (`init`
   warns when `origin` has no copy of it).
   Placeholders are whole tokens: `{run_branch}`, `{base_branch}`, `{title}`, `{body_file}`. The
@@ -812,7 +818,7 @@ STATUS: T2 proven
 STATUS: T3 parked reason="verify_red_after_repairs"
 STATUS: budget {"max_dispatches": 12, "max_parallel": 2, "max_repairs_per_task": 1, "max_usd": 5, "wall_clock_min": 120} dispatches=6
 STATUS: budget max_tokens/max_usd recorded, not enforced (the runtime does not expose usage)
-$ conductor finish --pr-cmd '["echo","https://github.com/o/r/pull/7"]'
+$ conductor finish                                             (a stub gh first on PATH)
 INTEGRATION: pass 52bf22e3013fc203fb897c612f6f2e0a63907c41
 FINISH: <repo>/.skill-contract/envelopes/run-result-v1-20260922T211857Z-e57aa8.json
 $ conductor next                                               (exit 2)
@@ -822,7 +828,7 @@ run finished: <repo>/.skill-contract/envelopes/run-result-v1-20260922T211857Z-e5
 Six dispatches: three executors, one repair, two reviewers. `finish` first re-ran T1's and
 T2's checks on the merged run branch (its head is T2's merge commit), then pushed
 `52bf22e3013fc203fb897c612f6f2e0a63907c41:refs/heads/factory/add-greeting` (the verified head) to a local bare `origin` and
-ran the PR step, stubbed here with `echo`, each after its gate said COVERED. T3's worktree and
+ran the PR step, stubbed here with a `gh` first on PATH, each after its gate said COVERED. T3's worktree and
 branch `factory/add-greeting--T3` are kept for the human. A receiver checks the result:
 
 ```text
