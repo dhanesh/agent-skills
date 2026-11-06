@@ -133,6 +133,97 @@ class TestIncidentProbeStage(Fixture):
         self.assertEqual(IK.calls(self.repo), [])
 
 
+INTAKE_SKILL = os.path.join(os.path.dirname(os.path.dirname(HERE)), "ops-intake")
+INTAKE_FILES = ("intake.py", "adapters.py", "contract_check.py", "intake_sweep.py")
+
+
+def install_ops_intake(skills, repo):
+    """Replace the stub ops-intake with the REAL one, and configure the incident-watch
+    source in the fixture repo (the shape ops-intake's own incident tests use)."""
+    d = os.path.join(skills, "ops-intake")
+    shutil.rmtree(d, True)
+    os.makedirs(os.path.join(d, "assets"))
+    shutil.copyfile(os.path.join(INTAKE_SKILL, "SKILL.md"), os.path.join(d, "SKILL.md"))
+    for name in INTAKE_FILES:
+        shutil.copyfile(os.path.join(INTAKE_SKILL, "assets", name),
+                        os.path.join(d, "assets", name))
+    shutil.copytree(os.path.join(INTAKE_SKILL, "assets", "schemas"),
+                    os.path.join(d, "assets", "schemas"))
+    os.makedirs(os.path.join(repo, ".intake"), exist_ok=True)
+    with open(os.path.join(repo, ".intake", "config.json"), "w", encoding="utf-8") as f:
+        json.dump({"sources": {"incident-watch": {"enabled": True,
+                                                  "formats": ["intake-signals-jsonl"]}}}, f)
+
+
+class TestIncidentImport(Fixture):
+    """R2: a record the probe opens is imported into ops-intake in the same tick."""
+
+    def setUp(self):
+        super().setUp()
+        install_ops_intake(self.skills, self.repo)
+
+    def queue(self):
+        with open(os.path.join(self.repo, ".skill-contract", "intake", "queue.json"),
+                  encoding="utf-8") as f:
+            q = json.load(f)
+        items = q["items"].values() if isinstance(q.get("items"), dict) else q["items"]
+        return [i for i in items if i.get("source") == "incident-watch"]
+
+    def intake(self, cmd):
+        cp = subprocess.run([sys.executable, os.path.join(self.skills, "ops-intake",
+                                                          "assets", "intake.py"),
+                             "--root", self.repo, cmd], capture_output=True,
+                            text=True, timeout=60, stdin=subprocess.DEVNULL)
+        return cp.stdout.splitlines()
+
+    def test_two_failing_ticks_import_one_incident_item_and_a_third_adds_none(self):
+        IK.behave(self.repo, "health", 1)
+        _cp, stages = self.tick()
+        self.assertNotIn("incident=", stages[1])
+        self.assertFalse(os.path.exists(os.path.join(self.repo, ".skill-contract",
+                                                     "intake", "queue.json"))
+                         and self.queue())
+        cp, stages = self.tick()
+        self.assertIn("  incident-probe| INCIDENT: opened ", cp.stdout)
+        self.assertEqual(stages[1], "STAGE: incident-probe attention exit=3 probe=fail "
+                                    "commands=4 failed=1 incident=opened import=ok")
+        self.assertIn("  incident-probe| IMPORT: incident-watch intake-signals-jsonl ok 1 "
+                      "problems 0", cp.stdout)
+        items = self.queue()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["kind"], "incident")
+        self.assertTrue(items[0]["source_id"].startswith("inc-"))
+        self.assertTrue(self.intake("status")[0].startswith("SYNC: 1 items new=1 "))
+        listed = [ln for ln in self.intake("list") if ln.startswith("ITEM: ")]
+        self.assertEqual(len(listed), 1)
+        self.assertIn(items[0]["source_id"], listed[0])
+        cp, stages = self.tick()
+        self.assertIn("  incident-probe| INCIDENT: open ", cp.stdout)
+        self.assertNotIn("incident=", stages[1])
+        self.assertEqual(len(self.queue()), 1)
+        self.assertTrue(self.intake("status")[0].startswith("SYNC: 1 items new=1 "))
+        self.assertNotIn("rollback", IK.ran(self.repo))
+
+    def test_passing_probe_imports_nothing(self):
+        self.tick()
+        cp, stages = self.tick()
+        self.assertEqual(stages[1], "STAGE: incident-probe ok probe=pass commands=4 failed=0")
+        self.assertNotIn("IMPORT: incident-watch", cp.stdout)
+        path = os.path.join(self.repo, ".skill-contract", "intake", "queue.json")
+        self.assertFalse(os.path.exists(path) and self.queue())
+
+    def test_missing_ops_intake_still_probes_and_does_not_fail_the_tick(self):
+        shutil.rmtree(os.path.join(self.skills, "ops-intake"))
+        IK.behave(self.repo, "health", 1)
+        self.tick()
+        cp, stages = self.tick()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(stages[0], "STAGE: sweep unavailable ops-intake")
+        self.assertEqual(stages[1], "STAGE: incident-probe attention exit=3 probe=fail "
+                                    "commands=4 failed=1 incident=opened import=unavailable")
+        self.assertTrue(cp.stdout.splitlines()[-1].startswith("TICK: done stages=10"))
+
+
 class TestStageShape(unittest.TestCase):
     def test_stage_sits_right_after_sweep(self):
         names = [n for n, _ in P.STAGES]

@@ -34,7 +34,10 @@ per stage, optionally followed by a detail such as `exit=3` or `picked=2`:
                   skip no-recipe`. The detail names the probe result (`probe=pass` or
                   `probe=fail`, `commands=<n>`, `failed=<n>`). It runs no other recipe
                   command: never a rollback, a deploy or a build (S1, D17; see
-                  stage_incident_probe())
+                  stage_incident_probe()). When the probe prints `INCIDENT: opened`,
+                  the stage imports that record's signal in the same tick with ops-intake
+                  `intake import --format intake-signals-jsonl --source incident-watch`
+                  and adds `incident=opened import=<result>` to the detail (R2)
   growth-review   growth-review `growth auto --source NAME`, whose stdout bytes go to
                   ops-intake `intake import --format intake-signals-jsonl --source NAME`
                   (two argv subprocesses; the bytes pass through Python, no shell pipe)
@@ -321,6 +324,7 @@ class Tick:
         self.idea_list = None  # the stdout of the idea stage's `ideas list` (R20, R21)
         self.release_checked = set()  # the releases the release stage probed (R21)
         self.stop_facts = []  # (cap, stage, facts) of each cap stop of this tick (R21)
+        self.incident_opened = None  # the record id the incident probe opened (R2)
 
 
 # ── finding the sibling skills ──────────────────────────────────────────────────────────
@@ -504,26 +508,88 @@ RECIPE_FILE = ".release/recipe.json"  # release-conductor's RECIPE_PATH
 PROBE_RESULT = re.compile(r"^PROBE_RESULT: (pass|fail) commands=([0-9]+) failed=([0-9]+) ")
 
 
+# R2: when the probe opens an incident record in this tick (its `INCIDENT: opened <id>
+# <path>` line), the stage imports that record's signal into ops-intake in the same tick:
+# `intake import --format intake-signals-jsonl --source incident-watch -`, an argv
+# subprocess whose stdin is the one signals.jsonl line whose source_id is the opened id
+# (the growth-review pattern: the bytes pass through Python, no shell pipe). A tick in
+# which no record opens imports nothing, so a record that stays open never gives a second
+# import; ops-intake would dedupe it by source_id anyway. The detail adds
+# `incident=opened import=<word>` (and `import exit=<n>` when the import did not exit 0).
+# With ops-intake not installed it adds `import=unavailable` and the tick goes on. These
+# two tools are the only ones the stage runs (S1).
+INCIDENT_SOURCE = "incident-watch"
+INCIDENT_SIGNALS = ".skill-contract/incidents/signals.jsonl"  # incident.py SIGNALS_FILE
+INCIDENT_OPENED = re.compile(r"^INCIDENT: opened (inc-[0-9A-Za-z-]{1,80}) ")
+
+
 def stage_incident_probe(tick):
     if not os.path.isfile(os.path.join(tick.root, *RECIPE_FILE.split("/"))):
         return "skip", "no-recipe"
     tool = find_tool(tick.roots, "incident-watch")
     if tool is None:
         return "unavailable", "incident-watch"
+    tick.incident_opened = None
     word, code, detail = incident_probe(tick, tool)
-    return word, join(exit_detail(code), detail)
+    if not tick.incident_opened:
+        return word, join(exit_detail(code), detail)
+    iword, idetail = incident_import(tick, tick.incident_opened)
+    return worse(word, iword), join(exit_detail(code), detail, "incident=opened", idetail)
 
 
 def incident_probe(tick, tool):
-    """Run `incident probe` once. Return (result word, exit code, probe detail)."""
+    """Run `incident probe` once. Return (result word, exit code, probe detail), and set
+    tick.incident_opened to the id of a record the probe opened, if any."""
     roots = [a for r in tick.roots for a in ("--skills-dir", r)]
     word, code, out = run_tool(tick, "incident-probe",
                                py(tool, "--root", tick.root, *roots, "probe"))
+    detail = "probe=none"
     for ln in out.decode("utf-8", "replace").splitlines():
         m = PROBE_RESULT.match(ln + " ")
-        if m:
-            return word, code, "probe=%s commands=%s failed=%s" % m.groups()
-    return word, code, "probe=none"
+        if m and detail == "probe=none":
+            detail = "probe=%s commands=%s failed=%s" % m.groups()
+        o = INCIDENT_OPENED.match(ln + " ")
+        if o:
+            tick.incident_opened = o.group(1)
+    return word, code, detail
+
+
+def incident_signal(tick, rid):
+    """The signals.jsonl line(s) whose source_id is rid, as bytes, or b"" when the file is
+    missing, outside the root or holds no such line."""
+    rel = inside(tick.root, INCIDENT_SIGNALS)
+    if rel != INCIDENT_SIGNALS:
+        return b""
+    try:
+        with open(os.path.join(tick.root, *rel.split("/")), "rb") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return b""
+    out = []
+    for ln in lines:
+        try:
+            rec = json.loads(ln.decode("utf-8"))
+        except ValueError:
+            continue
+        if (isinstance(rec, dict) and rec.get("source") == INCIDENT_SOURCE
+                and rec.get("source_id") == rid):
+            out.append(ln + b"\n")
+    return b"".join(out)
+
+
+def incident_import(tick, rid):
+    """Import the opened record's signal into ops-intake. Return (word, detail)."""
+    intake = find_tool(tick.roots, "ops-intake")
+    if intake is None:
+        return "ok", "import=unavailable"
+    data = incident_signal(tick, rid)
+    if not data:
+        return "attention", "import=no-signal"
+    iword, icode, _ = run_tool(tick, "incident-probe",
+                               py(intake, "--root", tick.root, "import", "--format",
+                                  "intake-signals-jsonl", "--source", INCIDENT_SOURCE, "-"),
+                               input_bytes=data)
+    return iword, join("import=%s" % iword, "import " + exit_detail(icode) if icode else "")
 
 
 def stage_growth_review(tick):
