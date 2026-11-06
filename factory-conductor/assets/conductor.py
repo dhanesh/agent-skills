@@ -195,7 +195,11 @@ left as it was); a failed step exits 3 too. Completed steps are recorded (finish
 finished.pr, with the envelope's sha256: --retry-remote refuses, exit 2, an envelope
 that changed since). A later `finish` prints the same FINISH: line; while a step is pending it
 also prints REMOTE: pending push|pr and exits 3, and `finish --retry-remote` re-gates and
-runs just the pending steps. The push sends <integration head>:refs/heads/<rb>, and
+runs just the pending steps. When the PR command's output holds a URL
+https://<host>/<owner>/<repo>/pull/<n>, finish writes a second run-result envelope (a
+revision of the first: payload plus pr {number} and replaces {id, path, sha256}), prints
+PR: <n> <path>, and records it as finished.envelope (the old path as finished.superseded),
+so later commands read it; no URL, no second envelope. The push sends <integration head>:refs/heads/<rb>, and
 refuses (exit 2) when the run branch has moved since the integration re-run verified it.
 Once finished, next, start, verify, review, merge, park and decision refuse with exit 2
 ("run finished"); resume prints FINISH: and NEXT: run finish (a remote step is pending:
@@ -4762,8 +4766,73 @@ def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):
         if not ok:
             return 3
         st.finished["pr"] = _tail(out).strip() or True
+        number = pr_number(out)
+        if number is not None:
+            _write_pr_envelope(st, number)
         st.save()
     return 0
+
+
+# The PR URL the PR command prints: https://<host>/<owner>/<repo>/pull/<n>, a whole token.
+PR_URL_RE = re.compile(r"(?:^|\s)https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9._-]+/"
+                       r"[A-Za-z0-9._-]+/pull/([1-9][0-9]{0,17})/?(?=\s|$)")
+
+
+def pr_number(out):
+    """The PR number in the PR command's output: the last URL of the form
+    https://<host>/<owner>/<repo>/pull/<n>, or None when it prints none."""
+    found = PR_URL_RE.findall(out or "")
+    return int(found[-1]) if found else None
+
+
+def _write_pr_envelope(st, number):
+    """After the PR command printed a PR URL (D18): write a second run-result envelope, a
+    revision of the recorded one. Its payload is the recorded payload plus `pr` {number}
+    and `replaces` {id, path, sha256}; its subjects and assertions are the recorded ones,
+    and log_sha256 still covers the same log prefix. st.finished then names the new
+    envelope (the old path kept as finished.superseded), so status, resume and a later
+    finish read it. Prints PR: <n> <path>. Never raises: on a problem it writes stderr
+    and leaves the recorded envelope as the run's result (the caller saves st)."""
+    old = st.finished.get("envelope")
+    try:
+        got = CC.sha256_file(old)
+    except (OSError, TypeError):
+        got = None
+    doc, err = CC.load_envelope(old) if got else (None, ["unreadable"])
+    if (got is None or got != st.finished.get("sha256") or err or not isinstance(doc, dict)
+            or doc.get("predicateType") != RUN_RESULT_KIND):
+        sys.stderr.write("PR #%d is open, but the run-result envelope %s cannot be revised "
+                         "(changed or unreadable); it stays the run's result\n" % (number, old))
+        return
+    pred = doc["predicate"]
+    then = _dt.datetime.strptime(pred["generatedAtTime"], "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=_dt.timezone.utc)
+    # Strictly later than the envelope it replaces, so a reader that takes the newest
+    # run-result by generatedAtTime never ties with it.
+    now = max(CC.utc_now(), then + _dt.timedelta(seconds=1))
+    payload = dict(pred["payload"], pr={"number": number},
+                   replaces={"id": pred["id"], "path": _rel(st, old), "sha256": got})
+    statement = {
+        "_type": doc["_type"], "subject": doc["subject"], "predicateType": RUN_RESULT_KIND,
+        "predicate": {
+            "skillContract": pred["skillContract"], "id": CC.new_id(RUN_RESULT_KIND, now),
+            "wasAttributedTo": {"skill": CONDUCTOR_SKILL, "version": CONDUCTOR_VERSION},
+            "generatedAtTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "wasRevisionOf": pred["id"], "payload": payload,
+            "assertions": pred["assertions"]}}
+    viol = CC.check_statement(statement)
+    if viol:
+        for n, detail in viol:
+            sys.stderr.write("FAIL: C%d: %s\n" % (n, detail))
+        sys.stderr.write("PR #%d is open, but its run-result envelope would be invalid; "
+                         "%s stays the run's result\n" % (number, old))
+        return
+    path = CC.write_envelope(st.root, statement)
+    eid = statement["predicate"]["id"]
+    st.finished.update(envelope=path, id=eid, sha256=CC.sha256_file(path), superseded=old,
+                       pr_number=number)
+    st.log("pr_result", id=eid, envelope=_rel(st, path), pr=number, replaces=pred["id"])
+    print("PR: %d %s" % (number, path))
 
 
 # watch's wait for the run lock. A timer tick must never hang: a lock held longer means

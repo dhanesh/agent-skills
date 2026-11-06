@@ -63,7 +63,7 @@ Every command below is `python3 "$SKILL_DIR/assets/conductor.py" <command> --roo
 written `conductor <command>` for short. Run it with Python 3.10 or newer. Each command prints
 one machine line per event (`RUN:`, `READY:`, `NEXT:`, `START:`, `VERIFY:`, `REVIEW:`,
 `EVIDENCE:`, `MERGE:`, `PARK:`, `GATE:`, `STOP:`, `INTEGRATION:`, `FINISH:`, `STATUS:`,
-`ASSURANCE:`, `TRAIL:`, `REENTRY:`, `USAGE:`, `PROBLEM:`, and
+`ASSURANCE:`, `TRAIL:`, `REENTRY:`, `USAGE:`, `PROBLEM:`, `PR:`, and
 `REMOTE: pending push pr (run finish --retry-remote)`) and exits **0** for OK, **3** when a
 human is needed, the run stopped, or a task was sent back or parked, and **2** when the step was
 refused or its input is invalid (usage errors exit 2 as well). One exit 2 is not a refusal,
@@ -191,7 +191,9 @@ Each step is one command. Read its output lines, not just the exit code.
 10. **Finish.** `conductor finish` first gates `local_reversible` and re-runs every proven
    task's verify commands on the merged run branch (`INTEGRATION: pass <sha>`), then writes
    the `run-result/v1` envelope (`FINISH: <path>`), then gates `push_branch` and pushes exactly
-   that verified commit, then gates `open_pr` and opens the PR against the base branch. See
+   that verified commit, then gates `open_pr` and opens the PR against the base branch. When
+   the PR command prints a PR URL, it writes a second run-result that adds `pr: {"number": n}`
+   and names the envelope it replaces (`PR: <n> <path>`); later commands read that one. See
    "Ending the run" below.
 
 **Reading any step's output.**
