@@ -24,8 +24,6 @@ import pipeline_testkit as K  # noqa: E402
 TOOL = os.path.join(HERE, "pipeline.py")
 ORDER = ["sweep", "growth-review", "idea-follow-up", "autopick", "plan", "derive-grant",
          "build", "release-stage", "digest"]
-PENDING = {"idea-follow-up": "pending-R20", "plan": "pending-R17", "build": "pending-R18",
-           "release-stage": "pending-R19", "digest": "pending-R21"}
 
 
 class Fixture(unittest.TestCase):
@@ -81,11 +79,20 @@ class TestTick(Fixture):
                                 ("ops-intake", "import"), caps, ("ops-intake", "autopick"),
                                 caps, caps])
 
-    def test_unbuilt_stages_say_pending_never_ok(self):
+    def test_every_stage_ships_and_the_digest_lists_the_pick(self):
         _, res, _ = self.tick()
-        for stage, word in PENDING.items():
-            self.assertEqual(res[stage][0], word, stage)
-        self.assertEqual(res["plan"][1], "picked=1")
+        self.assertFalse([s for s, w in res.items() if w[0].startswith("pending-")], res)
+        # R21: the digest lists the pick, which waits for the owner's read (no planner).
+        self.assertEqual(res["digest"], ["ok", "waiting=1"])
+        # R20: idea follow-up ships; the stubs hold no idea-validation and no idea.
+        self.assertEqual(res["idea-follow-up"], ["unavailable", "idea-validation", "due=0",
+                                                 "go=0"])
+        # R17: the grant names no planner, so the plan stage plans nothing.
+        self.assertEqual(res["plan"], ["unavailable", "no-planner", "picked=1"])
+        # R18: build ships; with no derived grant it has nothing to build.
+        self.assertEqual(res["build"], ["idle", "grants=0"])
+        # R19: release stage ships; with no release-conductor and no release it is idle.
+        self.assertEqual(res["release-stage"], ["idle"])
 
     def test_growth_bytes_reach_intake_import_on_stdin(self):
         self.tick()
@@ -258,7 +265,15 @@ class TestDeriveGrantSeam(Fixture):
     """derive-grant is wired for the plans R17 will hand on; drive it directly."""
 
     def make_tick(self, grant="pg-1"):
-        return P.Tick(self.repo, [self.skills], grant=grant, timeout=60)
+        t = P.Tick(self.repo, [self.skills], grant=grant, timeout=60)
+        t.baseline = P.tool_digest(t)  # run_tick takes it before any stage (R17)
+        return t
+
+    def test_no_baseline_is_a_tamper_never_a_trust(self):
+        t = P.Tick(self.repo, [self.skills], grant="pg-1", timeout=60)
+        t.plans = ["plans/a.json"]
+        self.assertEqual(P.stage_derive_grant(t), ("refused", "tamper=tools"))
+        self.assertEqual(K.calls(self.skills), [])
 
     def test_calls_write_grant_under_pipeline_per_plan(self):
         t = self.make_tick()
@@ -309,11 +324,20 @@ class TestLookupAndShell(unittest.TestCase):
     def test_no_shell_anywhere(self):
         with open(os.path.join(HERE, "pipeline.py"), encoding="utf-8") as f:
             tree = ast.parse(f.read())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.keyword):
-                self.assertNotEqual(node.arg, "shell")
-            if isinstance(node, ast.Attribute):
-                self.assertNotIn(node.attr, ("system", "popen", "Popen"))
+        popen_in = []
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            for node in ast.walk(fn):
+                if isinstance(node, ast.keyword):
+                    self.assertNotEqual(node.arg, "shell")
+                if isinstance(node, ast.Attribute):
+                    self.assertNotIn(node.attr, ("system", "popen"))
+                    if node.attr == "Popen":
+                        popen_in.append(fn.name)
+        # R17: only the planner runs through Popen (an argv list, no shell), because a
+        # timeout must kill its whole process group, and that needs the child's pid.
+        self.assertEqual(popen_in, ["run_planner"])
 
 
 if __name__ == "__main__":

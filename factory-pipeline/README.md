@@ -1,7 +1,6 @@
 # factory-pipeline
 
-**Status: partly built.** `pipeline tick` ships. Five of its nine stages are not built
-yet.
+**Status: built.** `pipeline tick` ships with all nine stages.
 
 This skill is the scheduled driver of the software factory. One `pipeline tick` runs each
 factory stage in order: sweep, growth review, idea follow-up, autopick, plan, derive
@@ -32,8 +31,39 @@ What runs today:
 - `growth-review` runs growth-review `growth auto` and imports its breaches with ops-intake
   `intake import`.
 - `autopick` runs ops-intake `intake autopick`.
+- `plan` drafts a spec for each picked item (R17). spec-first-planning's
+  `intake_request.py` writes the spec skeleton into the git-ignored
+  `.skill-contract/intake/specs/`. Then the owner's planner completes it. The planner is
+  the `planner` argv in the pipeline grant, which the owner accepted. It never comes from
+  the queue or the evidence. The tick hands the plan on only when `spec_lint.py
+  --unattended` and `spec_to_tasks.py --allowlist` pass. Otherwise it prints
+  `PLAN: waiting <spec> reason=<reason>`, and the plan waits for the owner's read. The
+  tick uses only the exit codes of these tools. It ignores what the planner says. A
+  snapshot before and after the planner makes the plan wait when the planner changed any
+  other file, the git config or hooks, or the spec-first-planning tools. Every git call of
+  the tick is hardened against hooks and fsmonitor, the owner's own hooks included (also
+  for sweep commands). A tamper poisons the tick: it prints `STOP: planner-tamper`, derives
+  no grant, starts no build, puts every plan of the tick on the digest list and exits 4.
+  Every Python tool runs as `python -I -S -B`, so no `.pth` file or `sitecustomize.py`
+  loads. Before any planner runs, the tick pins every program that it or a tool runs by
+  name (git included) to an absolute path, and takes a baseline of these programs, the
+  interpreter and its stdlib. After the first planner, every tool runs with a private
+  `PATH` that holds only wrappers to the pinned paths. A change to a pinned program
+  poisons the tick before that program runs again. These guards are
+  tripwires, not a sandbox: give the planner restricted tools. Shared libraries outside
+  the interpreter's prefix, the OS, and files that the tick never runs are outside them. The snapshot skips `.skill-contract/runs/`, so a
+  planner that forges or deletes run directories can lower the dispatch count. With no planner in the grant, the stage
+  says `unavailable no-planner`.
 - `derive-grant` runs spec-first-planning `write_grant.py --under-pipeline` for each plan
-  that the plan stage hands on. The plan stage is not built yet, so it hands on no plan.
+  that the plan stage hands on.
+- `build` runs factory-conductor `conductor init` for one derived grant in each tick
+  (R18). It picks the oldest grant that no conductor run names yet, from this tick or an
+  earlier one. It starts the run only when no conductor run in the repository is
+  unfinished, the work tree is clean and the grant covers the checked-out branch. The
+  other grants wait, and a later tick builds them. The evidence gate is on when the plan
+  names a verify skill that the repository has. When the grant has a `reentry` block,
+  the stage then runs `conductor reentry install`. The stage never merges, pushes or
+  changes a branch itself.
 - `pipeline schedule install --every <minutes>` installs one timer that runs the tick
   (R16). The interval is 15 to 1440 minutes. Another value exits 2 and installs nothing.
   Install also needs a live pipeline grant. The timer is factory-conductor's own module
@@ -41,9 +71,26 @@ What runs today:
   It runs the absolute interpreter and `pipeline.py` with the PATH that install ran with.
   `schedule status` shows the timer and `schedule uninstall` removes it.
 
-What is still pending: the idea follow-up (R20), plan (R17), build (R18), release stage
-(R19) and digest (R21) stages, which print `pending-R<n>`. A sibling skill that is not installed gives `unavailable`. The tick
-removes no human gate.
+- `release-stage` runs release-conductor `release stage` once for the release that
+  `release prep` prepared (R19). It runs only after the owner merged the release pull
+  request into the local default branch, and only while the owner's release grant covers
+  the release. Until then it runs nothing, and the release waits for the owner
+  (`release-merge` or `release-grant`) with the next command. It never writes or accepts
+  a release grant, and it runs no other release command.
+- `idea-follow-up` runs idea-validation's read-only `ideas list` and `ideas status <slug>`
+  (R20). It lists each undecided idea with an assumption due within 3 days or expired,
+  and puts it on the digest list with `ideas status <slug>` as the next command. It hands
+  each `go` idea-brief envelope that `check-envelope` accepts and that has no plan yet to
+  the plan stage, once. It never records a result, decides or hands off an idea.
+
+- `digest` writes `.skill-contract/pipeline/digest.md` in the git-ignored state directory
+  (R21). It lists each human gate that waits, with the command the owner runs next: a
+  pull request to merge, a release grant to accept, a production deploy, a rollback, a
+  plan waiting for a read, an idea decision, the planner-tamper marker and the cap stops.
+  It reads state files only, and it runs none of the commands. Every value from a state
+  file is shown as an escaped code span, so it cannot forge an entry.
+
+A sibling skill that is not installed gives `unavailable`. The tick removes no human gate.
 
 The design is in
 [`docs/factory/2026-11-04-autonomous-factory-spec.md`](../docs/factory/2026-11-04-autonomous-factory-spec.md)
@@ -54,7 +101,7 @@ The design is in
 
 <!-- Generated by scripts/gates/skill_graph.py from docs/skill-graph/graph.json. Do not edit this block by hand: edit the JSON, then run `make skill-graph`. -->
 
-**Start here if** you want one tick to drive the factory stages, which is partly built with five stages pending.
+**Start here if** you want one tick to drive every factory stage and list what waits for you.
 
 ```mermaid
 flowchart LR
@@ -63,13 +110,17 @@ flowchart LR
     direction TB
     out_factory_conductor["factory-conductor"]
     out_growth_review["growth-review"]
+    out_idea_validation["idea-validation"]
     out_ops_intake["ops-intake"]
+    out_release_conductor["release-conductor"]
     out_spec_first_planning["spec-first-planning"]
   end
-  self_factory_pipeline -.->|"when: the owner runs pipeline schedule install<br/>why: its timer module installs the timer that runs the tick"| out_factory_conductor
+  self_factory_pipeline -->|"when: a tick has an unbuilt grant, or at schedule install<br/>why: conductor init starts one run per tick, its timer runs the tick"| out_factory_conductor
   self_factory_pipeline -->|"when: each tick, after the sweep<br/>why: its breaches go into the intake queue"| out_growth_review
+  self_factory_pipeline -->|"when: each tick, before autopick<br/>why: it lists ideas due or expired and plans each go idea once"| out_idea_validation
   self_factory_pipeline -->|"when: each tick, after the grant check<br/>why: it sweeps sources, imports breaches and picks queue items"| out_ops_intake
-  self_factory_pipeline -->|"when: before any stage, and for each plan<br/>why: it checks the pipeline grant and derives each plan grant"| out_spec_first_planning
+  self_factory_pipeline -->|"when: a prepped release is merged and its release grant is live<br/>why: release stage starts once, under the owner's release grant"| out_release_conductor
+  self_factory_pipeline -->|"when: before any stage, and for each plan<br/>why: it checks the grant, drafts and checks specs, derives plan grants"| out_spec_first_planning
   classDef self stroke-width:4px,font-weight:bold
   class self_factory_pipeline self
 ```

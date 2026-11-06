@@ -811,6 +811,33 @@ def reentry_problems(block):
     return out
 
 
+# The permission-bypass flags of a headless agent CLI. A planner reads untrusted evidence,
+# so a planner that skips its permission prompts would let that text run commands. Matched
+# as case-insensitive substrings of each argument, so `--flag=value`, `--Flag` and
+# `--allow-dangerously-skip-permissions` are caught too.
+BYPASS_MARKS = ("dangerously-skip-permissions", "bypasspermissions")
+
+
+def planner_problems(cmd):
+    """Problems with a pipeline grant's optional payload.planner; [] when valid.
+
+    The planner is the agent that factory-pipeline's plan stage starts to draft a spec from
+    an untrusted intake item or idea. It is an argv list with the same refusals as a
+    re-entry agent_cmd (argv_problems: no shell, no launcher wrapping one), {prompt}
+    exactly once and {root} optional, and it carries no permission-bypass flag, because the
+    text it reads can steer it."""
+    out = list(argv_problems(cmd, {"{prompt}", "{root}"}))
+    if out and out[0].startswith("must be a non-empty list"):
+        return out
+    if cmd.count("{prompt}") != 1:
+        out.append("must contain the {prompt} token exactly once")
+    for a in cmd:
+        if any(m in a.lower() for m in BYPASS_MARKS):
+            out.append("must not carry a permission-bypass flag (%s): the planner reads "
+                       "untrusted text" % a)
+    return out
+
+
 def _branch_patterns(pattern):
     """branch_pattern as a list of globs, or None when it is neither a non-empty string nor
     a non-empty list of non-empty strings."""
@@ -1642,6 +1669,8 @@ def pipeline_grant_violations(st):
         out.append("payload.require_signature is not a grant field: grants are never signed (A8)")
     if "reentry" in p:
         out.extend("payload.reentry: " + v for v in reentry_problems(p["reentry"]))
+    if "planner" in p:
+        out.extend("payload.planner " + v for v in planner_problems(p["planner"]))
     try:
         expires = _parse_time(p.get("expires_at") if TIME_RE.match(str(p.get("expires_at", "")))
                               else "")

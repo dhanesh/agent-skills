@@ -104,19 +104,21 @@ class CapFixture(unittest.TestCase):
         self.assertIn("STOP: cap %s " % cap, text)
         for stage in PLANNING:
             self.assertEqual(res[stage], ["skipped", "cap=%s" % cap], stage)
-        # Build checks only the dispatch cap, and only when it has grants to build.
+        # Build checks only the dispatch cap, and only when it has grants to build. A
+        # plans or open-runs stop does not gate it (R18 then tries an unbuilt grant; the
+        # stub skills hold no conductor.py, so it says unavailable).
         if cap in ("max_dispatches_per_day", "uncounted"):
             self.assertEqual(res["build"], ["skipped", "cap=%s" % cap])
         else:
-            self.assertEqual(res["build"], ["pending-R18", "grants=0"])
+            self.assertNotEqual(res["build"][0], "skipped")
         new = [c["key"] for c in K.calls(self.skills)[since:]]
         self.assertNotIn("autopick", new)
         self.assertNotIn("under-pipeline", new)
         # The stages that only read, sweep or report still run, in their places.
         self.assertEqual(res["sweep"][0], "ok")
         self.assertEqual(res["growth-review"][0], "ok")
-        self.assertEqual(res["release-stage"][0], "pending-R19")
-        self.assertEqual(res["digest"][0], "pending-R21")
+        self.assertEqual(res["release-stage"][0], "idle")
+        self.assertEqual(res["digest"][0], "ok")
         self.assertIn("TICK: done stages=9 cap=%s" % cap, text)
 
 
@@ -140,8 +142,8 @@ class TestMaxPlansPerDay(CapFixture):
         self.assertEqual(res["derive-grant"],
                          ["ok", "derived=1", "refused=0", "cap=max_plans_per_day"])
         # The one plan the cap allowed reaches the build hand-off: no deadlock.
-        self.assertEqual(res["build"], ["pending-R18", "grants=1"])
-        self.assertEqual(res["digest"][0], "pending-R21")
+        self.assertEqual(res["build"], ["unavailable", "factory-conductor", "grants=1"])
+        self.assertEqual(res["digest"][0], "ok")
         self.assertEqual(text.count("STOP: cap"), 1)
         rec = self.stops()
         self.assertEqual([(r["cap"], r["count"], r["limit"], r["stage"], r["grant"])
@@ -189,7 +191,7 @@ class TestMaxOpenRuns(CapFixture):
         self.assertEqual(code, 0, text)
         self.assertNotIn("STOP:", text)  # the derived grant is not blocked by its own count
         self.assertEqual(res["derive-grant"], ["ok", "derived=1", "refused=0"])
-        self.assertEqual(res["build"], ["pending-R18", "grants=1"])
+        self.assertEqual(res["build"], ["unavailable", "factory-conductor", "grants=1"])
         before = len(K.calls(self.skills))
         code, text, res = self.tick()
         self.assertEqual(code, 0, text)
@@ -224,7 +226,7 @@ class TestMaxDispatchesPerDay(CapFixture):
         # One dispatch so far, cap 2: planning runs, then the build check sees 1 < 2.
         code, text, res = self.tick()
         self.assertNotIn("STOP:", text)
-        self.assertEqual(res["build"], ["pending-R18", "grants=1"])
+        self.assertEqual(res["build"], ["unavailable", "factory-conductor", "grants=1"])
         K.conductor_run(self.repo, gid, dispatch_at=[utc(), utc()], n=2)
         before = len(K.calls(self.skills))
         code, text, res = self.tick()

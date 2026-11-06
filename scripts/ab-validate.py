@@ -325,6 +325,11 @@ SINCE_RECORDER_NAMES = "8bf3201"  # verification-skill-forge 1.1.0: record refus
 # its own artifact names, and check-proof diffs with --text.
 SINCE_COPIED_PROOF = "ce76b17"  # factory-conductor 1.7.1: a proof record that runtime
 # evidence lists as a copied artifact does not count.
+SINCE_AUTONOMOUS_FACTORY = "ae91125"  # the autonomous factory, runs 2 and 3: the first commit
+# after the wave-0 merge (df60b6c, #119), the run-2 spec. Every change of both runs
+# (spec-first-planning, ops-intake, growth-review, factory-conductor, verifier-installer,
+# factory-pipeline, incident-watch) comes after it. The runs merge with merge commits, so
+# the hash stays the same on the way into main.
 
 
 def _git_out(*args):
@@ -10361,6 +10366,596 @@ def check_proof_tier_trust(old, new):
             since=SINCE_PROOF_TIER_TRUST)
 
 
+# ── the autonomous factory, runs 2 and 3 ────────────────────────────────────
+# One block of rows per skill whose behaviour run 2 or run 3 changed. Each fixture runs
+# offline in a temp dir and calls each tree's own scripts by path. A tree that does not
+# have a script measures an honest 0 (absent); only a fixture that breaks in the tree
+# under review goes to PROBE_ERRORS. No fixture installs a timer: the pipeline ticks run
+# with FACTORY_CONDUCTOR_TIMER_DRYRUN=1 and a temp FACTORY_CONDUCTOR_TIMER_HOME.
+
+def _af_env(tmp):
+    """The environment for a fixture subprocess: no skill search path from the caller,
+    and the conductor's timer hooks in dry-run mode with a temp home."""
+    env = dict(os.environ, FACTORY_CONDUCTOR_TIMER_DRYRUN="1",
+               FACTORY_CONDUCTOR_TIMER_HOME=os.path.join(tmp, "timer-home"))
+    for k in ("SKILL_CONTRACT_PATH", "FACTORY_PIPELINE_SKILLS"):
+        env.pop(k, None)
+    return env
+
+
+def _af_run(argv, cwd=None, env=None):
+    return subprocess.run(argv, capture_output=True, text=True, timeout=300, cwd=cwd,
+                          env=env, stdin=subprocess.DEVNULL)
+
+
+def _af_spf(tree):
+    """spec-first-planning: the check-command allowlist and the pipeline-grant writer.
+    Returns {compiler, match, grant}, each 1 when the behaviour holds, else 0."""
+    assets = os.path.join(tree, "spec-first-planning", "assets")
+    out = {}
+    with tempfile.TemporaryDirectory() as d:
+        spec = os.path.join(d, "spec.md")
+        with open(spec, "w", encoding="utf-8") as f:
+            f.write(_PT_SPEC % "")
+        lists = {"unlisted": "make test\n",
+                 "listed": "{python} tests/check_save.py\n{python} tests/check_list.py\n"}
+        res = {}
+        for name, text in lists.items():
+            path = os.path.join(d, name + ".txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            res[name] = _af_run([sys.executable, "-I",
+                                 os.path.join(assets, "spec_to_tasks.py"), spec,
+                                 "--allowlist", path])
+        bad, good = res["unlisted"], res["listed"]
+        out["compiler"] = int(bad.returncode == 3 and "ALLOWLIST: fail " in bad.stdout
+                              and good.returncode == 0 and "ALLOWLIST: pass " in good.stdout
+                              and "ALLOWLIST: fail" not in good.stdout)
+
+        tool = os.path.join(assets, "allowlist.py")
+        if not os.path.isfile(tool):
+            out["match"] = 0
+        else:
+            pats = os.path.join(d, "patterns.txt")
+            with open(pats, "w", encoding="utf-8") as f:
+                f.write("make gate-skill *\n")
+            rcs = [_af_run([sys.executable, "-I", tool, "match", pats, cmd]).returncode
+                   for cmd in ("make gate-skill factory-pipeline", "make gate-skill $(id)",
+                               "make gate-skill -mhttp.server")]
+            out["match"] = int(rcs == [0, 1, 1])
+
+        repo = os.path.join(d, "repo")
+        subprocess.run(["git", "init", "-q", repo], check=True, capture_output=True)
+        for rel, text in ((".intake/pick-policy.json", '{"kinds": ["bug"]}\n'),
+                          (".factory/check-commands.txt", "make test\n")):
+            path = os.path.join(repo, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+
+        def answers(days):
+            at = (datetime.now(timezone.utc) + timedelta(days=days)).replace(microsecond=0)
+            path = os.path.join(d, "answers-%d.json" % days)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"branch_pattern": "factory/*",
+                           "gate_policy": {"read_only": "auto", "local_reversible": "auto",
+                                           "push_branch": "grant", "open_pr": "grant",
+                                           "merge": "ask", "deploy": "ask", "spend": "ask",
+                                           "external_message": "ask", "delete": "ask"},
+                           "expires_at": at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                           "caps": {"max_plans_per_day": 3, "max_open_runs": 1,
+                                    "max_dispatches_per_day": 40},
+                           "budget": {"max_parallel": 2, "max_repairs_per_task": 2,
+                                      "wall_clock_min": 1440},
+                           "stop_on": ["a new dependency is needed"]}, f)
+            return path
+
+        def envelopes():
+            e = os.path.join(repo, ".skill-contract", "envelopes")
+            return sorted(os.listdir(e)) if os.path.isdir(e) else []
+
+        writer = [sys.executable, "-I", os.path.join(assets, "write_grant.py"), "--pipeline",
+                  "--root", repo]
+        no_by = _af_run(writer + ["--answers", answers(3)])
+        long = _af_run(writer + ["--answers", answers(8), "--accepted-by", "Dana"])
+        refused_clean = not envelopes()
+        good = _af_run(writer + ["--answers", answers(3), "--accepted-by", "Dana"])
+        out["grant"] = int(no_by.returncode == 2 and long.returncode == 1
+                           and "REFUSED:" in long.stdout and "at most 7 days" in long.stdout
+                           and refused_clean and good.returncode == 0
+                           and "GRANT: " in good.stdout and len(envelopes()) == 1)
+    return out
+
+
+_AF_SPF_ROWS = (
+    ("compiler", "`spec_to_tasks.py --allowlist`: an unlisted check command fails "
+     "(1=right)",
+     "an allowlist without the plan's commands: `ALLOWLIST: fail` and exit 3. "
+     "Sanity-checked in the same fixture: the allowlist that lists both commands passes "
+     "with exit 0. The baseline has no --allowlist"),
+    ("match", "`allowlist.py match`: `*` refuses `$(` and a leading `-` (1=right)",
+     "pattern `make gate-skill *`: a skill name matches (exit 0); `$(id)` and "
+     "`-mhttp.server` do not (exit 1). The baseline has no allowlist.py"),
+    ("grant", "`write_grant.py --pipeline`: refuses with no --accepted-by or expiry over "
+     "7 days (1=right)",
+     "no --accepted-by exits 2; an 8-day expiry prints REFUSED and exit 1; neither "
+     "writes an envelope. Sanity-checked: a 3-day grant with --accepted-by writes one. "
+     "The baseline has no --pipeline mode"),
+)
+
+
+def check_af_spec_first_planning(old, new):
+    a, b = _af_spf(old), _af_spf(new)
+    for key, dimension, note in _AF_SPF_ROWS:
+        row("spec-first-planning", dimension, a[key], b[key],
+            a[key] == 0 and b[key] == 1, note, since=SINCE_AUTONOMOUS_FACTORY)
+
+
+_AF_OI_PROBE = r"""
+import contextlib, io
+import adapters as AD
+import intake as IN
+from intake_testkit import repo, run, no_io
+HERE = sys.path[0]
+CONFIG = {"sources": {"jira": {"enabled": True, "formats": ["intake-signals-jsonl"]}}}
+POLICY = {"kinds": ["issue", "ci"], "min_rank": 0, "formats": ["intake-signals-jsonl"],
+          "max_picks_per_day": 1}
+def cmd(root, *argv):
+    try:
+        with no_io(), contextlib.redirect_stderr(io.StringIO()):
+            return run(root, *argv)
+    except SystemExit as e:  # the baseline has no such subcommand
+        return e.code, ""
+def write_policy(root, pol):
+    with open(os.path.join(root, ".intake", "pick-policy.json"), "w") as f:
+        json.dump(pol, f)
+root = repo(config=CONFIG)
+fixture = os.path.join(HERE, "fixtures", "signals_ok.jsonl")
+ok = (cmd(root, "import", "--format", "intake-signals-jsonl", "--source", "jira",
+          fixture)[0] == 0 and cmd(root, "sync")[0] == 0)
+write_policy(root, POLICY)
+before = cmd(root, "autopick")
+registered = cmd(root, "register-policy", "--by", "Dhanesh")
+first = cmd(root, "autopick")
+second = cmd(root, "autopick")
+write_policy(root, dict(POLICY, min_rank=1000))
+edited = cmd(root, "autopick")
+lifecycle = int(ok and before[0] == 2 and "STOP: policy-unregistered" in before[1]
+                and registered[0] == 0 and first[0] == 0
+                and "AUTOPICK: matched 2 picked 1" in first[1]
+                and edited[0] == 2 and "STOP: policy-changed" in edited[1])
+daily = int(first[0] == 0 and "AUTOPICK: matched 2 picked 1" in first[1]
+            and second[0] == 0 and "AUTOPICK: matched 1 picked 0" in second[1])
+NOW = "2026-11-04T09:00:00Z"
+def line(kind):
+    return json.dumps({"source": "incident-watch", "source_id": "inc-1", "url": "",
+                       "kind": kind, "title": "incident inc-1: 2 failed probes",
+                       "severity": 4, "first_seen": NOW, "last_seen": NOW,
+                       "evidence": [{"text": "health fail rc=1", "key": "inc-1:open"}]})
+ctx = {"source": "incident-watch", "now": NOW}
+sigs, problems = AD.ADAPTERS["intake-signals-jsonl"](line("incident"), ctx)
+csigs, cproblems = AD.ADAPTERS["intake-signals-jsonl"](line("ci"), ctx)
+incident = int(problems == [] and len(sigs) == 1 and sigs[0]["kind"] == "incident"
+               and cproblems == [] and len(csigs) == 1)
+print(json.dumps({"lifecycle": lifecycle, "daily": daily, "incident": incident}))
+"""
+
+_AF_OI_ROWS = (
+    ("lifecycle", "`intake autopick`: refused before registration and after a policy "
+     "edit (1=right)",
+     "autopick exits 2 with `STOP: policy-unregistered`; after `register-policy` it picks; "
+     "after an edit of pick-policy.json it exits 2 with `STOP: policy-changed`. The "
+     "baseline has no autopick"),
+    ("daily", "`intake autopick`: stops at max_picks_per_day (1=right)",
+     "max_picks_per_day 1 and two matching items: the first autopick picks 1, the second "
+     "the same day picks 0 and still lists the item that is left"),
+    ("incident", "intake-signals-jsonl accepts kind `incident` (1=right)",
+     "incident-watch's signal line imports as one item with no problem. Sanity-checked: "
+     "the same line with kind `ci` imports in both trees"),
+)
+
+
+def check_af_ops_intake(old, new):
+    a = probe(old, "ops-intake/assets", _AF_OI_PROBE)
+    b = probe(new, "ops-intake/assets", _AF_OI_PROBE)
+    if _errored(a, b):
+        return
+    for key, dimension, note in _AF_OI_ROWS:
+        row("ops-intake", dimension, a.get(key), b.get(key),
+            a.get(key) == 0 and b.get(key) == 1, note, since=SINCE_AUTONOMOUS_FACTORY)
+
+
+_AF_GR_PROBE = r"""
+import contextlib, io
+import growth as G
+os.environ[G.TEST_CLOCK_ENV] = "1"
+T = "2026-10-12"
+PLAN = ("| metric | direction | period | warn | breach | severity |\n"
+        "|---|---|---|---|---|---|\n| signups | up | day | 100 | 80 | 3 |\n")
+def g(root, *argv):
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = G.main(["--root", root, "--today", T, *argv])
+    except SystemExit as e:  # the baseline has no such subcommand
+        rc = e.code
+    return rc, out.getvalue(), err.getvalue()
+root = tempfile.mkdtemp()
+os.makedirs(os.path.join(root, "growth"))
+with open(os.path.join(root, "growth", "metrics.md"), "w") as f:
+    f.write(PLAN)
+export = os.path.join(tempfile.mkdtemp(), "export.jsonl")
+def put(*recs):
+    with open(export, "w") as f:
+        for m, p, v in recs:
+            f.write(json.dumps({"metric": m, "period": p, "value": v, "source": "x"}) + "\n")
+put(("signups", "2026-10-11", 150))
+registered = g(root, "register", "--by", "Dana")[0]
+watched = g(root, "watch", "--by", "Dana", export)[0]
+first = g(root, "auto", "--source", "growth")
+again = g(root, "auto", "--source", "growth")
+put(("signups", "2026-10-11", 70))
+changed = g(root, "auto", "--source", "growth")
+skip = int(registered == 0 and watched == 0 and first[0] == 0 and first[1] == ""
+           and "SKIP" not in first[2] and again[0] == 0 and again[1] == ""
+           and "SKIP: export unchanged" in again[2])
+breach = int(watched == 0 and changed[0] == 0 and "SKIP" not in changed[2]
+             and len(changed[1].splitlines()) == 1 and "signups" in changed[1])
+print(json.dumps({"skip": skip, "breach": breach}))
+"""
+
+_AF_GR_ROWS = (
+    ("skip", "`growth auto`: an unchanged export is skipped (1=right)",
+     "watch, then auto twice on the same export: the first reviews it, the second prints "
+     "`SKIP: export unchanged` with exit 0 and no signal line. The baseline has no "
+     "watch or auto"),
+    ("breach", "`growth auto`: a changed export with a breach emits one signal (1=right)",
+     "the export changes to a breaching value: auto reviews it again and prints one "
+     "signal line for signups"),
+)
+
+
+def check_af_growth_review(old, new):
+    a = probe(old, "growth-review/assets", _AF_GR_PROBE)
+    b = probe(new, "growth-review/assets", _AF_GR_PROBE)
+    if _errored(a, b):
+        return
+    for key, dimension, note in _AF_GR_ROWS:
+        row("growth-review", dimension, a.get(key), b.get(key),
+            a.get(key) == 0 and b.get(key) == 1, note, since=SINCE_AUTONOMOUS_FACTORY)
+
+
+_AF_CRON_PROBE = r"""
+import reentry_timer as R
+def line(n):
+    try:
+        return R.render("cron", "r1", ["/bin/true"], n)["crontab"]
+    except OSError:
+        return "refused"
+print(json.dumps({"15": line(15), "120": line(120), "90": line(90)}))
+"""
+
+
+def _af_brief(tree):
+    """1 when `conductor brief reviewer` prints a filled brief with no run dir and exits 2
+    for an unknown task; 0 otherwise (a baseline conductor has no brief command)."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return 0
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        plan_env = _eg_fixture(CC, root, [("T1", ["notes-create"], {})])
+
+        def brief(task):
+            return _af_run([sys.executable, "-I", conductor, "brief", "reviewer", task,
+                            "--plan", plan_env, "--base", "main", "--root", root])
+        good, unknown = brief("T1"), brief("T9")
+        return int(good.returncode == 0
+                   and "You are reviewing task `T1` of an approved plan." in good.stdout
+                   and "main...HEAD" in good.stdout
+                   and not os.path.exists(os.path.join(root, ".skill-contract", "runs"))
+                   and unknown.returncode == 2 and "unknown task" in unknown.stderr)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def check_af_factory_conductor(old, new):
+    s = "factory-conductor"
+    a, b = _af_brief(old), _af_brief(new)
+    row(s, "`conductor brief reviewer`: a filled brief with no run dir (1=right)", a, b,
+        a == 0 and b == 1,
+        "a plan envelope and no run: brief prints the reviewer brief filled for T1 with "
+        "the diff command against main, creates no run dir, and exits 2 for an unknown "
+        "task. The baseline has no brief command", since=SINCE_AUTONOMOUS_FACTORY)
+    a = probe(old, "factory-conductor/assets", _AF_CRON_PROBE)
+    b = probe(new, "factory-conductor/assets", _AF_CRON_PROBE)
+    if _errored(a, b):
+        return
+    row(s, "`reentry_timer` cron line for 120 minutes", a["120"].split(" /")[0],
+        b["120"].split(" /")[0], b["120"].startswith("0 */2 * * * ")
+        and not a["120"].startswith("0 */2 * * * "),
+        "cron's minute field cannot step past 59, so `*/120` runs every hour; "
+        "cron_schedule writes whole hours", since=SINCE_AUTONOMOUS_FACTORY)
+    row(s, "`reentry_timer` cron line for 90 minutes (refused=right)",
+        a["90"].split(" /")[0], b["90"].split(" /")[0],
+        b["90"] == "refused" and a["90"] != "refused",
+        "90 minutes is not a whole number of hours, so no cron line gives that interval; "
+        "the new tree refuses rather than install a timer at another interval",
+        since=SINCE_AUTONOMOUS_FACTORY)
+    row(s, "`reentry_timer` cron line for 15 minutes", a["15"].split(" /")[0],
+        b["15"].split(" /")[0], a["15"] == b["15"] and b["15"].startswith("*/15 * * * * "),
+        "under 60 minutes the line is unchanged", kind="guard")
+
+
+def _af_backends(tree, cargo):
+    """The `BACKEND:` tools that detect_stack.py prints for a repo with this Cargo.toml,
+    joined with `,`, or `-` for none."""
+    tool = os.path.join(tree, "verifier-installer", "assets", "detect_stack.py")
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "Cargo.toml"), "w", encoding="utf-8") as f:
+            f.write(cargo)
+        os.makedirs(os.path.join(d, "src"))
+        with open(os.path.join(d, "src", "lib.rs"), "w", encoding="utf-8") as f:
+            f.write("pub fn one() -> u32 { 1 }\n")
+        r = _af_run([sys.executable, "-I", tool, d])
+    if r.returncode != 0:
+        return None
+    got = [ln.split(":", 1)[1].strip() for ln in r.stderr.splitlines()
+           if ln.startswith("BACKEND:")]
+    return ",".join(got) or "-"
+
+
+def check_af_verifier_installer(old, new):
+    s = "verifier-installer"
+    plain = '[package]\nname = "x"\nversion = "0.1.0"\nedition = "2021"\n'
+    proofs = plain + '\n[dev-dependencies]\nproptest = "1"\n\n[package.metadata.kani]\n'
+    a, b = _af_backends(old, proofs), _af_backends(new, proofs)
+    if a is None or b is None:
+        PROBE_ERRORS.append((new, "verifier-installer/assets/detect_stack.py",
+                             "backend fixture: detect_stack failed (%r -> %r)" % (a, b)))
+        return
+    row(s, "`BACKEND:` lines for a crate with proptest and kani", a, b,
+        a == "-" and b == "kani,proptest",
+        "a dev-dependency on proptest and a [package.metadata.kani] table",
+        since=SINCE_AUTONOMOUS_FACTORY)
+    a, b = _af_backends(old, plain), _af_backends(new, plain)
+    if a is None or b is None:
+        PROBE_ERRORS.append((new, "verifier-installer/assets/detect_stack.py",
+                             "plain fixture: detect_stack failed (%r -> %r)" % (a, b)))
+        return
+    row(s, "`BACKEND:` lines for a plain crate", a, b, a == b == "-",
+        "a crate that declares no proof backend gets no line", kind="guard")
+
+
+_AF_FP_PROBE = r"""
+import re, shutil, subprocess
+import pipeline_testkit as K
+HERE = sys.path[0]
+TOOL = os.path.join(HERE, "pipeline.py")
+ORDER = ["sweep", "growth-review", "idea-follow-up", "autopick", "plan", "derive-grant",
+         "build", "release-stage", "digest"]
+tmp = tempfile.mkdtemp()
+env = dict(os.environ, FACTORY_CONDUCTOR_TIMER_DRYRUN="1",
+           FACTORY_CONDUCTOR_TIMER_HOME=os.path.join(tmp, "timer-home"))
+for k in ("SKILL_CONTRACT_PATH", "FACTORY_PIPELINE_SKILLS"):
+    env.pop(k, None)
+def tick(repo, sk):
+    return subprocess.run([sys.executable, TOOL, "--root", repo, "--skills-dir", sk, "tick"],
+                          capture_output=True, text=True, timeout=180,
+                          stdin=subprocess.DEVNULL, env=env)
+def fixture(label, grant=True):
+    repo = os.path.join(tmp, label, "repo")
+    os.makedirs(repo)
+    pid = os.path.basename(K.pipeline_grant(repo))[:-len(".json")] if grant else None
+    return repo, K.stubs(os.path.join(tmp, label, "skills")), pid
+def stages(text):
+    return [ln.split()[1] for ln in text.splitlines() if ln.startswith("STAGE: ")]
+def task_plans(repo):
+    d = os.path.join(repo, ".skill-contract", "envelopes")
+    return [n for n in (os.listdir(d) if os.path.isdir(d) else [])
+            if n.startswith("task-plan-v1-")]
+out = {}
+try:
+    repo, sk, _ = fixture("all")
+    cp = tick(repo, sk)
+    out["stages"] = int(cp.returncode == 0 and stages(cp.stdout) == ORDER)
+    try:
+        with open(os.path.join(repo, ".skill-contract", "pipeline", "digest.md")) as f:
+            dig = f.read()
+    except OSError:
+        dig = ""
+    n = dig.count("\n- ")
+    m = re.search(r"^DIGEST: \S+ waiting=([0-9]+)$", cp.stdout, re.M)
+    out["digest"] = int(n >= 1 and bool(m) and int(m.group(1)) == n
+                        and "STAGE: digest ok waiting=%d" % n in cp.stdout
+                        and "item-3.json" in dig)
+
+    holder = subprocess.Popen([sys.executable, os.path.join(HERE, "pipeline_testkit.py"),
+                               "hold", repo, "120"], stdout=subprocess.PIPE, text=True,
+                              stdin=subprocess.DEVNULL, env=env)
+    try:
+        held = holder.stdout.readline()
+        locked = tick(repo, sk)
+    finally:
+        holder.kill()
+        holder.wait()
+    free = tick(repo, sk)
+    out["lock"] = int(held.startswith("HELD: ") and locked.returncode == 3
+                      and "STOP: locked" in locked.stdout and not stages(locked.stdout)
+                      and free.returncode == 0)
+
+    repo, sk, _ = fixture("no-grant", grant=False)
+    cp = tick(repo, sk)
+    out["nogrant"] = int(cp.returncode == 2 and "STOP: no-grant" in cp.stdout
+                         and not stages(cp.stdout) and not K.calls(sk))
+
+    repo, sk, pid = fixture("open-run")
+    K.write_rel(repo, *K.derived_grant(pid))
+    cp = tick(repo, sk)
+    out["cap"] = int(cp.returncode == 0 and "STOP: cap max_open_runs " in cp.stdout
+                     and "STAGE: autopick skipped cap=max_open_runs" in cp.stdout
+                     and "autopick" not in [c["key"] for c in K.calls(sk)]
+                     and stages(cp.stdout) == ORDER)
+
+    spec = ".skill-contract/intake/specs/I0000000001.md"
+    res = {}
+    for mode in ("unlisted", "good"):
+        repo, sk, agent = K.plan_fixture(os.path.join(tmp, "plan-" + mode), mode)
+        K.picks(repo, sk, ("I0000000001",))
+        res[mode] = (tick(repo, sk), task_plans(repo))
+    (bad, bad_plans), (good, good_plans) = res["unlisted"], res["good"]
+    out["unlisted"] = int(
+        bad.returncode == 0 and "PLAN: waiting %s reason=allowlist-unlisted" % spec in bad.stdout
+        and not bad_plans and good.returncode == 0 and "PLAN: ready " in good.stdout
+        and len(good_plans) == 1)
+
+    d = os.path.join(tmp, "tamper")
+    repo, sk, agent = K.plan_fixture(d, "good")
+    store = os.path.join(d, "store", "spec-first-planning")
+    link = os.path.join(sk, "spec-first-planning")
+    os.makedirs(os.path.dirname(store))
+    shutil.move(link, store)
+    os.symlink(store, link)
+    marker = os.path.join(d, "PWNED")
+    evil = "open(%r, 'a').write('ran\\n')\n" % marker
+    wg = os.path.join(link, "assets", "write_grant.py")
+    with open(os.path.join(agent, "extra.py"), "w") as f:
+        f.write("src = open(%r).read()\nopen(%r, 'w').write(%r + src)\n" % (wg, wg, evil))
+    K.picks(repo, sk, ("I0000000001",))
+    cp = tick(repo, sk)
+    out["tamper"] = int(cp.returncode == 4 and "STOP: planner-tamper tools:" in cp.stdout
+                        and not os.path.exists(marker)
+                        and "under-pipeline" not in [c["key"] for c in K.calls(sk)])
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+print(json.dumps(out))
+"""
+
+_AF_FP_ROWS = (
+    ("stages", "`pipeline tick`: nine STAGE lines in order, exit 0 (1=right)",
+     "stub sibling skills and a real pipeline grant"),
+    ("nogrant", "`pipeline tick` with no pipeline grant: STOP: no-grant, exit 2 (1=right)",
+     "no stage runs and no sibling tool is called"),
+    ("lock", "`pipeline tick` while another tick holds the lock: exit 3 (1=right)",
+     "`STOP: locked` and no stage. Sanity-checked: once the holder exits, the next tick "
+     "exits 0"),
+    ("cap", "`pipeline tick` at max_open_runs: STOP: cap, autopick skipped (1=right)",
+     "one open derived grant at max_open_runs 1: autopick, plan and derive-grant are "
+     "skipped, the other stages still run, exit 0"),
+    ("unlisted", "plan stage: a plan with an unlisted command waits (1=right)",
+     "the stub planner writes the command the hostile evidence asked for: `PLAN: waiting "
+     "... reason=allowlist-unlisted` and no task plan. Sanity-checked: the good planner's "
+     "plan is handed on"),
+    ("tamper", "plan stage: write_grant.py edited through a symlinked skill: exit 4 "
+     "(1=right)",
+     "spec-first-planning is a symlink, as the skills CLI installs it; the planner edits "
+     "write_grant.py through the link: `STOP: planner-tamper tools:`, the edited tool never "
+     "runs, no grant is derived"),
+    ("digest", "digest.md lists the waiting gates with a matching count (1=right)",
+     "the pick that waits for a read is an entry; `DIGEST:` and `STAGE: digest` give the "
+     "entry count"),
+)
+
+
+def check_af_factory_pipeline(old, new):
+    def measured(tree):
+        if not os.path.isfile(os.path.join(tree, "factory-pipeline", "assets",
+                                           "pipeline.py")):
+            return {k: 0 for k, _d, _n in _AF_FP_ROWS}  # the wave-0 skeleton: absent
+        return probe(tree, "factory-pipeline/assets", _AF_FP_PROBE)
+    if not os.path.isfile(os.path.join(new, "factory-pipeline", "assets", "pipeline.py")):
+        PROBE_ERRORS.append((new, "factory-pipeline/assets/pipeline.py",
+                             "the tree under review has no pipeline to measure"))
+        return
+    a, b = measured(old), measured(new)
+    if _errored(a, b):
+        return
+    for key, dimension, note in _AF_FP_ROWS:
+        row("factory-pipeline", dimension, a.get(key), b.get(key),
+            a.get(key) == 0 and b.get(key) == 1,
+            note + "; the baseline is the wave-0 skeleton with no pipeline.py, an honest "
+            "0 -> 1", since=SINCE_AUTONOMOUS_FACTORY)
+
+
+_AF_IW_PROBE = r"""
+import shutil, subprocess
+import incident_testkit as K
+HERE = sys.path[0]
+TOOL = os.path.join(HERE, "incident.py")
+SKILLS = os.path.dirname(os.path.dirname(HERE))
+env = dict(os.environ)
+env.pop("SKILL_CONTRACT_PATH", None)
+tmp = tempfile.mkdtemp()
+def p(root, *extra):
+    return subprocess.run([sys.executable, TOOL, "--root", root, "--skills-dir", SKILLS,
+                           "probe"] + list(extra), capture_output=True, text=True,
+                          timeout=120, stdin=subprocess.DEVNULL, env=env)
+out = {}
+try:
+    d = K.fixture(os.path.join(tmp, "ok"))
+    ok = p(d)
+    only, bare = p(d, "--only", "rollback"), p(d, "rollback")
+    out["refuse"] = int(ok.returncode == 0
+                        and all(r.returncode == 2 and "PROBE: refused:" in r.stdout + r.stderr
+                                for r in (only, bare))
+                        and "rollback" not in K.ran(d))
+    d = K.fixture(os.path.join(tmp, "fail"), fail=("health",))
+    first, second, third = p(d), p(d), p(d)
+    rdir = os.path.join(d, ".skill-contract", "incidents", "records")
+    recs = sorted(os.listdir(rdir)) if os.path.isdir(rdir) else []
+    out["open"] = int(first.returncode == 3 and "INCIDENT:" not in first.stdout
+                      and "INCIDENT: opened " in second.stdout
+                      and "INCIDENT: open " in third.stdout and "probes=" in third.stdout
+                      and len(recs) == 1)
+    shown = 0
+    if len(recs) == 1:
+        with open(os.path.join(rdir, recs[0])) as f:
+            rec = json.load(f)
+        with open(os.path.join(d, ".release", "recipe.json")) as f:
+            recipe = json.load(f)
+        shown = int(rec.get("rollback", {}).get("argv") == recipe["rollback"]
+                    and "ROLLBACK: " in second.stdout and "rollback" not in K.ran(d)
+                    and not any(c and c[0] == "rollback" for c in K.calls(d)))
+    out["rollback"] = shown
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+print(json.dumps(out))
+"""
+
+_AF_IW_ROWS = (
+    ("refuse", "`incident probe`: a command outside the probe lists is refused, exit 2 "
+     "(1=right)",
+     "`probe --only rollback` and `probe rollback` exit 2 with `PROBE: refused:`, and the "
+     "rollback stub never runs. Sanity-checked: a plain probe passes with exit 0"),
+    ("open", "`incident probe`: two failed probes open one record (1=right)",
+     "health fails: the first probe opens nothing, the second opens a record, the third "
+     "adds to it; one record file in all"),
+    ("rollback", "the incident record shows the rollback argv, never runs it (1=right)",
+     "the record's rollback argv is the recipe's word for word and `ROLLBACK:` is printed; "
+     "the rollback stub never ran"),
+)
+
+
+def check_af_incident_watch(old, new):
+    def measured(tree):
+        if not os.path.isfile(os.path.join(tree, "incident-watch", "assets", "incident.py")):
+            return {k: 0 for k, _d, _n in _AF_IW_ROWS}  # the wave-0 skeleton: absent
+        return probe(tree, "incident-watch/assets", _AF_IW_PROBE)
+    if not os.path.isfile(os.path.join(new, "incident-watch", "assets", "incident.py")):
+        PROBE_ERRORS.append((new, "incident-watch/assets/incident.py",
+                             "the tree under review has no incident probe to measure"))
+        return
+    a, b = measured(old), measured(new)
+    if _errored(a, b):
+        return
+    for key, dimension, note in _AF_IW_ROWS:
+        row("incident-watch", dimension, a.get(key), b.get(key),
+            a.get(key) == 0 and b.get(key) == 1,
+            note + "; the baseline is the wave-0 skeleton with no incident.py, an honest "
+            "0 -> 1", since=SINCE_AUTONOMOUS_FACTORY)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -10476,6 +11071,13 @@ def main():
         check_proof_tier_trust(old, REPO)
         check_spec_hint_brackets(old, REPO)
         check_forge_recorder_names(old, REPO)
+        check_af_spec_first_planning(old, REPO)
+        check_af_ops_intake(old, REPO)
+        check_af_growth_review(old, REPO)
+        check_af_factory_conductor(old, REPO)
+        check_af_verifier_installer(old, REPO)
+        check_af_factory_pipeline(old, REPO)
+        check_af_incident_watch(old, REPO)
         if report_dir:
             # The evals need the baseline tree, so they run before it is removed.
             import ab_report
