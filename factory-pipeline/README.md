@@ -33,6 +33,9 @@ What runs today:
   `STAGE: incident-probe ok probe=pass commands=4 failed=0`. With no recipe, it runs
   nothing and prints `STAGE: incident-probe skip no-recipe`. The probe runs only the
   recipe's read-only probes. It never runs a rollback, a deploy or another recipe command.
+  When the probe opens an incident record, the stage imports the record's signal into
+  the queue in the same tick, with ops-intake `intake import --format intake-signals-jsonl
+  --source incident-watch`. The stage line then ends `incident=opened import=ok`.
 - `growth-review` runs growth-review `growth auto` and imports its breaches with ops-intake
   `intake import`.
 - `autopick` runs ops-intake `intake autopick`.
