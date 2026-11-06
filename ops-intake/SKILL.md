@@ -332,6 +332,8 @@ A failure there, or counts that disagree, is a tool bug: report it, and do not e
   run, or a release commit missing from the clone never resolves an item: it waits for the
   human's `resolve`. A squash merge resolves only when the run-result names its PR (`pr.number`)
   and a subject in the history ends with exactly `(#<that number>)`; a body line never counts.
+  factory-conductor's `finish` writes that `pr.number` in a second run-result when `gh pr create`
+  prints the PR URL, so a squash merge of such a run resolves at the next sync, with no `resolve`.
   Intake does not guess.
 - **The history is what you pipe in.** Intake checks only that each `git-rev-list` line is a
   40-hex sha and that the first line is the release commit. It cannot tell a real history from
