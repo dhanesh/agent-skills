@@ -127,8 +127,8 @@ flowchart LR
   self_factory_pipeline -->|"when: a tick has an unbuilt grant, or at schedule install<br/>why: conductor init starts one run per tick, its timer runs the tick"| out_factory_conductor
   self_factory_pipeline -->|"when: each tick, after the sweep<br/>why: its breaches go into the intake queue"| out_growth_review
   self_factory_pipeline -->|"when: each tick, before autopick<br/>why: it lists ideas due or expired and plans each go idea once"| out_idea_validation
-  self_factory_pipeline -->|"when: each tick, right after the sweep, when a recipe exists<br/>why: its read-only probes find an incident with no human start"| out_incident_watch
-  self_factory_pipeline -->|"when: each tick, after the grant check<br/>why: it sweeps sources, imports breaches and picks queue items"| out_ops_intake
+  self_factory_pipeline -->|"when: each tick, right after the sweep, when a recipe exists<br/>why: its read-only probes find an incident, and the tick queues it"| out_incident_watch
+  self_factory_pipeline -->|"when: each tick, after the grant check<br/>why: it sweeps, imports breaches and new incidents, picks queue items"| out_ops_intake
   self_factory_pipeline -->|"when: a prepped release is merged and its release grant is live<br/>why: release stage starts once, under the owner's release grant"| out_release_conductor
   self_factory_pipeline -->|"when: before any stage, and for each plan<br/>why: it checks the grant, drafts and checks specs, derives plan grants"| out_spec_first_planning
   classDef self stroke-width:4px,font-weight:bold

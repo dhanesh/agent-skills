@@ -119,7 +119,8 @@ The stage list, what each stage calls today and the result words are in
 [references/overview.md](references/overview.md). In short: sweep runs `intake sweep`;
 incident probe runs incident-watch's `incident probe` once when `.release/recipe.json`
 exists, and prints `STAGE: incident-probe skip no-recipe` when it does not (it runs only
-the recipe's probes, never a rollback or a deploy); growth review runs `growth auto --source <name>` and hands its stdout to `intake import
+the recipe's probes, never a rollback or a deploy) and, when the probe opens an incident,
+imports its signal with ops-intake's `intake import --source incident-watch`; growth review runs `growth auto --source <name>` and hands its stdout to `intake import
 --format intake-signals-jsonl --source <name>` as two separate processes; idea follow-up
 runs idea-validation's read-only `ideas list` and `ideas status <slug>` (below); autopick runs
 `intake autopick`; plan drafts and checks a spec for each picked item (below); derive

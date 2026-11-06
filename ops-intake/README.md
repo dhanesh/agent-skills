@@ -33,9 +33,9 @@ flowchart LR
     out_spec_first_planning["spec-first-planning"]
   end
   in_factory_conductor ==>|"when: a run ends<br/>why: proven merges mark the item built<br/>envelope: run-result/v1"| self_ops_intake
-  in_factory_pipeline -->|"when: each tick, after the grant check<br/>why: it sweeps sources, imports breaches and picks queue items"| self_ops_intake
+  in_factory_pipeline -->|"when: each tick, after the grant check<br/>why: it sweeps, imports breaches and new incidents, picks queue items"| self_ops_intake
   in_growth_review -->|"when: a metric breaches its threshold<br/>why: the breach becomes a ranked queue item"| self_ops_intake
-  in_incident_watch --o|"when: a probe opens an incident<br/>why: the owner imports the signal as a queue item"| self_ops_intake
+  in_incident_watch --o|"when: a probe opens an incident<br/>why: the owner or a factory-pipeline tick imports it as a queue item"| self_ops_intake
   in_release_conductor ==>|"when: a release is verified or rolled back<br/>why: it closes the item, or a rollback opens one<br/>envelope: release-result/v1"| self_ops_intake
   in_spec_first_planning ==>|"when: the plan comes from an intake item<br/>why: ops-intake marks the item planned<br/>envelope: task-plan/v1"| self_ops_intake
   self_ops_intake ==>|"when: the human picks a queue item<br/>why: the item becomes a spec and a plan<br/>envelope: intake-item/v1"| out_spec_first_planning
