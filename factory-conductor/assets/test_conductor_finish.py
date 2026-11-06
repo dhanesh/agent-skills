@@ -4,7 +4,8 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C
 import contract_check as CC
-from conductor_testkit import GIT, repo, new_run, revoke, tmpdir, write_grant, write_plan_envelope
+from conductor_testkit import (GIT, repo, new_run, revoke, stub_gh, tmpdir, write_grant,
+                               write_plan_envelope)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRST_T1 = ["{python}", "-c", "pass"]
@@ -60,6 +61,10 @@ class FinishTests(unittest.TestCase):
                     'exec "%s" "$@"\n' % (sys.executable, self.stub, self.record,
                                           shutil.which("git")))
         os.chmod(wrapper, 0o755)
+        # A stub `gh` first on PATH (every self.out call): finish only runs `gh pr create`
+        # with the allowed options (D22), so the default PR command reaches the stub,
+        # which records it as "pr" with the options it got.
+        self.ghbin = stub_gh([sys.executable, self.stub, self.record])
 
     def run_plan(self, policy=None, stop=True):
         """T1 proven and merged, T2 parked, T3 blocked; the run stopped by `next`."""
@@ -80,18 +85,20 @@ class FinishTests(unittest.TestCase):
 
     def out(self, argv, err=False):
         buf, ebuf = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(ebuf):
+        path = self.ghbin + os.pathsep + os.environ["PATH"]
+        with mock.patch.dict(os.environ, {"PATH": path}), contextlib.redirect_stdout(buf), \
+                contextlib.redirect_stderr(ebuf):
             rc = C.main(argv)
         return (rc, buf.getvalue(), ebuf.getvalue()) if err else (rc, buf.getvalue())
 
     PR = None
 
     def finish(self, extra=(), push=None, pr=None):
-        """finish with the recording `git` wrapper on PATH and a stub PR command."""
-        argv = ["finish", "--root", self.root,
-                "--pr-cmd", json.dumps(pr or [sys.executable, self.stub, self.record, "pr",
-                                              "--title", "{title}", "--base", "{base_branch}",
-                                              "--body-file", "{body_file}"])]
+        """finish with the recording `git` wrapper and the stub `gh` on PATH; the PR
+        command is the default one unless pr names another."""
+        argv = ["finish", "--root", self.root]
+        if pr is not None:
+            argv += ["--pr-cmd", json.dumps(pr)]
         if push is not None:
             argv += ["--push-cmd", json.dumps(push)]
         with mock.patch.dict(os.environ, {"PATH": self.bin + os.pathsep + os.environ["PATH"]}):
@@ -295,8 +302,7 @@ class FinishTests(unittest.TestCase):
         subprocess.run(["git", "-C", self.root, "config", "remote.origin.push",
                         "+refs/heads/factory/p:refs/heads/main"], check=True)
         head = C.git(self.root, "rev-parse", "HEAD").stdout.strip()
-        rc, out = self.out(["finish", "--root", self.root, "--pr-cmd", json.dumps(
-            [sys.executable, self.stub, self.record, "pr", "--body-file", "{body_file}"])])
+        rc, out = self.out(["finish", "--root", self.root])
         self.assertEqual(rc, 0, out)
         self.assertEqual(C.git(bare, "rev-parse", "refs/heads/main").stdout.strip(),
                          main_before)
@@ -314,8 +320,7 @@ class FinishTests(unittest.TestCase):
                        check=True)
         subprocess.run(["git", "-C", self.root, "config",
                         "url.ext::sh -c touch%% %s%% #.insteadOf" % mark, bare], check=True)
-        rc, out = self.out(["finish", "--root", self.root, "--pr-cmd", json.dumps(
-            [sys.executable, self.stub, self.record, "pr", "--body-file", "{body_file}"])])
+        rc, out = self.out(["finish", "--root", self.root])
         self.assertFalse(os.path.exists(mark), "the planted ext:: command ran")
         self.assertEqual(rc, 3, out)
         self.assertFalse(C.State.load(self.st_path).finished["pushed"])
@@ -696,8 +701,7 @@ class IntegrationTests(unittest.TestCase):
     def test_tasks_that_break_each_other_are_never_pushed(self):
         head = self.run_pair(EXACTLY_TWO)
         with mock.patch.dict(os.environ, {"PATH": self.bin + os.pathsep + os.environ["PATH"]}):
-            rc, out, err = self.out(["finish", "--root", self.root, "--pr-cmd", json.dumps(
-                [sys.executable, self.stub, self.record, "pr"])], err=True)
+            rc, out, err = self.out(["finish", "--root", self.root], err=True)
         self.assertEqual(rc, 3, err)
         lines = out.splitlines()
         shown = " ".join(EXACTLY_TWO)
@@ -839,8 +843,7 @@ class ReviewFixTests(unittest.TestCase):
         verified = self.st().finished["integration"]["head"]
         commit_in(self.root, "late.txt", "moved\n")  # the run branch moves after integration
         write_grant(self.root, self.plan)  # now push and PR are covered
-        rc, out, err = self.out(["finish", "--root", self.root, "--retry-remote", "--pr-cmd",
-                                 json.dumps([sys.executable, self.stub, self.record, "pr"])],
+        rc, out, err = self.out(["finish", "--root", self.root, "--retry-remote"],
                                 err=True)
         self.assertEqual(rc, 2, out)
         self.assertIn("moved since the integration re-run", err)
@@ -858,8 +861,7 @@ class ReviewFixTests(unittest.TestCase):
             return real(st, action)
 
         with mock.patch.object(C, "_gate_logged", moving_gate):
-            rc, out, err = self.out(["finish", "--root", self.root, "--pr-cmd", json.dumps(
-                [sys.executable, self.stub, self.record, "pr"])], err=True)
+            rc, out, err = self.out(["finish", "--root", self.root], err=True)
         self.assertEqual(rc, 2, out)
         self.assertIn("moved since the integration re-run", err)
         self.assertEqual(self.records(), [])
@@ -869,8 +871,7 @@ class ReviewFixTests(unittest.TestCase):
         bare = tmpdir()
         subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
         subprocess.run(["git", "-C", self.root, "remote", "add", "origin", bare], check=True)
-        rc, out = self.out(["finish", "--root", self.root, "--pr-cmd", json.dumps(
-            [sys.executable, "-c", "pass"])])
+        rc, out = self.out(["finish", "--root", self.root])
         self.assertEqual(rc, 0, out)
         self.assertEqual(C.git(bare, "rev-parse", "refs/heads/factory/p").stdout.strip(),
                          self.st().finished["integration"]["head"])
@@ -1030,9 +1031,7 @@ class SkippedIntegrationRetryTests(unittest.TestCase):
         write_grant(self.root, self.plan)
         n = [e["event"] for e in self.log_events()].count("integration")
         with mock.patch.object(C, "_run_steps", side_effect=AssertionError("ran a command")):
-            rc, out, err = self.out(["finish", "--root", self.root, "--retry-remote",
-                                     "--pr-cmd", json.dumps([sys.executable, self.stub,
-                                                             self.record, "pr"])], err=True)
+            rc, out, err = self.out(["finish", "--root", self.root, "--retry-remote"], err=True)
         self.assertEqual(rc, 2, out)
         self.assertIn("moved since", err)
         self.assertIn("a human must check the new commits", err)

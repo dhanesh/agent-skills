@@ -188,7 +188,10 @@ url.<x>.insteadOf cannot turn it into an ext:: command. Like every conductor git
 (spec section 7a), so the user's own pre-push hooks do NOT run.
 Then `gate open_pr`, and on COVERED the --pr-cmd (default: gh pr create --title <plan
 title> --base <base branch> --body-file <tmp>), the body built from the payload with all
-plan, park and review text inside inline code spans. The commands are JSON argv lists; a
+plan, park and review text inside inline code spans. The --pr-cmd is allowlisted like the
+push (pr_cmd_problem): `gh pr create` with only --title {title}, --base {base_branch} and
+--body-file {body_file}, each at most once; anything else exits 2 before any remote step,
+and it is checked again right before the PR step runs. The commands are JSON argv lists; a
 token that is exactly {run_branch}, {base_branch}, {title} or {body_file} is replaced.
 The first ASK prints GATE: ASK, skips the rest and exits 3 (the run's recorded stop is
 left as it was); a failed step exits 3 too. Completed steps are recorded (finished.pushed,
@@ -4461,6 +4464,39 @@ def push_cmd_problem(argv, run_branch):
     return None
 
 
+# The PR command's allowlist: `gh pr create` and only the options DEFAULT_PR_CMD uses,
+# each followed by the placeholder it carries there (D22).
+PR_CMD_PREFIX = ["gh", "pr", "create"]
+PR_OPTIONS = {DEFAULT_PR_CMD[i]: DEFAULT_PR_CMD[i + 1]
+              for i in range(len(PR_CMD_PREFIX), len(DEFAULT_PR_CMD), 2)}
+
+
+def pr_cmd_problem(argv):
+    """None when argv (placeholders NOT yet expanded) is a PR command finish may run,
+    else why not. The only shape allowed is
+
+        gh pr create [--title {title}] [--base {base_branch}] [--body-file {body_file}]
+
+    in any order, each option at most once and followed by exactly its placeholder: no
+    other option, no --opt=value form, no `--`, no extra positional. `gh` is the bare
+    program name, found on PATH."""
+    if argv[:3] != PR_CMD_PREFIX:
+        return "the PR command must start with exactly: gh pr create"
+    rest, seen = argv[3:], set()
+    if len(rest) % 2:
+        return "every option must be followed by its placeholder, got %r" % (rest,)
+    for opt, val in zip(rest[::2], rest[1::2]):
+        if opt not in PR_OPTIONS:
+            return "option %r is not allowed (allowed: %s)" % (
+                opt, ", ".join("%s %s" % kv for kv in sorted(PR_OPTIONS.items())))
+        if opt in seen:
+            return "option %s appears more than once" % opt
+        seen.add(opt)
+        if val != PR_OPTIONS[opt]:
+            return "option %s must carry %s, got %r" % (opt, PR_OPTIONS[opt], val)
+    return None
+
+
 def explicit_push(argv, run_branch, sha=None):
     """An allowlisted push argv with its run-branch positional (the last one) rewritten to
     the explicit, non-forced refspec refs/heads/<rb>:refs/heads/<rb>. A refspec with no
@@ -4529,6 +4565,10 @@ def cmd_finish(args):
     why = push_cmd_problem(expand_cmd(push_cmd, {"run_branch": st.run_branch}), st.run_branch)
     if why:
         sys.stderr.write("--push-cmd is not a push a grant covers: %s\n" % why)
+        return 2
+    why = pr_cmd_problem(pr_cmd)
+    if why:
+        sys.stderr.write("--pr-cmd is not a PR command finish may run: %s\n" % why)
         return 2
     if isinstance(st.finished, dict) and st.finished.get("envelope"):
         return _finish_again(st, args, push_cmd, pr_cmd)
@@ -4798,6 +4838,10 @@ def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):
         if not ok:
             _print_pending(st)
             return 3
+        why = pr_cmd_problem(pr_cmd)  # checked again, right before it runs
+        if why:
+            sys.stderr.write("--pr-cmd is not a PR command finish may run: %s\n" % why)
+            return 2
         fd, body_path = tempfile.mkstemp(dir=st.dir, prefix=".pr-body.", suffix=".md")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:

@@ -18,6 +18,7 @@ import atexit
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -50,6 +51,22 @@ def tmpdir(**kw):
 def _remove_tmpdirs():
     while _TMPDIRS:
         shutil.rmtree(_TMPDIRS.pop(), ignore_errors=True)
+
+
+def stub_gh(forward=None):
+    """A fresh directory holding a stub `gh` for the default PR command (finish runs only
+    `gh pr create` with the allowed options, D22). It exits 9 unless called as
+    `gh pr create ...`. With forward (an argv list), it runs `<forward...> pr <options>`;
+    without, it prints a line with no PR URL and exits 0. Put the directory first on
+    PATH."""
+    d = tmpdir()
+    gh = os.path.join(d, "gh")
+    tail = ("exec %s pr \"$@\"\n" % " ".join(shlex.quote(a) for a in forward) if forward
+            else 'echo "stub gh pr create"\n')
+    with open(gh, "w") as f:
+        f.write('#!/bin/sh\n[ "$1 $2" = "pr create" ] || exit 9\nshift 2\n' + tail)
+    os.chmod(gh, 0o755)
+    return d
 
 
 def read_text(path, mode="r"):

@@ -196,8 +196,10 @@ Each step is one command. Read its output lines, not just the exit code.
    the `run-result/v1` envelope (`FINISH: <path>`), then gates `push_branch` and pushes exactly
    that verified commit, then gates `open_pr` and opens the PR against the base branch. When
    the PR command prints a PR URL, it writes a second run-result that adds `pr: {"number": n}`
-   and names the envelope it replaces (`PR: <n> <path>`); later commands read that one. See
-   "Ending the run" below.
+   and names the envelope it replaces (`PR: <n> <path>`); later commands read that one. The
+   PR command is always `gh pr create` with only `--title {title}`, `--base {base_branch}`
+   and `--body-file {body_file}`: any other `--pr-cmd` exits 2 before any push or PR step.
+   See "Ending the run" below.
 
 **Reading any step's output.**
 
@@ -293,8 +295,10 @@ refuses (exit 2), and `init` starts a new run.
 the PR or edit code yourself, even when a gate asks, because only `conductor` checks the grant
 before each step and records it in the run's log. You MUST NOT pass a `--pr-cmd` or
 `--push-cmd` that does anything but push the run branch or open the PR, because the conductor runs it in place of
-the push or PR step the grant approved. They exist for stubs and for hosts without `gh`, so by
-default pass neither. You MUST NOT edit, delete or recreate
+the push or PR step the grant approved. They exist for stubs, so by default pass neither.
+`finish` refuses (exit 2) a `--pr-cmd` that is not `gh pr create` with only the default
+options, as it refuses a push outside its allowlist; to stub the PR, put a stub `gh` first on
+PATH. You MUST NOT edit, delete or recreate
 `state.json`, `autonomy-log.jsonl` or anything under `.skill-contract/`, because they are the
 run's record that `resume` and `finish` read back and the human audits; report a mismatch
 instead.
