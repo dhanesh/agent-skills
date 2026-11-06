@@ -78,9 +78,9 @@ flowchart LR
     out_ops_intake["ops-intake"]
     out_release_conductor["release-conductor"]
   end
-  in_factory_pipeline -->|"when: each tick, right after the sweep, when a recipe exists<br/>why: its read-only probes find an incident with no human start"| self_incident_watch
+  in_factory_pipeline -->|"when: each tick, right after the sweep, when a recipe exists<br/>why: its read-only probes find an incident, and the tick queues it"| self_incident_watch
   self_incident_watch --o|"when: the owner closes the incident<br/>why: the record is timeline evidence for the post-mortem"| out_bug_autopsy
-  self_incident_watch --o|"when: a probe opens an incident<br/>why: the owner imports the signal as a queue item"| out_ops_intake
+  self_incident_watch --o|"when: a probe opens an incident<br/>why: the owner or a factory-pipeline tick imports it as a queue item"| out_ops_intake
   self_incident_watch -->|"when: each probe run<br/>why: its loader reads the release recipe and its probe commands"| out_release_conductor
   classDef self stroke-width:4px,font-weight:bold
   class self_incident_watch self
