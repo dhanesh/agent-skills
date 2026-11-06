@@ -1,0 +1,23 @@
+# .factory/check-commands.txt
+# Owner-owned allowlist (master spec D3, R5). DRAFT: edit before you commit it.
+# One pattern per line. `*` matches exactly one argument.
+# A check command from an intake item or an idea runs unattended only when it
+# matches a line here. Any other command waits for the owner's read.
+
+# Repo make targets that take no argument.
+make test
+make eval
+make bcp14
+make readme
+make skill-graph-check
+make contract
+
+# One skill's gate. See note 1 about make variables.
+make gate-skill *
+
+# A repo script or test suite, run with the interpreter the conductor finds.
+# See note 2 about interpreter flags.
+{python} *
+
+# The gate scripts' own self-tests.
+bash scripts/gates/test_gates.sh

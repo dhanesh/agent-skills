@@ -6,14 +6,60 @@ Each report records how one branch changed the behaviour of the skills it touche
 
 ## By skill
 
+### bug-autopsy
+
+- 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): held, 0 improved of 4 rows, eval PASS 10/10 → PASS 10/10
+
+### crafting-self-prompting-loops
+
+- 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): held, 0 improved of 3 rows, eval PASS 35/35 → PASS 35/35
+
+### factory-conductor
+
+- 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 3 improved of 58 rows, eval PASS 49/49 → PASS 49/49
+
+### factory-pipeline
+
+- 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 7 improved of 7 rows, eval PASS 7/7 → PASS 54/54
+
+### growth-review
+
+- 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 2 improved of 12 rows, eval PASS 15/15 → PASS 15/15
+
+### idea-validation
+
+- 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): held, 0 improved of 11 rows, eval PASS 13/13 → PASS 13/13
+
+### incident-watch
+
+- 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 3 improved of 3 rows, eval PASS 7/7 → PASS 30/30
+
+### ops-intake
+
+- 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 3 improved of 23 rows, eval PASS 22/22 → PASS 22/22
+
+### release-conductor
+
+- 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): held, 0 improved of 15 rows, eval PASS 13/13 → PASS 13/13
+
 ### spec-first-planning
 
+- 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 3 improved of 11 rows, eval PASS 74/74 → PASS 74/74
 - 2026-11-01 [docs/forge-proof-docs-and-ab-report](2026-11-01-docs-forge-proof-docs-and-ab-report.md): held, 0 improved of 8 rows, eval PASS 74/74 → PASS 74/74
+
+### test-safety-net
+
+- 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): held, 0 improved of 93 rows, eval PASS 57/57 → PASS 57/57
 
 ### verification-skill-forge
 
 - 2026-11-01 [docs/forge-proof-docs-and-ab-report](2026-11-01-docs-forge-proof-docs-and-ab-report.md): held, 0 improved of 12 rows, eval PASS 26/26 → PASS 26/26
 
+### verifier-installer
+
+- 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 1 improved of 7 rows, eval PASS 32/32 → PASS 32/32
+
 ## All reports
 
+- 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): `AB_RESULT: PASS`, 12 skill(s)
 - 2026-11-01 [docs/forge-proof-docs-and-ab-report](2026-11-01-docs-forge-proof-docs-and-ab-report.md): `AB_RESULT: PASS`, 2 skill(s)

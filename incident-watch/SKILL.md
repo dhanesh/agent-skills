@@ -1,71 +1,180 @@
 ---
 name: incident-watch
 description: >-
-  In development: no command ships yet. The planned live-incident detector of the
-  software factory: `incident probe` will run only the release recipe's read-only
-  `health`, `version_probe` and `prod_smoke` commands on a schedule, open one incident
-  record after 2 or more consecutive failed probes and write an `incident` signal into
-  ops-intake, and `incident close --by <name>` will hand the record to bug-autopsy. It
-  will never run a rollback or deploy. Use when the user asks for incident-watch or
-  "watch production for incidents": say that it is not built yet and name the skills
-  that do each step by hand. Not for a post-mortem (use bug-autopsy), not for a deploy
-  or rollback (use release-conductor).
+  The live-incident detector of the software factory. Use when the user asks for
+  incident-watch, to "watch production for incidents" or to "probe prod". `incident probe`
+  (incident.py, stdlib) loads the release recipe with release-conductor's own loader, runs
+  only its read-only `health`, `version_probe` and `prod_smoke` commands (argv lists, no
+  shell, a timeout each), records each result in a git-ignored state directory and prints
+  one `PROBE:` line per command and a `PROBE_RESULT:` summary. Any other command is refused
+  with exit 2 and nothing runs. After 2 or more consecutive failed probes it opens one
+  incident record and writes one `incident` signal line for ops-intake. The record shows
+  the recipe's rollback argv word for word and the release-conductor command that asks
+  the owner. `incident close --by <name>` (a human) closes the record for bug-autopsy. It
+  never runs a rollback or deploy: the owner mitigates. Not for a post-mortem (use bug-autopsy), not for a deploy or rollback (use
+  release-conductor).
 license: MIT
-compatibility: Nothing to run yet, as no command ships. The planned tooling is Python 3.10+ stdlib only, offline, plus git and a POSIX shell.
+compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, offline, plus git. It reads the release recipe with the release-conductor skill, which has to be installed beside it.
 metadata:
   author: dhanesh
-  version: "0.0.1"
-  tags: "software-factory,incident,triage,read-only-probe,in-development"
+  version: "0.1.0"
+  tags: "software-factory,incident,triage,read-only-probe"
 ---
 
 # incident-watch
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
-**Status: in development: no command ships yet.** This skill is a placeholder for the
-factory's live-incident detector. When it is built, `incident probe` will run the
-release recipe's read-only probes, open an incident record after repeated failures and
-signal ops-intake; the owner will mitigate through release-conductor. Today it has no
-script, no command and no behaviour. When it fires, your job is to say so plainly and
-to send the user to the skills that do each step by hand.
+You watch production for incidents and triage them. The factory detects; the owner
+mitigates (spec decision D1). A probe runs only the commands the release recipe lists as
+read-only: `health`, `version_probe` and each `prod_smoke` entry (spec constraint S4).
 
-You MUST NOT tell the user that an `incident` command exists, and you MUST NOT try to
-run one, because nothing ships yet and an invented command fails or misleads.
+**Status: built.** `incident probe` ships (R22): it runs the three read-only lists,
+records each result and prints one line per command. It refuses, with exit 2 and before
+anything runs, any requested command outside the three lists (R23). After 2 or more
+consecutive failed probes it opens one incident record and writes one `incident` line to
+the signals file that ops-intake imports (R24). The record shows the recipe's rollback
+argv word for word and the release-conductor command that asks the owner; incident-watch
+never runs either (R25). `incident close --by <name>` closes the record as a human step
+and prints `NEXT: run bug-autopsy with <record path>` (R26). The design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R22 to
+R26, decision D1) in the agent-skills repository.
+
+**Locating this skill's helpers (do this first).** The steps below run bundled
+scripts. You execute from the *target repo*, not from this skill's directory, so a
+path written relative to this skill will not resolve. Resolve the base directory once and use it
+everywhere — including in any subagent prompt, which MUST receive the literal absolute
+path:
+
+```sh
+SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
+# If you don't have it, discover it:
+SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'incident-watch' 2>/dev/null | head -1)
+test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
+```
+
+**Python interpreter.** Most commands in this skill and its references are written with `python3`.
+Find the interpreter once, before the first of them. If `$SKILL_PYTHON` is set, use it. Otherwise,
+on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails, that
+`python3` is the install stub: skip it without running it. Use the first of `python3`, `python` and
+`py -3` that is not skipped and for which
+`<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter
+you found in place of `python3` in every command, and in any `Bash(...)` permission rule you
+suggest. Commands that start with `uv run` or `{python}` keep their own form. In a session resumed
+under a `Bash(...)` allowlist, skip this lookup and use the interpreter that the allowlist names. If
+none passes, follow this skill's own fallback for running without Python where it gives one;
+otherwise stop and tell the user that this skill needs Python 3.10 or newer.
+
+The command is `python3 "$SKILL_DIR/assets/incident.py" --root <repo> probe`. It reads
+`<repo>/.release/recipe.json` with release-conductor's `load_recipe`, so the recipe format
+and its checks are release-conductor's (its release protocol reference describes them).
+`{env}` in a probe command is release-conductor's production value. Pass
+`--version <v>` and `--commit <sha>` when a probe command carries `{version}` or
+`{commit}`; without them the probe refuses and runs nothing. `--timeout <seconds>` sets the
+limit per command (default 60). `--only <list>` (repeatable) runs only that list; the name
+is exactly `health`, `version_probe` or `prod_smoke`. Any other name (`rollback`,
+`deploy_prod`, a path, a command), any extra argument after `probe`, and any probe entry
+whose program word holds a `{token}` exit 2 with `PROBE: refused: <reason>`, and nothing
+runs, not even the allowed lists (R23). `--skills-dir <dir>` (before `probe`, repeatable) makes the
+tool look for release-conductor only in that directory; it is for tests.
+
+The close command is `python3 "$SKILL_DIR/assets/incident.py" --root <repo> close --by
+"<the owner's name>" [--reason <text>] [--id <record id>]` (R26). It takes the same lock
+as `probe`, marks the open record `closed` with `closed_by`, `closed_at` and
+`close_reason`, sets the failure count back to 0 (so a new failure streak opens a new
+record) and prints `INCIDENT: closed <id> <path> by <name> at <time>` and
+`NEXT: run bug-autopsy with <record path>`. It exits 2 with a `STOP:` line and changes
+nothing when `--by` is missing, when the name starts with the word "agent" in any form
+(the check growth-review and ops-intake use), when no record is open, or when more than
+one is open and `--id` does not name one.
 
 ## When to use
 
-The user asks for incident-watch by name, or asks to "watch production for incidents",
-"probe prod on a schedule" or "open an incident when health fails". The design is in
-`docs/factory/2026-11-04-autonomous-factory-spec.md` (requirements R22 to R26 and
-decision D1) in the agent-skills repository.
+The user asks for incident-watch by name, asks to "watch production for incidents", to
+"probe prod" or to "check whether production is healthy".
 
-Boundaries: a deploy or a rollback is `release-conductor`, and only after the owner's
-yes; a post-mortem of an incident that is over is `bug-autopsy`; triage of signals
-into planning is `ops-intake`.
+Boundaries: a deploy or a rollback is `release-conductor`, and only after the owner's yes;
+a post-mortem of an incident that is over is `bug-autopsy`; triage of signals into planning
+is `ops-intake`.
 
 ## Workflow
 
-1. **Say the status.** Tell the user, in one line, that incident-watch is in
-   development and that no command ships yet.
-2. **Map the steps to skills that exist.** Use the planned steps in
-   [references/overview.md](references/overview.md) to name the installed skill that
-   does each step the user cares about by hand today. Name only skills that are
-   installed in this session.
-3. **Verify the answer.** Check your reply against the success criteria below. Remove
-   any sentence that names an `incident` command, a script of this skill or a
-   behaviour as if it runs today, then re-check.
+1. **Run one probe.** Run `python3 "$SKILL_DIR/assets/incident.py" --root <repo> probe`.
+   Exit 2 with `PROBE: refused: <reason>` means nothing ran: report the reason (no
+   release-conductor, an invalid or missing recipe, a missing `--version` or `--commit`, a
+   state directory that is not git-ignored, a name or argument outside the three probe
+   lists).
+2. **Read each PROBE: line.** There is one per command, in order: `health`,
+   `version_probe`, then `prod_smoke[0]` and on. The word is `pass`, `fail` or `timeout`,
+   with the exit code. The last line is
+   `PROBE_RESULT: <pass|fail> commands=<n> failed=<n> consecutive_failures=<n>`. Exit 0 is
+   a pass; exit 3 is a failed probe (or another probe holds the lock).
+3. **Read the INCIDENT: lines.** After 2 or more consecutive failed probes the probe
+   prints `INCIDENT: opened <id> <record path>`, `SIGNAL: <signals path> kind incident`
+   and `NEXT: intake import --format intake-signals-jsonl --source incident-watch <signals path>`.
+   While that record is open, a later failure prints `INCIDENT: open <id> <record path>
+   probes=<n>` and opens no second record. The record
+   (`.skill-contract/incidents/records/<id>.json`) holds the failed probes with their
+   output tails, the last release record, the release statuses and the recent
+   default-branch CI runs. When the CI runs are not on disk, the record says so and the
+   probe prints `NEXT: gh run list ... > .skill-contract/incidents/ci-runs.json`; give
+   that line to the owner as printed.
+   The probe that opens the record also prints `ROLLBACK: <the recipe's rollback argv>`
+   and `NEXT: ask the owner to roll back: release rollback (shows the rollback and
+   waits); on their yes: release rollback --approved-by "<their name>"`. That command
+   acts only on a release in `prod_failed` or `outcome_unknown`; when no release is in
+   one of those states, the second line is instead
+   `NEXT: release rollback cannot act: <reason>; the owner rolls back by hand with the
+   ROLLBACK command above`. Every printed line escapes control characters, so recipe
+   text cannot add a line. The record's
+   `rollback` field holds the same argv as a list, word for word, with any `{version}`
+   or `{commit}` unfilled (release-conductor fills them from the rollback target). A
+   recipe with no valid `rollback` prints `ROLLBACK: none: <reason>` instead. Give both
+   lines to the owner as printed. They are data for the owner's decision, not steps for
+   you. `references/overview.md` has the record fields
+   and the ops-intake config the import needs.
+4. **Report a failure without acting on it.** For a failed probe, name each failed command
+   and the consecutive-failure count, and the record path when one is open. The output
+   tails are in `<repo>/.skill-contract/incidents/probes.jsonl` and in the record; quote
+   from them only what the owner needs. Tell the owner that mitigation is theirs, through
+   release-conductor: the `release rollback` command shows the rollback and waits for
+   their yes.
+5. **Close the record only on the owner's word.** When the owner says the incident is
+   over, run `python3 "$SKILL_DIR/assets/incident.py" --root <repo> close --by "<their
+   name>"`, with `--reason` if they gave one and `--id` if more than one record is open.
+   Report the `INCIDENT: closed` line and the `NEXT: run bug-autopsy with <record path>`
+   line as printed. bug-autopsy reads the record as timeline evidence: the probe times,
+   exit codes and output tails, the last release and the CI runs. A `STOP:` line means
+   nothing changed: report it.
+6. **Verify the report.** Check it against the success criteria below, then re-check.
+
+You MUST NOT run a rollback, a deploy or any other recipe command yourself, because
+rollback and production deploy are never-grantable human gates (spec decision D1 and
+constraint B1), and a wrong command against production does real harm.
+
+You MUST NOT say that an incident record was opened or that a signal was written unless
+the probe printed the `INCIDENT: opened` line, because a false claim hides an incident the
+owner has to handle.
+
+You MUST NOT run `incident close` unless the owner said in this session that the incident
+is over, and `--by` MUST be the owner's own name, never yours, because closing ends the
+watch on that incident and is the owner's decision (spec decision D1).
 
 ## Deliverable
 
-A short status reply with two parts: the line "incident-watch is in development: no
-command ships yet", and a list of the planned steps the user asked about, each with
-the existing skill that does it by hand, or "no skill yet".
+A probe report: each `PROBE:` line as a table row (command, result, exit code), the
+`PROBE_RESULT:` line, the consecutive-failure count, any `INCIDENT:`, `SIGNAL:` and
+`NEXT:` lines as printed, any `ROLLBACK:` line as printed and, for a failure, the owner's next step (mitigate through
+release-conductor). After a close: the `INCIDENT: closed` line and the
+`NEXT: run bug-autopsy with <record path>` line as printed.
 
 ## Success criteria
 
-- The reply carries the in-development line.
-- The reply names no command, script or behaviour of this skill as if it exists.
-- Each skill named in the reply is installed in this session.
+- The report lists every command the probe ran, with its result.
+- A failure is reported as a failure. A record or signal is claimed only from an
+  `INCIDENT: opened` line, and no rollback is claimed: the rollback is shown, never run.
+- No command outside `health`, `version_probe` and `prod_smoke` was run.
+- A record is closed only on the owner's word, with the owner's name in `--by`.
 
-The outcome eval (`eval/run_eval.py`) checks this skill's honest state: SKILL.md and
-README.md carry the in-development line, and every path this skill names exists.
+The outcome eval (`eval/run_eval.py`) runs the probe on a fixture recipe from
+`assets/incident_testkit.py`, whose commands are local stubs, and grades its lines and
+records. The unit suite is `assets/test_incident.py`.

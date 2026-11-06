@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Skeleton suite for factory-pipeline. Stdlib unittest; no pip, no network, deterministic.
-
-No command ships yet, so this suite checks the skeleton's shape and its honest
-status line. Grow it into the real unit suite when tooling lands in assets/.
+"""Shape and status suite for factory-pipeline. Stdlib unittest; no pip, no network,
+deterministic. The tick's behaviour is in test_pipeline_tick.py; this suite checks that
+the docs say what ships and what is pending.
 Run:  python3 test_factory_pipeline_smoke.py
 """
 import os
@@ -17,7 +16,7 @@ def read(rel):
         return f.read()
 
 
-class TestSkeleton(unittest.TestCase):
+class TestShape(unittest.TestCase):
     def test_skill_md_and_readme_exist(self):
         for rel in ("SKILL.md", "README.md"):
             self.assertTrue(os.path.isfile(os.path.join(SKILL_DIR, rel)), rel)
@@ -38,15 +37,19 @@ class TestSkeleton(unittest.TestCase):
         self.assertGreaterEqual(len(re.findall(r"^## ", body, re.M)), 3)
         self.assertGreaterEqual(len(re.findall(r"^[0-9]+\. ", body, re.M)), 3)
 
-    def test_status_line_in_skill_and_readme(self):
+    def test_status_is_built_not_skeleton(self):
         for rel in ("SKILL.md", "README.md"):
-            self.assertIn("in development: no command ships yet", read(rel).lower(), rel)
+            text = read(rel).lower()
+            self.assertIn("status: built.", text, rel)
+            self.assertNotIn("partly built", text, rel)
+            self.assertNotIn("pending-r21", text, rel)
+            self.assertNotIn("no command ships yet", text, rel)
 
-    def test_no_tooling_ships_yet(self):
-        shipped = [f for f in os.listdir(os.path.join(SKILL_DIR, "assets"))
-                   if not f.startswith("test_") and f != "__pycache__"]
-        self.assertEqual(shipped, [])
-        self.assertFalse(os.path.exists(os.path.join(SKILL_DIR, "scripts")))
+    def test_tick_ships_and_docs_name_each_requirement(self):
+        self.assertTrue(os.path.isfile(os.path.join(SKILL_DIR, "assets", "pipeline.py")))
+        text = read("references/overview.md")
+        for req in ("R13", "R14", "R15", "R16", "R17", "R18", "R19", "R20", "R21"):
+            self.assertIn(req, text, req)
 
 
 if __name__ == "__main__":

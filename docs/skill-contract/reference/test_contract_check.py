@@ -1745,5 +1745,149 @@ class ArgvProblemsTests(unittest.TestCase):
                          ["must be a non-empty list of non-empty strings"])
 
 
+class PipelineGrantTests(unittest.TestCase):
+    """check-pipeline-grant (SPEC, "The pipeline grant"). The conformance runner covers the
+    five vectors; these cover the other ASK reasons, selection, --id and the CLI."""
+    CONFORMANCE = os.path.join(os.path.dirname(HERE), "conformance")
+
+    def setUp(self):
+        sys.path.insert(0, self.CONFORMANCE)
+        import run as conformance  # noqa: E402
+        sys.path.remove(self.CONFORMANCE)
+        self.cf = conformance
+        self._td = tempfile.TemporaryDirectory()
+        self.tmp = self._td.name
+        for rel, text in conformance.FILES.items():
+            _write(os.path.join(self.tmp, *rel.split("/")), text)
+        self.now = datetime(2026, 11, 4, 9, 0, 0, tzinfo=timezone.utc)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def put(self, st):
+        path = os.path.join(cc.envelope_dir(self.tmp), st["predicate"]["id"] + ".json")
+        _write(path, json.dumps(st))
+        return path
+
+    def check(self, **kw):
+        return cc.check_pipeline_grant(self.tmp, now=kw.pop("now", self.now), **kw)
+
+    def test_conformance_runner_passes(self):
+        r = subprocess.run([sys.executable, "-I", os.path.join(self.CONFORMANCE, "run.py")],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("CONFORMANCE: PASS (7 vectors)", r.stdout)
+
+    def test_committed_vectors_match_the_generator(self):
+        for name, vec in self.cf.build().items():
+            with open(os.path.join(self.cf.VECTORS, name), encoding="utf-8") as f:
+                self.assertEqual(json.load(f), vec, "run: python3 run.py --build")
+
+    def test_none_when_no_pipeline_grant(self):
+        self.assertEqual(self.check()["status"], "NONE")
+
+    def test_valid_and_expired_and_lifetime(self):
+        self.put(self.cf._grant())
+        self.assertEqual(self.check()["status"], "VALID")
+        self.assertEqual(self.check(now=datetime(2026, 11, 8, tzinfo=timezone.utc))["reason"],
+                         "expired")
+        self.assertEqual(self.check(now=datetime(2026, 10, 30, tzinfo=timezone.utc))["reason"],
+                         "lifetime")
+
+    def test_stale_when_allowlist_changes(self):
+        self.put(self.cf._grant())
+        _write(os.path.join(self.tmp, *self.cf.ALLOW.split("/")), "make anything\n")
+        self.assertEqual(self.check()["reason"], "stale")
+
+    def test_revoked_and_superseded(self):
+        st = self.cf._grant()
+        self.put(st)
+        rev = json.loads(json.dumps(st))
+        rev["predicate"].update(id="pipeline-grant-v1-20261104T083000Z-d4e5f6",
+                                generatedAtTime="2026-11-04T08:30:00Z",
+                                wasRevisionOf=st["predicate"]["id"], assertions=[])
+        rev["predicate"]["payload"]["revoked"] = True
+        self.put(rev)
+        rep = self.check()
+        self.assertEqual((rep["status"], rep["reason"], rep["id"]),
+                         ("ASK", "revoked", rev["predicate"]["id"]))
+        self.assertEqual(self.check(grant_id=st["predicate"]["id"])["reason"], "superseded")
+
+    def test_autonomy_grant_is_not_a_pipeline_grant(self):
+        st = self.cf._grant()
+        st["predicateType"] = cc.GRANT_KIND
+        st["predicate"]["id"] = "autonomy-grant-v1-20261104T080000Z-a1b2c3"
+        self.put(st)
+        self.assertEqual(self.check()["status"], "NONE")
+
+    def test_shape_floors(self):
+        cases = {
+            "skill attribution": lambda p, pr: pr["assertions"][0].update(
+                assertedBy={"skill": "spec-first-planning"}),
+            "auto on push": lambda p, pr: p["gate_policy"].update(push_branch="auto"),
+            "delete grant": lambda p, pr: p["gate_policy"].update(delete="grant"),
+            "bool cap": lambda p, pr: p["caps"].update(max_open_runs=True),
+            "zero cap": lambda p, pr: p["caps"].update(max_plans_per_day=0),
+            "extra cap": lambda p, pr: p["caps"].update(max_usd=1),
+            "wrong digest": lambda p, pr: p["allowlist"].update(sha256="0" * 64),
+            "unpinned path": lambda p, pr: p["pick_policy"].update(path="other.json"),
+            "unknown budget key": lambda p, pr: p["budget"].update(max_coffee=1),
+            "enforce without cap": lambda p, pr: p["budget"].update(enforce=["usd"]),
+            "signed": lambda p, pr: p.update(require_signature=True),
+            "no stop_on": lambda p, pr: p.pop("stop_on"),
+            "planner a string": lambda p, pr: p.update(planner="claude -p {prompt}"),
+            "planner a shell": lambda p, pr: p.update(planner=["sh", "-c", "{prompt}"]),
+            "planner no prompt": lambda p, pr: p.update(planner=["claude", "-p"]),
+            "planner two prompts": lambda p, pr: p.update(
+                planner=["claude", "{prompt}", "{prompt}"]),
+            "planner bypass": lambda p, pr: p.update(
+                planner=["claude", "--dangerously-skip-permissions", "-p", "{prompt}"]),
+            "planner bypass mode": lambda p, pr: p.update(
+                planner=["claude", "--permission-mode", "bypassPermissions", "{prompt}"]),
+            "planner bypass =value": lambda p, pr: p.update(
+                planner=["claude", "--dangerously-skip-permissions=true", "{prompt}"]),
+            "planner bypass case": lambda p, pr: p.update(
+                planner=["claude", "--Dangerously-Skip-Permissions", "{prompt}"]),
+            "planner bypass mode =value": lambda p, pr: p.update(
+                planner=["claude", "--permission-mode=BYPASSPERMISSIONS", "{prompt}"]),
+            "planner allow bypass": lambda p, pr: p.update(
+                planner=["claude", "--allow-dangerously-skip-permissions", "{prompt}"]),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label):
+                st = self.cf._grant()
+                mutate(st["predicate"]["payload"], st["predicate"])
+                self.assertTrue(cc.pipeline_grant_violations(st), label)
+        self.assertEqual(cc.pipeline_grant_violations(self.cf._grant()), [])
+        st = self.cf._grant()
+        st["predicate"]["payload"]["planner"] = ["/usr/local/bin/claude", "-p", "{prompt}",
+                                                 "--add-dir", "{root}"]
+        self.assertEqual(cc.pipeline_grant_violations(st), [], "an optional planner is valid")
+
+    def test_cli_exit_codes_and_lines(self):
+        def cli(*args):
+            return subprocess.run([sys.executable, "-I", CHECKER, "check-pipeline-grant",
+                                   "--root", self.tmp, *args],
+                                  capture_output=True, text=True, timeout=60)
+        r = cli()
+        self.assertEqual((r.returncode, r.stdout.strip().splitlines()[-1]),
+                         (3, "PIPELINE-GRANT: NONE"))
+        self.assertEqual(cli("--id", "not-an-id").returncode, 1)
+        st = self.cf._grant(expires_at="2026-11-12T08:00:00Z")
+        self.put(st)
+        r = cli()
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("PIPELINE-GRANT: INVALID", r.stdout)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        live = self.cf._grant(expires_at=(now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        live["predicate"].update(id=cc.new_id(cc.PIPELINE_GRANT_KIND, now),
+                                 generatedAtTime=now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.put(live)
+        r = cli()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("PIPELINE-GRANT: VALID id=%s expires_at=" % live["predicate"]["id"],
+                      r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

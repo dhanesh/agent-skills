@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """ops-intake: a pure local importer for the ops signal queue.
 
-Intake MUST NOT open a network connection or run a subprocess. It only reads files the
-agent hands it and writes its own queue. Stdlib only, Python 3.10+, POSIX.
+Intake MUST NOT open a network connection or run a subprocess, except `intake sweep`,
+which runs the argv lists of the committed config through intake_sweep.py, with no shell.
+It only reads files the agent hands it and writes its own queue. Stdlib only, Python 3.10+,
+POSIX.
 
 Exits: 0 ok; 3 import or envelope problems, or a human is needed; 2 invalid config,
 unknown format or refused input. Machine lines: IMPORT:, SYNC:, ITEM:, NEXT:, STOP:,
-PROBLEM:.
+PROBLEM:, REGISTERED:, POLICY:, MATCH:, AUTOPICK:, SWEEP:.
 """
 import argparse
 import contextlib
@@ -25,7 +27,7 @@ import adapters
 import contract_check as CC  # the vendored skill-contract checker, same dir
 
 SKILL_NAME = "ops-intake"
-VERSION = "0.2.4"
+VERSION = "0.6.0"
 _KIND_BASE = "https://github.com/dhanesh/agent-skills/skill-contract/"
 INTAKE_ITEM_KIND = _KIND_BASE + "intake-item/v1"
 PLAN_KIND = _KIND_BASE + "task-plan/v1"
@@ -198,6 +200,46 @@ def _check_section(name, sec, problems):
             problems.append("%s.%s must be a list of short strings" % (name, k))
 
 
+# -- Sweep entries (R9, decision D8: an added config field) ---------------------------
+# A sweep entry names one command, as an argv list, and the format of what it prints. The
+# owner commits it in the config; item content never names a command. The command runs
+# with no shell, so no argument is parsed as shell syntax.
+SWEEP_MAX_ENTRIES = 10
+SWEEP_MAX_ARGS = 64
+SWEEP_ARG_LIMIT = 1000
+# Formats a sweep cannot produce: sync reads release envelopes itself, a jobs import needs
+# --run from a NEXT line, and git-rev-list belongs to no source.
+SWEEP_REFUSED_FORMATS = ("release-envelope", "gh-run-jobs-json", "git-rev-list")
+
+
+def _sweep_arg_ok(v):
+    return (isinstance(v, str) and 0 < len(v) <= SWEEP_ARG_LIMIT
+            and not any(ord(c) < 32 or ord(c) == 127 for c in v))
+
+
+def _check_sweep(name, sweep, fmts, problems):
+    where = "source %s: sweep" % code(name)
+    if not isinstance(sweep, list) or not 0 < len(sweep) <= SWEEP_MAX_ENTRIES:
+        problems.append("%s must be a list of 1-%d entries" % (where, SWEEP_MAX_ENTRIES))
+        return
+    for i, e in enumerate(sweep, 1):
+        w = "%s entry %d" % (where, i)
+        if not isinstance(e, dict) or set(e) != {"format", "argv"}:
+            problems.append("%s must be an object with exactly format and argv" % w)
+            continue
+        fmt, argv = e["format"], e["argv"]
+        if fmt in SWEEP_REFUSED_FORMATS:
+            problems.append("%s: format %s cannot be swept" % (w, code(fmt)))
+        elif fmt not in fmts:
+            problems.append("%s: format %s is not in the source's formats" % (w, code(fmt)))
+        if not (isinstance(argv, list) and 0 < len(argv) <= SWEEP_MAX_ARGS
+                and all(_sweep_arg_ok(x) for x in argv)):
+            problems.append("%s: argv must be a list of 1-%d strings with no control "
+                            "characters" % (w, SWEEP_MAX_ARGS))
+        elif argv[0].startswith("-"):
+            problems.append("%s: argv must start with a program, not a flag" % w)
+
+
 def config_problems(cfg):
     problems = []
     if not isinstance(cfg, dict):
@@ -218,7 +260,7 @@ def config_problems(cfg):
             problems.append("source %s must be an object" % code(name))
             continue
         for k in src:
-            if k not in ("enabled", "formats"):
+            if k not in ("enabled", "formats", "sweep"):
                 problems.append("source %s: unknown key %s" % (code(name), code(k)))
         if not isinstance(src.get("enabled"), bool):
             problems.append("source %s: enabled must be true or false" % code(name))
@@ -236,6 +278,8 @@ def config_problems(cfg):
                 problems.append("source %s: %s is reserved for the release formats, and "
                                 "those formats are allowed only there"
                                 % (code(name), code(RELEASE_SOURCE)))
+        if "sweep" in src:
+            _check_sweep(name, src["sweep"], fmts, problems)
     ci_formats = any(isinstance(s, dict) and isinstance(s.get("formats"), list)
                      and ("gh-runs-json" in s["formats"] or "gh-run-jobs-json" in s["formats"])
                      for s in sources.values())
@@ -331,13 +375,22 @@ _RUN_RE = re.compile(r"^[0-9]{1,20}\Z")
 _ITEM_ID_RE = re.compile(r"^I[0-9a-f]{10}\Z")
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}\Z")
 MAX_HISTORY_SHAS = 20000  # per release commit: ~0.9 MB of queue; git lists newest first
+# R29: the NEXT line imports each subject too, so a squash merge's `(#<n>)` can resolve.
+REV_LIST_FLAGS = "--no-commit-header --format=%H%x20%s"
 MAX_HISTORIES = 5         # unneeded histories kept; the oldest unneeded import goes first
 
 
+def _is_pr(v):
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
 def _valid_history(commit, h):
+    """`prs` (R29) is optional: the PR numbers that end a subject in the history. A history
+    imported without subjects has none."""
     return (isinstance(commit, str) and _SHA40_RE.match(commit) and isinstance(h, dict)
             and isinstance(h.get("imported_at"), str) and isinstance(h.get("shas"), list)
-            and all(isinstance(x, str) and _SHA40_RE.match(x) for x in h["shas"]))
+            and all(isinstance(x, str) and _SHA40_RE.match(x) for x in h["shas"])
+            and isinstance(h.get("prs", []), list) and all(_is_pr(x) for x in h.get("prs", [])))
 
 
 _RUN_STRS = ("workflowName", "headBranch", "headSha", "url", "createdAt", "updatedAt")
@@ -372,6 +425,8 @@ def _valid_item(it):
             and all(isinstance(k, str) for k in it.get("seen_keys", []))
             and isinstance(it.get("legacy_keys", []), list)
             and all(isinstance(k, str) for k in it.get("legacy_keys", []))
+            and isinstance(it.get("formats", []), list)
+            and all(isinstance(f, str) for f in it.get("formats", []))
             and all(it.get(k) is None or isinstance(it[k], str) for k in _ITEM_OPTIONAL_STRS))
 
 
@@ -473,11 +528,21 @@ class Queue:
             os.close(fd)
 
     def log(self, event, **fields):
-        """Append one JSON line to the intake log."""
+        """Append one JSON line to the intake log. When a crash left the last line without
+        its newline, end that line first, so the new record never merges onto it."""
         d = _ensure_dir(self.root)
         rec = dict(fields, event=event, at=_now())
-        with open(os.path.join(d, LOG_FILE), "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, sort_keys=True) + "\n")
+        path = os.path.join(d, LOG_FILE)
+        torn = False
+        try:
+            with open(path, "rb") as f:
+                if f.seek(0, os.SEEK_END):
+                    f.seek(-1, os.SEEK_END)
+                    torn = f.read(1) != b"\n"
+        except FileNotFoundError:
+            pass
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(("\n" if torn else "") + json.dumps(rec, sort_keys=True) + "\n")
             f.flush()
             os.fsync(f.fileno())
 
@@ -685,6 +750,8 @@ def cmd_link(a):
             # item has with no key behind it (an item from before seen keys) (L3).
             _merge_keys(keep, drop)
             keep.setdefault("evidence", []).extend(drop.get("evidence", []))
+            for fmt in drop.get("formats", []):
+                _note_format(keep, fmt)  # R8: a low-trust kept item needs every format named
             keep.setdefault("linked", []).append(
                 {"id": drop["id"], "source": drop["source"], "source_id": drop["source_id"]})
             # The dropped item's own links come along, so every source merged into the
@@ -717,6 +784,307 @@ def cmd_status(a):
     reg = sum(1 for i in q.items.values() if i["state"] == "new" and i.get("regressed"))
     print("SYNC: %d items %s regressed=%d" % (
         len(q.items), " ".join("%s=%d" % kv for kv in counts.items()), reg))
+    return 0
+
+
+# -- Pick policy (R7, decision D2) ------------------------------------------------
+# The owner writes .intake/pick-policy.json and registers it with
+# `register-policy --by <name>`. A registration pins the sha256 of the file's bytes and the
+# registrant's name, in the git-ignored intake dir (the house pattern of growth-review's
+# and idea-validation's `register`). `autopick` refuses (exit 2) before a registration and
+# after any edit to the file, until the owner registers again.
+POLICY_PATH = ".intake/pick-policy.json"
+POLICY_STATE = "policy-registration.json"
+POLICY_KEYS = ("kinds", "min_rank", "formats", "max_picks_per_day")
+POLICY_KINDS = ("release", "ci", "issue", "feedback", "incident")
+MAX_PICKS_PER_DAY = 100
+
+
+def _name_ok(name):
+    """A name (--by) is non-empty after stripping and holds no hidden characters.
+    Copied from growth-review's assets/growth.py."""
+    return (isinstance(name, str) and name.strip() != "" and len(name) <= 200
+            and not any(is_hidden_char(c) for c in name))
+
+
+# The block from here to the end of _is_agent() is copied byte for byte from
+# growth-review's assets/growth.py (itself identical in idea-validation's assets/ideas.py
+# and factory-conductor's assets/ledger.py), because skills cannot import each other.
+# Latin lookalikes of the letters in "agent" that NFKD does not fold: Cyrillic, Greek, the
+# IPA script g and alpha, and the small capitals.
+_CONFUSABLES = str.maketrans({"а": "a", "е": "e", "о": "o", "р": "p",
+                              "с": "c", "х": "x", "і": "i", "А": "a",
+                              "Е": "e", "О": "o", "Р": "p", "С": "c",
+                              "Х": "x", "І": "i", "α": "a", "ε": "e",
+                              "ο": "o", "Α": "a", "Ε": "e", "Ο": "o",
+                              "Ν": "n", "Τ": "t", "т": "t", "н": "n",
+                              "Т": "t", "Н": "n", "ɡ": "g", "ɑ": "a",
+                              "ᴀ": "a", "ɢ": "g", "ᴇ": "e", "ɴ": "n",
+                              "ᴛ": "t"})
+# Letters and digits stay; every other character (punctuation, a symbol, a modifier letter
+# such as U+02D0, whitespace) becomes one space, so it counts as a separator.
+_WORD_CATEGORIES = frozenset({"Lu", "Ll", "Lt", "Lo", "Nd"})
+# "agent" at the start, its letters apart or not, and no letter after it (a digit or a
+# space may follow: "agent2" and "agent x" are refused).
+_AGENT_RE = re.compile(r"^ *a *g *e *n *t(?![^\W\d_])")
+
+
+def _fold(name):
+    """name as lowercase Latin letters, digits and spaces: NFKD, combining marks dropped,
+    the lookalikes above folded, casefolded, and every other character a space."""
+    s = "".join(c for c in unicodedata.normalize("NFKD", name)
+                if unicodedata.category(c) != "Mn")
+    s = unicodedata.normalize("NFKC", s.translate(_CONFUSABLES).casefold())
+    return "".join(c if unicodedata.category(c) in _WORD_CATEGORIES else " " for c in s)
+
+
+def _is_agent(name):
+    """True for a name that starts with the word "agent" in any form: `agent:x`, a bare
+    `agent`, any separator (a space, `.`, `;`, `|`, a ratio or modifier-letter colon, a dash
+    or a middle dot), letters apart (`a gent:x`), fullwidth, Cyrillic, Greek or
+    small-capital letters. A human name that starts with that word ("Agent Smith") is
+    refused too: the check fails closed. "Agentha", "agentur" and "Reagent" pass."""
+    folded = _fold(name)
+    return bool(_AGENT_RE.match(folded))
+
+
+def _is_num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def policy_problems(pol):
+    """[] for a valid pick policy, else one line per problem."""
+    if not isinstance(pol, dict):
+        return ["the pick policy is not a JSON object"]
+    problems = ["unknown key %s" % code(k) for k in sorted(set(pol) - set(POLICY_KEYS))]
+    problems += ["missing key %s" % k for k in POLICY_KEYS if k not in pol]
+    kinds = pol.get("kinds")
+    if "kinds" in pol and not (isinstance(kinds, list) and kinds
+                               and all(k in POLICY_KINDS for k in kinds)
+                               and len(set(kinds)) == len(kinds)):
+        problems.append("kinds is a non-empty list of distinct kinds from %s"
+                        % ", ".join(POLICY_KINDS))
+    fmts = pol.get("formats")
+    if "formats" in pol and not (isinstance(fmts, list) and all(f in SOURCE_FORMATS for f in fmts)
+                                 and len(set(fmts)) == len(fmts)):
+        problems.append("formats is a list of distinct source formats (intake formats)")
+    if "min_rank" in pol and not (_is_num(pol["min_rank"]) and pol["min_rank"] >= 0):
+        problems.append("min_rank is a number of 0 or more")
+    m = pol.get("max_picks_per_day")
+    if "max_picks_per_day" in pol and not (isinstance(m, int) and not isinstance(m, bool)
+                                           and 1 <= m <= MAX_PICKS_PER_DAY):
+        problems.append("max_picks_per_day is a whole number from 1 to %d" % MAX_PICKS_PER_DAY)
+    return problems
+
+
+def load_policy(root):
+    """(policy, sha256 of the file's bytes) or (None, problems)."""
+    path = os.path.join(root, *POLICY_PATH.split("/"))
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return None, ["no pick policy at %s" % POLICY_PATH]
+    except OSError as e:
+        return None, ["cannot read %s: %s" % (POLICY_PATH, code(e))]
+    try:
+        pol = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None, ["%s is not valid JSON" % POLICY_PATH]
+    problems = policy_problems(pol)
+    return (None, problems) if problems else (pol, hashlib.sha256(data).hexdigest())
+
+
+def load_registrations(root):
+    """Every pick-policy registration, oldest first. Raises ValueError when the state file
+    is unreadable or malformed."""
+    path = os.path.join(_intake_dir(root), POLICY_STATE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            st = json.load(f)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        raise ValueError("%s/%s is unreadable" % (INTAKE_DIR, POLICY_STATE))
+    regs = st.get("registrations") if isinstance(st, dict) else None
+    if not (isinstance(regs, list) and all(
+            isinstance(r, dict) and isinstance(r.get("sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", r["sha256"]) and _name_ok(r.get("by"))
+            and isinstance(r.get("at"), str) for r in regs)):
+        raise ValueError("%s/%s is malformed" % (INTAKE_DIR, POLICY_STATE))
+    return regs
+
+
+def cmd_register_policy(a):
+    if not _name_ok(a.by):
+        print("STOP: --by needs the name of the owner who registers the pick policy")
+        return 2
+    if _is_agent(a.by):
+        print("STOP: an agent: name cannot register the pick policy; only the owner decides "
+              "what the factory picks on its own")
+        return 2
+    if a.reason is not None and not _name_ok(a.reason):
+        print("STOP: --reason must be non-empty text without hidden characters")
+        return 2
+    if _need_config(a.root) is None:
+        return 2
+    pol, sha = load_policy(a.root)
+    if pol is None:
+        for p in sha:
+            print("STOP: policy: %s" % p)
+        return 2
+    try:
+        with run_lock(a.root):
+            regs = load_registrations(a.root)
+            if regs and regs[-1]["sha256"] == sha:
+                print("REGISTERED: %s (no change since the last registration)" % sha)
+                return 0
+            at = _now()
+            regs.append({"sha256": sha, "by": a.by.strip(), "at": at,
+                         "reason": a.reason.strip() if a.reason else None})
+            _write_atomic(a.root, "%s/%s" % (INTAKE_DIR, POLICY_STATE),
+                          json.dumps({"version": 1, "registrations": regs}, indent=1,
+                                     sort_keys=True) + "\n")
+            Queue(a.root).log("register-policy", sha256=sha, by=a.by.strip(), reason=a.reason)
+    except Locked:
+        print("STOP: the intake lock is held by another command")
+        return 3
+    except ValueError as e:
+        print("STOP: %s" % one_line(e))
+        return 2
+    print("REGISTERED: %s by %s at %s" % (sha, code(a.by.strip()), at))
+    return 0
+
+
+def registered_policy(root):
+    """(policy, registration) when the policy file matches its latest registration, else
+    (None, None) after printing STOP lines."""
+    pol, sha = load_policy(root)
+    if pol is None:
+        for p in sha:
+            print("STOP: policy: %s" % p)
+        return None, None
+    try:
+        regs = load_registrations(root)
+    except ValueError as e:
+        print("STOP: %s" % one_line(e))
+        return None, None
+    if not regs:
+        print("STOP: policy-unregistered: the owner registers %s first" % POLICY_PATH)
+        print("NEXT: the owner runs intake register-policy --by <their name>")
+        return None, None
+    if regs[-1]["sha256"] != sha:
+        print("STOP: policy-changed: %s changed since the registration of %s"
+              % (POLICY_PATH, regs[-1]["at"]))
+        print("NEXT: the owner reads the change and runs intake register-policy --by "
+              "<their name>")
+        return None, None
+    return pol, regs[-1]
+
+
+def _format_allowed(item, policy):
+    """R8 (S3): a low-trust item matches only when the policy names every format it was
+    imported from. An item imported before formats were recorded has none, and fails
+    closed: no policy names its format. A normal-trust item is not filtered by format."""
+    if item.get("trust") != "low":
+        return True
+    fmts = item.get("formats") or []
+    return bool(fmts) and all(f in policy["formats"] for f in fmts)
+
+
+def policy_matches(item, policy):
+    """True when a `new` item is inside the registered policy."""
+    return (item["state"] == "new" and item.get("kind", "issue") in policy["kinds"]
+            and _rank(item) >= policy["min_rank"] and _format_allowed(item, policy))
+
+
+POLICY_BY = "policy:"  # the `by` of an autopick: policy:<registered sha256>
+
+
+_LOG_AT_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
+
+
+class LogUnreadable(Exception):
+    """The intake log has a line the daily count cannot trust."""
+
+
+def policy_picks_on(root, day):
+    """How many picks the intake log records with a `policy:` by on the UTC date `day`
+    (YYYY-MM-DD). The daily maximum counts these, across runs and policy registrations.
+    It fails closed: a line that is not a JSON object with an `event`, or a `pick` line
+    without a string `by` and a UTC `at`, raises LogUnreadable, since a torn or edited
+    line could hide a pick and the count would let autopick pass the maximum."""
+    path = os.path.join(_intake_dir(root), LOG_FILE)
+    rel = "%s/%s" % (INTAKE_DIR, LOG_FILE)
+    n = 0
+    try:
+        with open(path, "rb") as f:
+            for no, raw in enumerate(f, 1):
+                try:
+                    rec = json.loads(raw.decode("utf-8"))
+                except ValueError:
+                    raise LogUnreadable("%s line %d is not JSON" % (rel, no))
+                if not isinstance(rec, dict) or not isinstance(rec.get("event"), str):
+                    raise LogUnreadable("%s line %d is not an intake log record" % (rel, no))
+                if rec["event"] != "pick":
+                    continue
+                by, at = rec.get("by"), rec.get("at")
+                if not (isinstance(by, str) and isinstance(at, str) and _LOG_AT_RE.match(at)):
+                    raise LogUnreadable("%s line %d is a pick without a valid by and at"
+                                        % (rel, no))
+                if by.startswith(POLICY_BY) and at[:10] == day:
+                    n += 1
+    except FileNotFoundError:
+        pass
+    return n
+
+
+def cmd_autopick(a):
+    """Check the registered pick policy, list the items inside it, then pick them highest
+    rank first (ties by id) until the policy's max_picks_per_day is reached for the UTC day
+    (R10). Each pick goes through pick_item, so it writes the same intake-item/v1 envelope
+    as `pick`, and logs `by: policy:<sha256>`."""
+    if _need_config(a.root) is None:
+        return 2
+    try:
+        with run_lock(a.root):
+            pol, reg = registered_policy(a.root)
+            if pol is None:
+                return 2
+            q = _load(a.root)
+            if q is None:
+                return 2
+            print("POLICY: %s by %s at %s" % (reg["sha256"], code(reg["by"]), reg["at"]))
+            shown = sorted((i for i in q.items.values() if policy_matches(i, pol)),
+                           key=lambda i: (-_rank(i), i["id"]))
+            for i in shown:
+                print("MATCH: %s %s %s %s" % (i["id"], _flag(i), _rank(i), code(i["title"])))
+            day = _now()[:10]
+            try:
+                done = policy_picks_on(a.root, day)
+            except LogUnreadable as e:
+                print("STOP: log-unreadable: %s; autopick cannot count today's picks" % e)
+                print("NEXT: the owner repairs the line, then runs intake autopick again")
+                print("AUTOPICK: matched %d picked 0" % len(shown))
+                return 2
+            room = max(0, pol["max_picks_per_day"] - done)
+            by = POLICY_BY + reg["sha256"]
+            picked = 0
+            for i in shown[:room]:
+                try:
+                    env_rel = pick_item(a.root, q, i, by)
+                except PickRefused as e:
+                    print("STOP: %s" % e)
+                    print("AUTOPICK: matched %d picked %d" % (len(shown), picked))
+                    return 2
+                picked += 1
+                print("ITEM: %s %s %s %s" % (i["id"], _flag(i), _rank(i), code(i["title"])))
+                print("NEXT: run spec-first-planning with %s" % env_rel)
+            print("DAILY: %s picked %d of %d" % (day, done + picked, pol["max_picks_per_day"]))
+            print("AUTOPICK: matched %d picked %d" % (len(shown), picked))
+    except Locked:
+        print("STOP: the intake lock is held by another command")
+        return 3
     return 0
 
 
@@ -878,12 +1246,20 @@ def _note_recur_seen(item, sig):
         item["recur_seen"] = max(item.get("recur_seen") or "", sig["last_seen"])
 
 
-def apply_signals(queue, signals, now):
+def _note_format(item, fmt):
+    """Record the import format on the item (R8). An added field: the sorted, distinct
+    formats the item's signals came from."""
+    if fmt and fmt not in item.setdefault("formats", []):
+        item["formats"] = sorted(item["formats"] + [fmt])
+
+
+def apply_signals(queue, signals, now, fmt=None):
     """Merge signals into the queue (spec 1.3, 1.5). A dismissed or resolved item recurs
     when a signal's last_seen is later than its closed_at. Closing an issue upstream and
     a signal that cannot say when (release-status) never count as recurrence. A source id
     that `link` dropped goes to the kept item (queue.aliases), and an issue already closed
-    when intake first sees it makes no item (R27)."""
+    when intake first sees it makes no item (R27). `fmt` is the import format, recorded on
+    the item (R8)."""
     for sig in signals:
         iid = item_id(sig["source"], sig["source_id"])
         iid = queue.aliases.get(iid, iid)  # a linked item's signals go to the kept item
@@ -905,6 +1281,7 @@ def apply_signals(queue, signals, now):
             it["seen_keys"] = sorted(ns_key(sig["source"], k) for k in seen)
             del it["evidence"][:-EVIDENCE_CAP]
             _note_recur_seen(it, sig)
+            _note_format(it, fmt)
             continue
         recurs = (it["state"] in ("dismissed", "resolved") and sig.get("recurrence", True)
                   and not sig.get("closed") and it.get("closed_at")
@@ -924,6 +1301,7 @@ def apply_signals(queue, signals, now):
             it["closed"] = False
         if sig["trust"] == "low":
             it["trust"] = "low"
+        _note_format(it, fmt)
         if recurs:
             transition(it, "new", now=now)
 
@@ -979,7 +1357,9 @@ def cmd_import(a):
     if fmt == "gh-run-jobs-json" and a.run is None:
         print("STOP: gh-run-jobs-json needs --run <run id>")
         return 2
-    raw = _read_input(a.file)
+    raw = getattr(a, "raw", None)  # sweep hands the command's output in (R9)
+    if raw is None:
+        raw = _read_input(a.file)
     if raw is None:
         return 2
     now = _now()
@@ -1026,7 +1406,7 @@ def cmd_import(a):
             for run in ctx["runs_out"].values():
                 run["source"] = a.source  # the jobs NEXT line names this source (R18)
             q.runs.update(ctx["runs_out"])
-            apply_signals(q, signals, now)
+            apply_signals(q, signals, now, fmt)
             q.log("import", source=a.source, format=fmt, ok=len(signals), problems=len(problems))
             q.save()
     except Locked:
@@ -1052,6 +1432,7 @@ def _import_history(a):
     ctx = {"source": None, "now": now}
     _, problems = adapters.ADAPTERS["git-rev-list"](raw, ctx)
     shas = ctx["history_out"]
+    squash = ctx["squash_out"]
     unavailable = not shas and not problems  # git rev-list printed nothing: not in this clone
     if unavailable:
         problems.append("no commits: the release commit is not in this clone; git fetch, "
@@ -1074,6 +1455,9 @@ def _import_history(a):
                 else:
                     q.unavailable.pop(a.commit, None)
                     q.histories[a.commit] = {"imported_at": now, "shas": shas}
+                    prs = sorted({squash[s] for s in shas if s in squash})
+                    if prs:  # R29: only kept shas count, so a cut never adds a PR
+                        q.histories[a.commit]["prs"] = prs
                 # Over the cap, drop the oldest history no planned item still needs.
                 spare = sorted((h["imported_at"], c) for c, h in q.histories.items()
                                if c not in q.needed and c != a.commit)
@@ -1176,7 +1560,12 @@ def _envelope_record(kind, p):
     if not all(t.get("merge_commit") is None or (isinstance(t["merge_commit"], str)
                and _MERGE_RE.match(t["merge_commit"])) for t in tasks):
         raise ValueError("run-result merge_commit must be null or a 40- or 64-hex sha")
-    return {"plan_id": plan["id"], "tasks": tasks}
+    # R29, by addition: `pr` names the pull request the run opened, {"number": n}. It is
+    # optional; null or absent means the run names no PR.
+    pr = p.get("pr")
+    if pr is not None and not (isinstance(pr, dict) and _is_pr(pr.get("number"))):
+        raise ValueError("run-result pr must be null or an object with a positive number")
+    return {"plan_id": plan["id"], "tasks": tasks, "pr": pr["number"] if pr else None}
 
 
 def _plan_ref(e):
@@ -1207,8 +1596,9 @@ def _close_loop(q, envs, now):
     - The latest run-result pinning the plan (digest and id) decides. Every task must be
       proven with a merge commit, else needs-resolve (a partial or stopped run).
     - Each verified release made at or after that run is checked once per item: its
-      history holds every merge (resolved, by release:<version>, closed_at = the
-      release's time, R25), or it lacks one (kept in `checked`, never asked for again),
+      history holds every merge, or (R29) a subject that ends with `(#<n>)` where n is the
+      PR the run-result names (resolved, by release:<version>, closed_at = the release's
+      time, R25), or it lacks one (kept in `checked`, never asked for again),
       or its commit is not in the clone or is not 40-hex. When every such release is
       settled and none resolves: needs-resolve. When there is no such release yet:
       needs-release."""
@@ -1262,18 +1652,21 @@ def _close_loop(q, envs, now):
             if c in checked or not _SHA40_RE.match(c):
                 settled = True  # lacked a merge before, or a sha256 repo git-rev-list can't take
             elif h is not None:
-                if set(merges) <= set(h["shas"]):
+                merged = set(merges) <= set(h["shas"])
+                squashed = not merged and run["pr"] is not None and run["pr"] in h.get("prs", [])
+                if merged or squashed:
                     transition(it, "resolved", by="release:%s" % rel["version"], now=now)
                     # R25: the fix shipped when the release was made, not when sync ran, so
                     # recurrence compares against the release time. A signal that can
                     # recur, seen after it, means the fix failed: the item recurs at once.
                     it["closed_at"] = rel["at"]
-                    q.log("resolved", id=iid, by="release:%s" % rel["version"])
+                    q.log("resolved", id=iid, by="release:%s" % rel["version"],
+                          **({"pr": run["pr"]} if squashed else {}))
                     if (it.get("recur_seen") or "") > rel["at"]:
                         transition(it, "new", now=now)
                         q.log("recurred", id=iid)
                     break
-                checked.append(c)  # a squash or rebase merge: never ask for it again
+                checked.append(c)  # a squash merge with no PR match, or a rebase: never ask again
                 settled = True
             elif c in q.unavailable:
                 settled = True
@@ -1361,7 +1754,7 @@ def cmd_sync(a):
                 for e in envs:
                     if e["kind"] == RELEASE_KIND:
                         sigs, probs = adapters.ADAPTERS["release-envelope"](e["raw"], ctx)
-                        apply_signals(q, sigs, now)
+                        apply_signals(q, sigs, now, "release-envelope")
                         problems.extend(probs)
             wanted, fetch = _close_loop(q, envs, now)
             problems.extend(_prune_runs(q, now))
@@ -1387,10 +1780,11 @@ def cmd_sync(a):
                   "gh-run-jobs-json --source %s --run %s"
                   % (rid, _jobs_source(cfg, r), rid))
     for c in sorted(wanted):
-        print("NEXT: git rev-list %s | intake import --format git-rev-list --commit %s" % (c, c))
+        print("NEXT: git rev-list %s %s | intake import --format git-rev-list --commit %s"
+              % (c, REV_LIST_FLAGS, c))
     for c in sorted(fetch):  # printed once per commit: the item is needs-resolve meanwhile
-        print("NEXT: git fetch, then re-import: git rev-list %s | intake import --format "
-              "git-rev-list --commit %s" % (c, c))
+        print("NEXT: git fetch, then re-import: git rev-list %s %s | intake import --format "
+              "git-rev-list --commit %s" % (c, REV_LIST_FLAGS, c))
     return 3 if problems else 0
 
 
@@ -1440,10 +1834,47 @@ def item_payload(i):
             "evidence": evidence}
 
 
+class PickRefused(Exception):
+    """pick_item wrote nothing: the message is the STOP: line."""
+
+
+def pick_item(root, q, i, by):
+    """new -> picked, under the caller's run lock. Writes the item snapshot (the envelope's
+    subject) and the intake-item/v1 envelope, both under the git-ignored
+    .skill-contract/intake/, since the evidence can carry customer data. Logs the pick with
+    `by` and saves the queue. Returns the envelope path, or raises PickRefused."""
+    if i["state"] != "new" or not _ITEM_ID_RE.match(i["id"]):
+        raise PickRefused("only a new item can be picked; %s is %s" % (code(i["id"]), _flag(i)))
+    _ensure_dir(root)
+    payload = item_payload(i)
+    snap_rel = "%s/items/%s.json" % (INTAKE_DIR, i["id"])
+    _write_atomic(root, snap_rel, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    st = CC.build_statement(INTAKE_ITEM_KIND, SKILL_NAME, VERSION, root, [snap_rel], payload)
+    viol = CC.check_statement(st)
+    env_rel = "%s/envelopes/%s.json" % (INTAKE_DIR, st["predicate"]["id"])
+    written = False
+    try:
+        if viol:
+            raise PickRefused("the intake-item envelope would be invalid (%s)"
+                              % ", ".join(sorted({"C%d" % n for n, _ in viol})))
+        _write_atomic(root, env_rel, json.dumps(st, indent=2, sort_keys=True) + "\n",
+                      exclusive=True)
+        written = True
+    except FileExistsError:
+        raise PickRefused("an envelope already exists at %s; pick again" % env_rel)
+    finally:
+        if not written:  # no envelope: drop the snapshot it would have pinned
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(os.path.join(root, *snap_rel.split("/")))
+    transition(i, "picked", by=by)
+    i["envelope"] = env_rel
+    q.log("pick", id=i["id"], by=by, envelope=env_rel)
+    q.save()
+    return env_rel
+
+
 def cmd_pick(a):
-    """new -> picked. Writes the item snapshot (the envelope's subject) and the
-    intake-item/v1 envelope, both under the git-ignored .skill-contract/intake/, since
-    the evidence can carry customer data."""
+    """new -> picked by hand (see pick_item)."""
     if _need_config(a.root) is None:
         return 2
     try:
@@ -1452,43 +1883,50 @@ def cmd_pick(a):
             i = _find(q, a.id) if q else None
             if i is None:
                 return 2
-            if i["state"] != "new" or not _ITEM_ID_RE.match(i["id"]):
-                print("STOP: only a new item can be picked; %s is %s" % (code(i["id"]), _flag(i)))
-                return 2
-            _ensure_dir(a.root)
-            payload = item_payload(i)
-            snap_rel = "%s/items/%s.json" % (INTAKE_DIR, i["id"])
-            _write_atomic(a.root, snap_rel, json.dumps(payload, indent=2, sort_keys=True) + "\n")
-            st = CC.build_statement(INTAKE_ITEM_KIND, SKILL_NAME, VERSION, a.root, [snap_rel],
-                                    payload)
-            viol = CC.check_statement(st)
-            env_rel = "%s/envelopes/%s.json" % (INTAKE_DIR, st["predicate"]["id"])
-            written = False
             try:
-                if viol:
-                    print("STOP: the intake-item envelope would be invalid (%s)"
-                          % ", ".join(sorted({"C%d" % n for n, _ in viol})))
-                    return 2
-                _write_atomic(a.root, env_rel, json.dumps(st, indent=2, sort_keys=True) + "\n",
-                              exclusive=True)
-                written = True
-            except FileExistsError:
-                print("STOP: an envelope already exists at %s; pick again" % env_rel)
+                env_rel = pick_item(a.root, q, i, a.by)
+            except PickRefused as e:
+                print("STOP: %s" % e)
                 return 2
-            finally:
-                if not written:  # no envelope: drop the snapshot it would have pinned
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(os.path.join(a.root, *snap_rel.split("/")))
-            transition(i, "picked", by=a.by)
-            i["envelope"] = env_rel
-            q.log("pick", id=a.id, by=a.by, envelope=env_rel)
-            q.save()
     except Locked:
         print("STOP: the intake lock is held by another command")
         return 3
     print("ITEM: %s %s %s %s" % (i["id"], _flag(i), _rank(i), code(i["title"])))
     print("NEXT: run spec-first-planning with %s" % env_rel)
     return 0
+
+
+def cmd_sweep(a):
+    """Run each enabled source's sweep commands from the committed config and import what
+    each prints, through cmd_import, so items get the same parsing, trust labels and
+    formats as `intake import`. A failing command is a PROBLEM: line and the others still
+    run. Only this command runs a subprocess, and only through intake_sweep (R9)."""
+    cfg = _need_config(a.root)
+    if cfg is None:
+        return 2
+    jobs = [(name, e["format"], e["argv"]) for name, src in sorted(cfg["sources"].items())
+            if src["enabled"] for e in src.get("sweep", [])]
+    if not jobs:
+        print("STOP: no enabled source has a sweep entry in %s" % CONFIG_PATH)
+        return 2
+    import intake_sweep  # loaded here only, so no other command can reach a subprocess
+    failed, problems = 0, 0
+    for name, fmt, argv in jobs:
+        out, err = intake_sweep.run_source(argv, a.root)
+        if err is not None:
+            failed += 1
+            print("PROBLEM: sweep %s %s: %s" % (name, fmt, one_line(err)))
+            continue
+        ia = argparse.Namespace(root=a.root, format=fmt, source=name, run=None, commit=None,
+                                file=None, raw=out)
+        rc = cmd_import(ia)
+        if rc == 2:
+            failed += 1
+            print("PROBLEM: sweep %s %s: the import refused the output" % (name, fmt))
+        elif rc != 0:
+            problems += 1
+    print("SWEEP: %d commands ok %d failed %d" % (len(jobs), len(jobs) - failed, failed))
+    return 3 if failed or problems else 0
 
 
 def cmd_formats(a):
@@ -1513,7 +1951,11 @@ def main(argv=None):
     s.add_argument("--by", required=True); s.add_argument("--reason", required=True)
     s = sub.add_parser("pick"); s.add_argument("id"); s.add_argument("--by", required=True)
     sub.add_parser("status")
+    s = sub.add_parser("register-policy"); s.add_argument("--by", required=True)
+    s.add_argument("--reason")
+    sub.add_parser("autopick")
     sub.add_parser("sync")
+    sub.add_parser("sweep")
     sub.add_parser("formats")
     s = sub.add_parser("import"); s.add_argument("--format", required=True)
     s.add_argument("--source"); s.add_argument("--run"); s.add_argument("--commit")
@@ -1530,7 +1972,8 @@ def main(argv=None):
     return {"init": cmd_init, "list": cmd_list, "show": cmd_show, "link": cmd_link,
             "status": cmd_status, "sync": cmd_sync, "formats": cmd_formats,
             "import": cmd_import, "pick": cmd_pick,
-            "drop-run": cmd_drop_run}[a.cmd](a)
+            "drop-run": cmd_drop_run, "register-policy": cmd_register_policy,
+            "autopick": cmd_autopick, "sweep": cmd_sweep}[a.cmd](a)
 
 
 if __name__ == "__main__":

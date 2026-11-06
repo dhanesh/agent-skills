@@ -94,7 +94,13 @@ rather than inventing config from memory.
    path found), `missing` rails, concrete `proposals`
    (`rail`/`command`/`file_to_create`), plus `lockfiles` and any `errors`
    (e.g. malformed `package.json` — reported, never fatal). Read the plan;
-   spot-check anything surprising against the repo itself.
+   spot-check anything surprising against the repo itself. When a root manifest
+   declares a proof backend, the plan also has a `backends` list and stderr has one
+   `BACKEND: <tool>` line per backend (`verus`, `kani`, `proptest`, `hypothesis`,
+   `rapid`, `fast-check`: verification-skill-forge's runner names). The detector reads
+   manifests only, so a backend line means "declared", not "installed" or "used".
+   Name the backends in the install summary; installing or running them is not this
+   skill's job.
 2. **Confirm the plan with the user.** Show which rails exist, which are
    missing, and what you propose to create. Ask which verifiers they want and
    which CI provider — GitHub Actions is the default; if they name another,
