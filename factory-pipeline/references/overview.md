@@ -1,6 +1,6 @@
 # factory-pipeline: the stages of one tick
 
-Status: built. `pipeline tick` ships with all nine stages. The design is `docs/factory/2026-11-04-autonomous-factory-spec.md`
+Status: built. `pipeline tick` ships with all ten stages. The design is `docs/factory/2026-11-04-autonomous-factory-spec.md`
 in the agent-skills repository (requirements R12 to R21).
 
 ## The lock, before everything else
@@ -63,6 +63,7 @@ A detail can follow the result, for example `exit=3` or `picked=2`.
 | Stage | What the tick does today | Skill and tool it calls |
 |---|---|---|
 | `sweep` | Runs the sweep commands of the owner's committed intake config. | `ops-intake`: `intake sweep` |
+| `incident-probe` | When `.release/recipe.json` exists, runs the recipe's read-only probes (`health`, `version_probe`, `prod_smoke`) once. The detail names the result: `probe=pass` or `probe=fail`, `commands=<n>` and `failed=<n>`. A failed probe gives `attention`. With no recipe, the stage runs nothing and the result is `skip no-recipe`. It runs no other recipe command: no rollback, no deploy and no build. It runs before the first planner, so the probes run with the owner's PATH. | `incident-watch`: `incident --root <repo> --skills-dir <root>... probe` |
 | `growth-review` | Reviews the watched export when it changed, and imports each breach into the queue. The tick runs two processes and passes the bytes between them. It uses no shell pipe. | `growth-review`: `growth auto --source <name>`, then `ops-intake`: `intake import --format intake-signals-jsonl --source <name>` |
 | `idea-follow-up` | Lists each undecided idea with an assumption due within 3 days or expired, and hands each `go` idea-brief envelope with no plan yet to the plan stage (R20). See "The idea follow-up stage". With nothing to list or plan, the result is `idle`. | `idea-validation`: `ideas list` and `ideas status <slug>` (read-only); `spec-first-planning`: `contract_check.py check-envelope` |
 | `autopick` | Picks items inside the registered pick policy. The plan stage plans them after the go ideas of the idea stage. The tick keeps each picked intake-item envelope for the plan stage. | `ops-intake`: `intake autopick` |
@@ -209,7 +210,7 @@ tick:
 - prints `STAGE: <name> skipped planner-tamper=<what>` for autopick, plan, derive grant,
   build and release stage;
 - still runs digest, because it runs no sibling code;
-- ends `TICK: done stages=9 tamper=<what>` and exits 4;
+- ends `TICK: done stages=10 tamper=<what>` and exits 4;
 - writes the tamper marker `.skill-contract/pipeline/tamper.json` (the time, the reason
   and the changed paths), and appends a `poison` line to `tamper-log.jsonl`.
 
@@ -560,7 +561,7 @@ each plan after the first, because the grant it just derived can reach a cap. Be
 `max_dispatches_per_day`. A grant that `derive-grant` already derived was counted then,
 so building it starts no new counted plan or open run. If build were gated on those caps,
 the grant would never run, never get a run result, and stay open for ever. The other stages only read, sweep or report. They run in this order, with or
-without a cap stop: `sweep`, `growth-review` and `idea-follow-up` before the gates, and
+without a cap stop: `sweep`, `incident-probe`, `growth-review` and `idea-follow-up` before the gates, and
 `release-stage` and `digest` after them.
 
 When a count is equal to or more than its cap, the tick:
@@ -573,7 +574,7 @@ When a count is equal to or more than its cap, the tick:
    plan starts, and the grants already derived still reach `build`. A dispatches stop
    also skips `build`. An `uncounted` stop skips all four;
 4. runs the stages that only read, sweep or report, and ends
-   `TICK: done stages=9 cap=<name>[,<name>]` with exit 0.
+   `TICK: done stages=10 cap=<name>[,<name>]` with exit 0.
 
 The tick checks the dispatch cap once before a build starts, because a tick starts at most
 one build. It does not stop a build that is already running. A build that starts below the cap can thus pass it: factory-conductor's
@@ -664,6 +665,7 @@ them is called.
 | `waiting` | The release stage waits for a human gate: the merge of the release pull request (`release-merge`) or a live release grant (`release-grant`). |
 | `built=<n> waiting=<n>` | The build stage started `n` runs (0 or 1) and left `n` grants waiting. |
 | `skipped` | A cap stopped the tick before this stage, which would start a plan or run. The detail is `cap=<name>`. |
+| `skip` | The incident probe found no `.release/recipe.json`, so it ran nothing. The detail is `no-recipe`. |
 
 A result that is not `ok` does not stop the tick. The tick goes on to the next stage, and
 exits 0 when every stage ran. Exit 2 is a usage error (for example a `--root` that is not

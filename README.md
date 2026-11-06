@@ -116,6 +116,7 @@ flowchart TB
   s_factory_pipeline -->|"build and schedule"| s_factory_conductor
   s_factory_pipeline -->|"growth review"| s_growth_review
   s_factory_pipeline -->|"idea follow-up"| s_idea_validation
+  s_factory_pipeline -->|"incident probe"| s_incident_watch
   s_factory_pipeline -->|"sweep and autopick"| s_ops_intake
   s_factory_pipeline -->|"release stage"| s_release_conductor
   s_factory_pipeline -->|"grant check"| s_spec_first_planning
@@ -152,7 +153,7 @@ How to read it. An arrow from A to B means A sends work or data to B.
 - `-.->` dashed arrow, **optional**: used only when you install the next skill.
 - A thick border marks a good place to start.
 
-The diagram shows the 20 linked skills and all 40 links. It leaves out 8 skills that work alone: `base-in-reality`, `context-hygiene-kit`, `jev-agent-setup`, `repo2skill`, `security-posture-audit`, `starlight-handbook-kit`, `tmux-agent-herdr-lite` and `world-model-ledger`. They call no skill, and no skill calls them.
+The diagram shows the 20 linked skills and all 41 links. It leaves out 8 skills that work alone: `base-in-reality`, `context-hygiene-kit`, `jev-agent-setup`, `repo2skill`, `security-posture-audit`, `starlight-handbook-kit`, `tmux-agent-herdr-lite` and `world-model-ledger`. They call no skill, and no skill calls them.
 
 Each skill's README has a smaller diagram with its own callers and callees, and the full when and why of each link.
 <!-- skill-graph:end -->

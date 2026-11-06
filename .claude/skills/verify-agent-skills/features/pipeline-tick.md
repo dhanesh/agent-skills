@@ -2,19 +2,22 @@
 
 - id: pipeline-tick
 - proven: no
-- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-pipeline/assets/pipeline.py:stage_plan, factory-pipeline/assets/pipeline.py:plan_one, factory-pipeline/assets/pipeline.py:run_planner, factory-pipeline/assets/pipeline.py:snapshot, factory-pipeline/assets/pipeline.py:git, factory-pipeline/assets/pipeline.py:program_roots, factory-pipeline/assets/pipeline.py:program_digest, factory-pipeline/assets/pipeline.py:make_pathdir, factory-pipeline/assets/pipeline.py:seal, factory-pipeline/assets/pipeline.py:programs_trusted, factory-pipeline/assets/pipeline.py:py, factory-pipeline/assets/pipeline.py:tools_walk, factory-pipeline/assets/pipeline.py:_resolve, factory-pipeline/assets/pipeline.py:_walk_real, factory-pipeline/assets/pipeline.py:write_marker, factory-pipeline/assets/pipeline.py:read_marker, factory-pipeline/assets/pipeline.py:cmd_tamper_clear, factory-pipeline/assets/pipeline.py:stage_build, factory-pipeline/assets/pipeline.py:unbuilt_grants, factory-pipeline/assets/pipeline.py:run_states, factory-pipeline/assets/pipeline.py:evidence_gate, factory-pipeline/assets/pipeline.py:grant_covers, factory-pipeline/assets/pipeline.py:trusted_tools, factory-pipeline/assets/pipeline.py:stage_release_stage, factory-pipeline/assets/pipeline.py:release_probe, factory-pipeline/assets/pipeline.py:release_wait, factory-pipeline/assets/pipeline.py:release_dirs, factory-pipeline/assets/pipeline.py:stage_idea_follow_up, factory-pipeline/assets/pipeline.py:ideas_due, factory-pipeline/assets/pipeline.py:idea_due, factory-pipeline/assets/pipeline.py:ideas_go, factory-pipeline/assets/pipeline.py:idea_envelope, factory-pipeline/assets/pipeline.py:planned, factory-pipeline/assets/pipeline.py:record_idea_plan, factory-pipeline/assets/pipeline.py:stage_digest, factory-pipeline/assets/pipeline.py:digest_entries, factory-pipeline/assets/pipeline.py:digest_runs, factory-pipeline/assets/pipeline.py:pr_merged, factory-pipeline/assets/pipeline.py:digest_releases, factory-pipeline/assets/pipeline.py:digest_incidents, factory-pipeline/assets/pipeline.py:digest_recipe, factory-pipeline/assets/pipeline.py:safe_rel, factory-pipeline/assets/pipeline.py:digest_ideas, factory-pipeline/assets/pipeline.py:plan_read, factory-pipeline/assets/pipeline.py:span, factory-pipeline/assets/pipeline.py:command, factory-pipeline/assets/pipeline.py:render_digest, idea-validation/assets/ideas.py:cmd_list, idea-validation/assets/ideas.py:cmd_status, release-conductor/assets/release.py:_stage_commit, release-conductor/assets/release.py:_grant_pins, release-conductor/assets/release.py:find_release_commit, spec-first-planning/assets/write_grant.py:build_pipeline_grant, factory-conductor/assets/reentry_timer.py:cron_schedule
+- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:stage_incident_probe, factory-pipeline/assets/pipeline.py:incident_probe, incident-watch/assets/incident.py:cmd_probe, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-pipeline/assets/pipeline.py:stage_plan, factory-pipeline/assets/pipeline.py:plan_one, factory-pipeline/assets/pipeline.py:run_planner, factory-pipeline/assets/pipeline.py:snapshot, factory-pipeline/assets/pipeline.py:git, factory-pipeline/assets/pipeline.py:program_roots, factory-pipeline/assets/pipeline.py:program_digest, factory-pipeline/assets/pipeline.py:make_pathdir, factory-pipeline/assets/pipeline.py:seal, factory-pipeline/assets/pipeline.py:programs_trusted, factory-pipeline/assets/pipeline.py:py, factory-pipeline/assets/pipeline.py:tools_walk, factory-pipeline/assets/pipeline.py:_resolve, factory-pipeline/assets/pipeline.py:_walk_real, factory-pipeline/assets/pipeline.py:write_marker, factory-pipeline/assets/pipeline.py:read_marker, factory-pipeline/assets/pipeline.py:cmd_tamper_clear, factory-pipeline/assets/pipeline.py:stage_build, factory-pipeline/assets/pipeline.py:unbuilt_grants, factory-pipeline/assets/pipeline.py:run_states, factory-pipeline/assets/pipeline.py:evidence_gate, factory-pipeline/assets/pipeline.py:grant_covers, factory-pipeline/assets/pipeline.py:trusted_tools, factory-pipeline/assets/pipeline.py:stage_release_stage, factory-pipeline/assets/pipeline.py:release_probe, factory-pipeline/assets/pipeline.py:release_wait, factory-pipeline/assets/pipeline.py:release_dirs, factory-pipeline/assets/pipeline.py:stage_idea_follow_up, factory-pipeline/assets/pipeline.py:ideas_due, factory-pipeline/assets/pipeline.py:idea_due, factory-pipeline/assets/pipeline.py:ideas_go, factory-pipeline/assets/pipeline.py:idea_envelope, factory-pipeline/assets/pipeline.py:planned, factory-pipeline/assets/pipeline.py:record_idea_plan, factory-pipeline/assets/pipeline.py:stage_digest, factory-pipeline/assets/pipeline.py:digest_entries, factory-pipeline/assets/pipeline.py:digest_runs, factory-pipeline/assets/pipeline.py:pr_merged, factory-pipeline/assets/pipeline.py:digest_releases, factory-pipeline/assets/pipeline.py:digest_incidents, factory-pipeline/assets/pipeline.py:digest_recipe, factory-pipeline/assets/pipeline.py:safe_rel, factory-pipeline/assets/pipeline.py:digest_ideas, factory-pipeline/assets/pipeline.py:plan_read, factory-pipeline/assets/pipeline.py:span, factory-pipeline/assets/pipeline.py:command, factory-pipeline/assets/pipeline.py:render_digest, idea-validation/assets/ideas.py:cmd_list, idea-validation/assets/ideas.py:cmd_status, release-conductor/assets/release.py:_stage_commit, release-conductor/assets/release.py:_grant_pins, release-conductor/assets/release.py:find_release_commit, spec-first-planning/assets/write_grant.py:build_pipeline_grant, factory-conductor/assets/reentry_timer.py:cron_schedule
 
 ## What it is
 
-**Status: built.** `pipeline tick` ships (R12) with all nine stages. First it takes the repo's pipeline
+**Status: built.** `pipeline tick` ships (R12) with all ten stages. First it takes the repo's pipeline
 lock, a non-blocking flock on `.skill-contract/pipeline/.lock` in a git-ignored directory
 (R14). A tick that finds the lock held prints `STOP: locked: ...`, changes nothing and
 exits 3. Before any stage, it checks the
 standing pipeline grant with spec-first-planning's `contract_check.py check-pipeline-grant`
 (R13). With no live grant it runs no stage, prints `STOP: no-grant reason=<reason>` and
 exits 2. It runs the factory stages in this
-order: sweep, growth review, idea follow-up, autopick, plan, derive grant, build, release
-stage and digest. It prints one `STAGE: <name> <result>` line per stage and exits 0 when
+order: sweep, incident probe, growth review, idea follow-up, autopick, plan, derive grant,
+build, release stage and digest. The incident probe stage (D17) runs incident-watch's
+`incident probe` once when `.release/recipe.json` exists and prints `STAGE:
+incident-probe skip no-recipe` when it does not. It runs only the recipe's probes, never
+a rollback, a deploy or another recipe command (S1). It prints one `STAGE: <name> <result>` line per stage and exits 0 when
 every stage ran. Before autopick, plan and derive grant, and between plans in derive
 grant, it checks the pipeline grant's three caps against today's UTC counts (R15). Before
 build, when it has grants to build, it checks only `max_dispatches_per_day`: a grant that
@@ -104,7 +107,7 @@ envelope. It prints `REPO:` and `SKILLS:`.
 
 Shipped:
 
-- `pipeline tick`: nine `STAGE: <name> <result>` lines in order, exit 0. A missing skill
+- `pipeline tick`: ten `STAGE: <name> <result>` lines in order, exit 0. A missing skill
   gives `unavailable`. A stage tool's non-zero exit is recorded in its line, and the tick
   goes on.
 - The grant check (R13): with no live pipeline grant (none, revoked by id or by the kill
@@ -120,7 +123,7 @@ Shipped:
   The grants derived before the stop still reach build. A dispatches cap also skips build,
   and `uncounted` skips all four. Sweep, growth review and idea follow-up run before the gates;
   release stage and digest still run after them. The tick exits 0 and ends
-  `TICK: done stages=9 cap=<name>`.
+  `TICK: done stages=10 cap=<name>`.
 
 - The plan stage (R17): with no `planner` in the grant, `STAGE: plan unavailable
   no-planner picked=<n>`, and each pick waits. With a planner, the spec skeleton is
@@ -227,22 +230,54 @@ python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-revok
 - `pt-no-grant`: exit 2. The output holds `STOP: no-grant reason=none` and no `STAGE:`
   line, and `$PT/skills/calls.jsonl` does not exist yet (no stage tool ran).
 - `pt-tick`: exit 0. It prints `TICK: grant pipeline-grant-v1-<...> expires_at <time>`.
-  The `STAGE:` lines are, in order: `sweep ok`, `growth-review ok signals=1`, `idea-follow-up unavailable
+  The `STAGE:` lines are, in order: `sweep ok`, `incident-probe skip no-recipe` (the
+  fixture repo has no recipe), `growth-review ok signals=1`, `idea-follow-up unavailable
   idea-validation due=0 go=0` (the stubs hold no idea-validation), `autopick ok picked=1`,
   `plan unavailable no-planner picked=1` (the testkit grant names no planner),
   `derive-grant idle plans=0`, `build idle grants=0`,
   `release-stage idle` (no release-conductor and no release), `digest ok
   waiting=1` (the pick waits). The last
-  line is `TICK: done stages=9`.
+  line is `TICK: done stages=10`.
 - `pt-calls.jsonl`: seven lines, in order: ops-intake `sweep`, growth-review `auto`,
   ops-intake `import` (its `stdin` is the growth signal line, and its argv holds
   `--format intake-signals-jsonl --source growth -`), spec-first-planning
   `pipeline-caps`, ops-intake `autopick`, then spec-first-planning `pipeline-caps` twice
   (one cap check before each of autopick, plan and derive-grant; build has no grant to
   build, so it checks nothing).
-- `pt-missing`: exit 0, nine `STAGE:` lines, and `STAGE: growth-review unavailable growth-review`.
+- `pt-missing`: exit 0, ten `STAGE:` lines, and `STAGE: growth-review unavailable growth-review`.
 - `revoke-grant` (the kill switch) prints one `REVOKED: <id>` line and exits 0.
 - `pt-revoked`: exit 2, `STOP: no-grant reason=revoked`, and no `STAGE:` line.
+
+The incident probe stage (D17, S1). Build incident-watch's own fixture repo (a recipe whose
+every command runs one stub that logs its name and writes `stubs/ran/<name>`), install
+the real incident-watch and release-conductor next to the stubs, and run a tick with the
+recipe, then one without it:
+
+```sh
+PI="$WT/.verify-run/$INSTANCE/pi"
+python3 incident-watch/assets/incident_testkit.py fixture "$PI/repo"
+python3 factory-pipeline/assets/pipeline_testkit.py stubs "$PI/skills"
+cp -R incident-watch release-conductor "$PI/skills/"
+python3 factory-pipeline/assets/pipeline_testkit.py grant "$PI/repo"
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-incident-pass -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$PI/repo" --skills-dir "$PI/skills" tick
+ls "$PI/repo/stubs/ran" > "$WT/.verify-run/$INSTANCE/pt-incident-ran.txt"
+rm "$PI/repo/.release/recipe.json" "$PI/repo/stubs/calls.log"
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-incident-none -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$PI/repo" --skills-dir "$PI/skills" tick
+ls "$PI/repo/stubs" > "$WT/.verify-run/$INSTANCE/pt-incident-none-files.txt"
+```
+
+- `pt-incident-pass`: exit 0. The first `STAGE:` line is `STAGE: sweep ok`, and the
+  second is `STAGE: incident-probe ok probe=pass commands=4 failed=0`. The probe's own
+  lines come with the `  incident-probe| ` prefix, among them `PROBE_RESULT: pass
+  commands=4 failed=0 consecutive_failures=0`. The last line is `TICK: done stages=10`.
+- `pt-incident-ran.txt` holds exactly `health`, `prod_smoke_0`, `prod_smoke_1` and
+  `version_probe`: no `rollback`, `deploy_prod`, `deploy_staging`, `build` or
+  `staging_check` ran.
+- `pt-incident-none`: exit 0. The second `STAGE:` line is `STAGE: incident-probe skip
+  no-recipe`.
+- `pt-incident-none-files.txt` holds no `calls.log`: no recipe command ran.
 
 The lock (R14). Write a fresh grant and a queue file, hold the lock with the testkit, run
 a tick while it is held, then run one after the holder exits:
@@ -270,7 +305,7 @@ python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-unloc
   `TICK: grant` line and no `STAGE:` line.
 - `pt-queue-before.txt` and `pt-queue-after.txt` hold the same hash, and
   `pt-locked-calls.jsonl` is empty (no stage tool ran).
-- `pt-unlocked`: exit 0 and `TICK: done stages=9` (the holder exited, so the lock is free).
+- `pt-unlocked`: exit 0 and `TICK: done stages=10` (the holder exited, so the lock is free).
 
 The caps (R15). Write a fresh grant whose `max_open_runs` is 1 and one grant derived from
 it with no run result (an open run), then run a tick:
@@ -296,7 +331,7 @@ cp "$CR/repo/.skill-contract/pipeline/cap-stops.jsonl" "$WT/.verify-run/$INSTANC
   `sweep` and `growth-review` say `ok`, `idea-follow-up` says `unavailable
   idea-validation due=0 go=0`, `release-stage` says `idle`, and `digest` says
   `ok waiting=2` (the cap stop and the derived grant that waits for build).
-  The last line is `TICK: done stages=9 cap=max_open_runs`.
+  The last line is `TICK: done stages=10 cap=max_open_runs`.
 - `pt-cap-calls.jsonl` holds no ops-intake `autopick` line and no `under-pipeline` line.
 - `pt-cap-stops.jsonl`: one JSON line with `"cap": "max_open_runs"`, `"count": 1`,
   `"limit": 1` and `"stage": "autopick"`.
@@ -370,7 +405,7 @@ ls "$PL/cap/repo/.skill-contract/envelopes" > "$WT/.verify-run/$INSTANCE/pt-plan
   `STOP: cap max_plans_per_day count=1 limit=1 stage=derive-grant`,
   `STAGE: derive-grant ok derived=1 refused=0 cap=max_plans_per_day` and
   `STAGE: build unavailable factory-conductor grants=1`. The last line is
-  `TICK: done stages=9 cap=max_plans_per_day`.
+  `TICK: done stages=10 cap=max_plans_per_day`.
 - `pt-plan-cap-envelopes.txt`: one `autonomy-grant-v1-` file, two `task-plan-v1-` files
   and the pipeline grant.
 
@@ -422,7 +457,7 @@ cp "$ST/edit/repo/.skill-contract/pipeline/tamper-log.jsonl" "$WT/.verify-run/$I
   reason=planner-changed-tools`, `STAGE: derive-grant skipped planner-tamper=tools`,
   `STAGE: build skipped planner-tamper=tools` and
   `STAGE: release-stage skipped planner-tamper=tools`. The last line is
-  `TICK: done stages=9 tamper=tools`.
+  `TICK: done stages=10 tamper=tools`.
 - `pt-link-retarget`: the same stop, and the output holds
   `  plan| changed: tools:link:<real path of $ST/retarget/skills>/spec-first-planning`.
 - `pt-link-edit-files.txt` and `pt-link-retarget-files.txt` hold no `PWNED` (no derived
@@ -606,10 +641,11 @@ The `pt-no-grant`, `pt-tick`, `pt-missing`, `pt-revoked`, `pt-locked`, `pt-unloc
 `pt-cap`, `pt-plan-unlisted`, `pt-plan-good`, `pt-plan-cap`, `pt-link-edit`,
 `pt-link-retarget`, `pt-tamper-persisted`, `pt-tamper-clear-noby`, `pt-tamper-clear`,
 `pt-build-gated`, `pt-build-second`, `pt-build-again`, `pt-build-plain`,
-`pt-release-open`, `pt-release-merged`, `pt-release-again`, `pt-idea-first`,
+`pt-incident-pass`, `pt-incident-none`, `pt-release-open`, `pt-release-merged`, `pt-release-again`, `pt-idea-first`,
 `pt-idea-second`, `pt-digest`, `pt-sched-15`, `pt-sched-1440`, `pt-sched-10`, `pt-sched-1500` and
 `pt-sched-uninstall` captures (their `STOP:`, `STAGE:` and `SCHEDULE:` lines and exit
-codes), `pt-calls.jsonl`, `pt-locked-calls.jsonl`, `pt-cap-calls.jsonl`,
+codes), `pt-calls.jsonl`, `pt-incident-ran.txt`, `pt-incident-none-files.txt`,
+`pt-locked-calls.jsonl`, `pt-cap-calls.jsonl`,
 `pt-cap-stops.jsonl`, `pt-plan-ignored.txt`, `pt-plan-cap-envelopes.txt`,
 `pt-sched-files.txt`, `pt-link-edit-files.txt`, `pt-link-retarget-files.txt`,
 `pt-link-marker.json`, `pt-tamper-log.jsonl`, `pt-build-gated-calls.jsonl`,

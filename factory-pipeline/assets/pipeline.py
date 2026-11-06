@@ -25,10 +25,16 @@ lock file descriptor is not inherited by the tools the tick runs. ops-intake's o
 is a different file, so the two never wait on each other. A state directory that cannot be
 shown to be git-ignored is a refusal: `STOP: state-dir reason=...`, exit 2.
 
-The tick runs nine stages in this order and prints one `STAGE: <name> <result>` line
+The tick runs ten stages in this order and prints one `STAGE: <name> <result>` line
 per stage, optionally followed by a detail such as `exit=3` or `picked=2`:
 
   sweep           ops-intake `intake sweep`
+  incident-probe  incident-watch `incident probe`, once, only when .release/recipe.json
+                  exists; with no recipe it runs nothing and prints `STAGE: incident-probe
+                  skip no-recipe`. The detail names the probe result (`probe=pass` or
+                  `probe=fail`, `commands=<n>`, `failed=<n>`). It runs no other recipe
+                  command: never a rollback, a deploy or a build (S1, D17; see
+                  stage_incident_probe())
   growth-review   growth-review `growth auto --source NAME`, whose stdout bytes go to
                   ops-intake `intake import --format intake-signals-jsonl --source NAME`
                   (two argv subprocesses; the bytes pass through Python, no shell pipe)
@@ -93,9 +99,9 @@ also skips build; `uncounted` skips all four. A build that starts below the disp
 is not cut off by the tick: the conductor's own per-run max_dispatches budget bounds it,
 so one tick can pass the daily cap by at most that budget, and the next build (or the
 next tick) stops. The stages that only read, sweep or report still run in their places:
-sweep, growth-review and idea-follow-up before the gates, and release-stage and digest
-after them. A cap stop is not an error: the tick still exits 0 and ends
-`TICK: done stages=9 cap=<name>[,<name>]`.
+sweep, incident-probe, growth-review and idea-follow-up before the gates, and
+release-stage and digest after them. A cap stop is not an error: the tick still exits 0
+and ends `TICK: done stages=10 cap=<name>[,<name>]`.
 
 The plan stage (R17) starts only the planner that the pipeline grant names in its
 optional `planner` field: an argv list with `{prompt}` once and `{root}` optional, which
@@ -122,7 +128,7 @@ Result words: ok, attention (the tool exited 3, or some plans were refused), ref
 tool exited 2, or 1 for write_grant), failed (another exit, or the tool could not start),
 timeout, unavailable (the skill is not installed), idle (nothing to do), pending-R<n> (the
 stage is not built yet), skipped (a cap stopped the tick before it), waiting (the release
-stage waits for a human gate). A stage's non-zero result does not stop the tick: the tick goes
+stage waits for a human gate), skip (the incident probe has no recipe to probe). A stage's non-zero result does not stop the tick: the tick goes
 on to the next stage and exits 0 when every stage ran.
 
 Each sibling skill is installed on its own, so the tick looks for it by directory name
@@ -274,11 +280,12 @@ Rules:
 TOOLS = {
     "ops-intake": "assets/intake.py",
     "growth-review": "assets/growth.py",
+    "incident-watch": "assets/incident.py",
     "spec-first-planning": "assets/write_grant.py",
 }
 
 # How bad a result is, so a stage that makes two calls reports the worse one.
-SEVERITY = {"ok": 0, "idle": 0, "attention": 1, "refused": 2, "failed": 3, "timeout": 3,
+SEVERITY = {"ok": 0, "idle": 0, "skip": 0, "attention": 1, "refused": 2, "failed": 3, "timeout": 3,
             "unavailable": 3}
 
 
@@ -481,6 +488,42 @@ def stage_sweep(tick):
         return "unavailable", "ops-intake"
     word, code, _ = run_tool(tick, "sweep", py(intake, "--root", tick.root, "sweep"))
     return word, exit_detail(code)
+
+
+# ── the incident probe stage (D17, S1) ──────────────────────────────────────────────────
+# The stage runs right after sweep, before the first planner, so the tick is not sealed
+# yet and the recipe's probe commands run with the owner's PATH. Like sweep and
+# growth-review, it runs before the planner, so its tool is outside the tamper baseline
+# (trusted_tools()) and outside TAMPER_SKIP. With no .release/recipe.json it runs nothing.
+# Otherwise it runs incident-watch's `incident probe` once, with no option that names a
+# recipe list, so the tool runs only the recipe's read-only probes (health, version_probe,
+# prod_smoke) and never a rollback, a deploy or any other recipe command (S1). The tool
+# finds release-conductor in the tick's own roots (--skills-dir), so the probe and the
+# tick read the same recipe format.
+RECIPE_FILE = ".release/recipe.json"  # release-conductor's RECIPE_PATH
+PROBE_RESULT = re.compile(r"^PROBE_RESULT: (pass|fail) commands=([0-9]+) failed=([0-9]+) ")
+
+
+def stage_incident_probe(tick):
+    if not os.path.isfile(os.path.join(tick.root, *RECIPE_FILE.split("/"))):
+        return "skip", "no-recipe"
+    tool = find_tool(tick.roots, "incident-watch")
+    if tool is None:
+        return "unavailable", "incident-watch"
+    word, code, detail = incident_probe(tick, tool)
+    return word, join(exit_detail(code), detail)
+
+
+def incident_probe(tick, tool):
+    """Run `incident probe` once. Return (result word, exit code, probe detail)."""
+    roots = [a for r in tick.roots for a in ("--skills-dir", r)]
+    word, code, out = run_tool(tick, "incident-probe",
+                               py(tool, "--root", tick.root, *roots, "probe"))
+    for ln in out.decode("utf-8", "replace").splitlines():
+        m = PROBE_RESULT.match(ln + " ")
+        if m:
+            return word, code, "probe=%s commands=%s failed=%s" % m.groups()
+    return word, code, "probe=none"
 
 
 def stage_growth_review(tick):
@@ -2726,6 +2769,7 @@ def stage_digest(tick):
 
 STAGES = (
     ("sweep", stage_sweep),
+    ("incident-probe", stage_incident_probe),
     ("growth-review", stage_growth_review),
     ("idea-follow-up", stage_idea_follow_up),
     ("autopick", stage_autopick),

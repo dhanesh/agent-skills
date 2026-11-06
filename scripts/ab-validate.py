@@ -10750,7 +10750,9 @@ def fixture(label, grant=True):
     pid = os.path.basename(K.pipeline_grant(repo))[:-len(".json")] if grant else None
     return repo, K.stubs(os.path.join(tmp, label, "skills")), pid
 def stages(text):
-    return [ln.split()[1] for ln in text.splitlines() if ln.startswith("STAGE: ")]
+    # The incident-probe stage (run 4) is new; drop it, so both arms compare one order.
+    return [ln.split()[1] for ln in text.splitlines()
+            if ln.startswith("STAGE: ") and ln.split()[1:2] != ["incident-probe"]]
 def task_plans(repo):
     d = os.path.join(repo, ".skill-contract", "envelopes")
     return [n for n in (os.listdir(d) if os.path.isdir(d) else [])

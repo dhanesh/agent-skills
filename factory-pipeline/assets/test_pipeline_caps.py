@@ -119,7 +119,7 @@ class CapFixture(unittest.TestCase):
         self.assertEqual(res["growth-review"][0], "ok")
         self.assertEqual(res["release-stage"][0], "idle")
         self.assertEqual(res["digest"][0], "ok")
-        self.assertIn("TICK: done stages=9 cap=%s" % cap, text)
+        self.assertIn("TICK: done stages=10 cap=%s" % cap, text)
 
 
 class TestMaxPlansPerDay(CapFixture):
@@ -324,7 +324,7 @@ class TestUnderCaps(CapFixture):
         code, text, res = self.tick()
         self.assertEqual(code, 0, text)
         self.assertNotIn("STOP:", text)
-        self.assertIn("TICK: done stages=9", text)
+        self.assertIn("TICK: done stages=10", text)
         self.assertNotIn("cap=", text)
         self.assertFalse(os.path.exists(os.path.join(
             self.repo, ".skill-contract", "pipeline", P.CAP_STOPS)))
