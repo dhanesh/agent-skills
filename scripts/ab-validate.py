@@ -6007,6 +6007,19 @@ _FC_AT_LEAST_TWO = ["{python}", "-c",
                     "import os,sys; sys.exit(0 if len(os.listdir('d')) >= 2 else 1)"]
 
 
+def _fc_gh_env(tmp):
+    """The environment for a conductor `finish` whose PR step must run on both arms: a stub
+    `gh` (exit 0, no PR URL) first on PATH, so the default PR command (`gh pr create ...`)
+    runs. The head conductor refuses any other --pr-cmd (D22); the baseline accepts both."""
+    d = os.path.join(tmp, "gh-bin")
+    os.makedirs(d, exist_ok=True)
+    gh = os.path.join(d, "gh")
+    with open(gh, "w") as f:
+        f.write('#!/bin/sh\n[ "$1 $2" = "pr create" ] || exit 9\necho "stub gh pr create"\n')
+    os.chmod(gh, 0o755)
+    return dict(os.environ, PATH=d + os.pathsep + os.environ.get("PATH", ""))
+
+
 def _fc_pair_pushed(tree, cmd):
     """1 when the tree's conductor pushes the run branch of a two-task run to a scratch
     bare origin, else 0. T1 and T2 are both started from the same run branch, each adds
@@ -6026,9 +6039,11 @@ def _fc_pair_pushed(tree, cmd):
         subprocess.run(["git", "-C", root, "remote", "add", "origin", origin], check=True,
                        capture_output=True)
 
+        env = _fc_gh_env(tmp)
+
         def run(*argv):
             return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
-                                  capture_output=True, text=True, timeout=300)
+                                  capture_output=True, text=True, timeout=300, env=env)
 
         run("init", "--plan", plan_env)
         wts = {}
@@ -6048,7 +6063,7 @@ def _fc_pair_pushed(tree, cmd):
         for tid in ("T1", "T2"):
             run("merge", tid)
         run("next")
-        run("finish", "--pr-cmd", json.dumps([sys.executable, "-c", "pass"]))
+        run("finish")
         return 1 if subprocess.run(["git", "--git-dir", origin, "rev-parse", "-q", "--verify",
                                     "refs/heads/factory/pair"],
                                    capture_output=True).returncode == 0 else 0
@@ -6062,9 +6077,9 @@ _FC_LOCAL = {"read_only": "auto", "local_reversible": "grant", "push_branch": "a
              "open_pr": "ask"}
 
 
-def _fc_one_proven(conductor, CC, root, cmd, policy, origin=None):
+def _fc_one_proven(conductor, CC, root, cmd, policy, origin=None, env=None):
     """A one-task run (T1 proven by `cmd`, its work t1.txt) driven until `next` stops it.
-    Returns (run, plan envelope path)."""
+    Returns (run, plan envelope path). env, when given, is the environment of every run."""
     plan_env = _fc_fixture(CC, root, {"T1": cmd}, policy)
     if origin:
         subprocess.run(["git", "init", "-q", "--bare", origin], check=True, capture_output=True)
@@ -6073,7 +6088,7 @@ def _fc_one_proven(conductor, CC, root, cmd, policy, origin=None):
 
     def run(*argv):
         return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
-                              capture_output=True, text=True, timeout=300)
+                              capture_output=True, text=True, timeout=300, env=env)
 
     run("init", "--plan", plan_env)
     _fc_drive(run, ["T1"])
@@ -6093,8 +6108,8 @@ def _fc_moved_head_pushed(tree, move):
     root, origin = os.path.join(tmp, "repo"), os.path.join(tmp, "origin.git")
     try:
         run, plan_env = _fc_one_proven(conductor, CC, root, ["test", "-f", "t1.txt"],
-                                       _FC_LOCAL, origin=origin)
-        run("finish", "--pr-cmd", json.dumps([sys.executable, "-c", "pass"]))
+                                       _FC_LOCAL, origin=origin, env=_fc_gh_env(tmp))
+        run("finish")
         checked = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True,
                                  text=True).stdout.strip()
         if move:
@@ -6105,7 +6120,7 @@ def _fc_moved_head_pushed(tree, move):
             subprocess.run(["git", "-C", root, "commit", "-q", "-m", "late"], check=True,
                            capture_output=True, env=_FC_GENV)
         _fc_write_grant(CC, root, plan_env, _FC_FULL, after=2)
-        run("finish", "--retry-remote", "--pr-cmd", json.dumps([sys.executable, "-c", "pass"]))
+        run("finish", "--retry-remote")
         r = subprocess.run(["git", "--git-dir", origin, "rev-parse", "-q", "--verify",
                             "refs/heads/factory/pair"], capture_output=True, text=True)
         if r.returncode != 0:
