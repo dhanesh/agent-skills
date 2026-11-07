@@ -234,7 +234,16 @@ def scan_bundle(root):
                         "asset skipped, it is a symlink that points outside "
                         "the bundle or to no regular file: %s" % rel)
                 continue
-            with open(path, encoding="utf-8", errors="replace") as f:
+            # A .md symlink is read only when its target stays inside the
+            # bundle (the same rule as assets): otherwise a bundle could
+            # publish any file the builder can read as a concept page.
+            if not asset_inside(b.root, path):
+                b.warnings.append(
+                    "page skipped, it is a symlink that points outside "
+                    "the bundle or to no regular file: %s" % rel)
+                continue
+            fd = os.open(os.path.realpath(path), os.O_RDONLY | os.O_NOFOLLOW)
+            with open(fd, encoding="utf-8", errors="replace") as f:
                 text = f.read()
             meta, body, had_fm = parse_frontmatter(text)
             if name == "index.md":

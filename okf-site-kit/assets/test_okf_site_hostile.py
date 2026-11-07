@@ -465,5 +465,63 @@ class AssetSymlinkTest(unittest.TestCase):
             self.bundle, os.path.join(self.bundle, "assets", "leak.txt")))
 
 
+class PageSymlinkTest(unittest.TestCase):
+    """A .md symlink is a page only when its target stays inside the bundle."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="okf-hostile-page-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.bundle = os.path.join(self.tmp, "bundle")
+        write_file(os.path.join(self.tmp, "outside", "secret.md"),
+                   "# Secret\n\n" + DUMMY_SECRET)
+        write_file(os.path.join(self.bundle, "index.md"),
+                   '---\nokf_version: "0.1"\n---\n# Probe bundle\n\n'
+                   "A plain tagline.\n")
+        write_file(os.path.join(self.bundle, "plain.md"),
+                   "---\ntype: Concept\n---\n# Plain\n\nPlain body.\n")
+        try:
+            os.symlink(os.path.join("..", "outside", "secret.md"),
+                       os.path.join(self.bundle, "leak.md"))
+            os.symlink(os.path.join(self.tmp, "outside", "secret.md"),
+                       os.path.join(self.bundle, "abs-leak.md"))
+            os.symlink("missing.md", os.path.join(self.bundle, "dangling.md"))
+            os.symlink("plain.md", os.path.join(self.bundle, "inside.md"))
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("cannot make symlinks here: %s" % exc)
+        self.site = os.path.join(self.tmp, "site")
+        self.log = io.StringIO()
+        code = okf_site.main(["generate", self.bundle, "--out", self.site],
+                             out=self.log)
+        self.assertEqual(code, 0, self.log.getvalue())
+        self.bundle_scan = okf_site.scan_bundle(self.bundle)
+
+    def test_outside_page_symlinks_are_skipped(self):
+        for name in ("leak.md", "abs-leak.md", "dangling.md"):
+            with self.subTest(name):
+                self.assertNotIn(name, self.bundle_scan.concepts)
+                self.assertIn("WARN: page skipped", self.log.getvalue())
+                self.assertIn(name, self.log.getvalue())
+
+    def test_no_site_file_holds_the_secret(self):
+        for base, _, files in os.walk(self.site):
+            for name in files:
+                path = os.path.join(base, name)
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    self.assertNotIn(DUMMY_SECRET.strip(), fh.read(), path)
+
+    def test_normal_and_inside_pages_are_kept(self):
+        for name in ("plain.md", "inside.md"):
+            with self.subTest(name):
+                self.assertIn(name, self.bundle_scan.concepts)
+
+    def test_pre_fix_read_would_leak(self):
+        # Negative fixture: a plain open follows the link, as the scan did
+        # before the fix, so the check above can see a leak.
+        with open(os.path.join(self.bundle, "leak.md"), encoding="utf-8") as fh:
+            self.assertIn(DUMMY_SECRET.strip(), fh.read())
+        self.assertFalse(okf_site.asset_inside(
+            self.bundle, os.path.join(self.bundle, "leak.md")))
+
+
 if __name__ == "__main__":
     unittest.main()
