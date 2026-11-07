@@ -19,7 +19,9 @@ with that tool exactly:
 Per subject: STALE if any source drifted, else UNKNOWN if any source cannot
 be fingerprinted, else FRESH (a subject with no pins has nothing to drift).
 ERROR is the gardener's addition: an explainer whose frontmatter cannot be
-parsed, or a source check that raises, is reported — never a crash.
+parsed, or a source check that raises, is reported — never a crash. A git
+pin that is not a 40-hex commit SHA (optional "+dirty") is an ERROR for that
+source, as in okf.py, and no git command receives it.
 
 For STALE git sources the report also shows pinned vs current SHA, a
 `git diff --stat` summary, and the changed file names when the pinned
@@ -271,6 +273,19 @@ def fingerprint(locator, source_type, bundle_root=None):
 
 # ── Drift detail for stale git sources ───────────────────────────────────────
 
+# A git pin is a full 40-hex commit SHA, with "+dirty" when the worktree had changes.
+# The pin comes from the explainer file, which anyone can edit, and its SHA part goes
+# into `git diff <sha>..HEAD`. A pin such as `--output=<path>` would act as a git
+# option and write a file, so any other value is an ERROR and never reaches git.
+# Same rule and name as okf.py's `valid_git_pin`.
+GIT_PIN_RE = re.compile(r"[0-9a-f]{40}(\+dirty)?")
+
+
+def valid_git_pin(pinned_fp):
+    """True when `pinned_fp` is a 40-hex commit SHA with an optional +dirty."""
+    return isinstance(pinned_fp, str) and GIT_PIN_RE.fullmatch(pinned_fp) is not None
+
+
 def _base_sha(fp):
     return fp[:-len(DIRTY)] if fp.endswith(DIRTY) else fp
 
@@ -283,6 +298,11 @@ def git_drift(locator, pinned, current, bundle_root=None):
     when the diff is unobtainable (e.g. the pinned commit was rebased away).
     """
     detail = {"diffstat": None, "changed_files": [], "note": None}
+    if not (valid_git_pin(pinned) and valid_git_pin(current)):
+        # Defence in depth: assess_source already turns an invalid pin into an
+        # ERROR row, but no caller may hand such a value to git.
+        detail["note"] = BAD_PIN_NOTE % (pinned,)
+        return detail
     base, head = _base_sha(pinned), _base_sha(current)
     bundle_rel = _bundle_rel_in_repo(bundle_root, _repo_toplevel(locator))
     changed = set()
@@ -375,12 +395,18 @@ def find_subjects(bundle_root):
 
 # ── Assessment ───────────────────────────────────────────────────────────────
 
-def assess_source(pin, bundle_root=None):
-    """One pin -> row dict with state FRESH/STALE/UNKNOWN and drift detail.
+BAD_PIN_NOTE = ("pinned fingerprint %r is not a 40-hex commit SHA"
+                " (optional +dirty); no git diff was run")
 
-    Mirrors okf.py's status logic: external or unpinned -> UNKNOWN; a source
-    whose current fingerprint can't be computed (moved path, git gone) ->
-    UNKNOWN; otherwise compare fingerprints.
+
+def assess_source(pin, bundle_root=None):
+    """One pin -> row dict with state FRESH/STALE/UNKNOWN/ERROR and drift detail.
+
+    Mirrors okf.py's status logic: external or unpinned -> UNKNOWN; a git
+    source whose pin is not a valid git pin (see `valid_git_pin`) -> ERROR,
+    before any git command sees the pin; a source whose current fingerprint
+    can't be computed (moved path, git gone) -> UNKNOWN; otherwise compare
+    fingerprints.
     """
     row = {
         "type": pin.get("type"),
@@ -397,6 +423,10 @@ def assess_source(pin, bundle_root=None):
         return row
     locator = pin["locator"]
     current_type = detect_source_type(locator)
+    if current_type == "git" and not valid_git_pin(pinned):
+        row["state"] = "ERROR"
+        row["note"] = BAD_PIN_NOTE % (pinned,)
+        return row
     current = fingerprint(locator, current_type, bundle_root)
     row["current_fingerprint"] = current
     if current is None:

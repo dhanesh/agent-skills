@@ -56,7 +56,7 @@ external URL/topic sources have no local fingerprint. Per subject:
 | FRESH | every pinned fingerprint still matches | nothing to do; trust the explainer |
 | STALE | at least one source drifted | diff-aware refresh (step 3) |
 | UNKNOWN | a source can't be fingerprinted (external URL, moved path) | ask or re-check by hand |
-| ERROR | the explainer's frontmatter or pins are unparseable | repair the pins, then re-judge |
+| ERROR | the explainer's frontmatter or pins are unparseable, or a git pin is not a 40-hex commit SHA (optional `+dirty`); no git command gets that pin | repair the pins, then re-judge |
 
 `sweep` exits non-zero when anything is STALE or ERROR, so it doubles as a CI-style
 gate; UNKNOWN alone exits 0 because external sources are permanently uncheckable, not
