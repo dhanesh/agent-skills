@@ -191,7 +191,7 @@ def load_images(o, cache: dict):
 
 def to_sdk_images(o, cache: dict, image_cls):
     if isinstance(o, tuple) and len(o) == 2 and o[0] == "__jev_image__":
-        return image_cls.from_bytes(cache[o[1]])
+        return image_cls(cache[o[1]])
     if isinstance(o, dict):
         return {k: to_sdk_images(v, cache, image_cls) for k, v in o.items()}
     if isinstance(o, list):

@@ -21,9 +21,8 @@ IMAGE_BYTES = b"not-really-a-png-0123456789"
 STUB = '''
 import hashlib, json, os
 class Image:
-    def __init__(self, data): self.n, self.sha = len(data), hashlib.sha256(data).hexdigest()
-    @classmethod
-    def from_bytes(cls, data): return cls(bytes(data))
+    def __init__(self, data):
+        data = bytes(data); self.n, self.sha = len(data), hashlib.sha256(data).hexdigest()
 class _A(dict):
     def model_dump(self): return dict(self)
 def _enc(o):
@@ -168,6 +167,19 @@ class JevImagesTest(unittest.TestCase):
         self.assertEqual(call["headers"], {})
         self.assertEqual(call["state"], {"x": "sky is blue"})
         self.assertEqual(json.loads(r.stdout), {"q": {"type": "noul", "noul": 0.9}})
+
+
+try:
+    from typesafe_sdk import Image as RealImage  # the real SDK, when this Python has it
+except ImportError:
+    RealImage = None
+
+
+class RealSdkImageTest(unittest.TestCase):
+    @unittest.skipIf(RealImage is None, "the real typesafe_sdk is not importable in this Python")
+    def test_real_image_takes_bytes_and_has_no_from_bytes(self):
+        self.assertIsNotNone(RealImage(b"x"))
+        self.assertFalse(hasattr(RealImage, "from_bytes"))
 
 
 if __name__ == "__main__":
