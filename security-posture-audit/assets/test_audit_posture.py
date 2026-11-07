@@ -16,6 +16,15 @@ from contextlib import redirect_stdout
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import audit_posture  # noqa: E402
 
+# Detector fixtures that hold a risky pattern live as labelled data files here, so no
+# test source holds one (see fixtures/*.yml and test_fixture_files.py).
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+
+
+def fixture(name):
+    with open(os.path.join(FIXTURES, name), encoding="utf-8") as fh:
+        return fh.read()
+
 
 class TreeCase(unittest.TestCase):
     """Base: each test builds its fixture tree in a private tempdir."""
@@ -198,13 +207,14 @@ class TestWorkflows(TreeCase):
 
     def test_curl_pipe_sh_flagged(self):
         self.write(".github/workflows/setup.yml",
-                   "      - run: curl -sSL https://get.example.com/install | bash\n")
+                   fixture("workflow_curl_pipe_sh_step.yml"))
         hits = self.by_check("workflow-curl-pipe-sh")
         self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["severity"], "HIGH")
 
     def test_curl_to_file_silent(self):
         self.write(".github/workflows/setup.yml",
-                   "      - run: curl -sSL -o install.sh https://get.example.com/install\n")
+                   fixture("workflow_curl_to_file_step.yml"))
         self.assertEqual(self.by_check("workflow-curl-pipe-sh"), [])
 
 
