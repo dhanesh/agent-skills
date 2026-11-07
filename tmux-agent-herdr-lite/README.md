@@ -41,6 +41,8 @@ Nothing is copied onto your PATH and there are no new commands to learn: the ins
 
 Version 2.3.1: the installer finds Python with `find_python.sh` and checks that it is 3.10 or newer. It writes that interpreter into the Claude Code hook commands that it registers, so the hooks run on a machine that has only `python`. The `agent-*` scripts that tmux key bindings start still need `python3` on `PATH`.
 
+Version 2.3.2: every inline Python call in the `agent-*` scripts and in the installer runs with `-I` (isolated mode). Python then does not import a module from the current directory. A `json.py`, `hashlib.py` or `shlex.py` in the pane's directory cannot run in place of the standard module. `assets/test_python_isolation.py` checks this.
+
 ## What it sets up
 
 - **Popup menus and dashboard** — `prefix a d` opens the dashboard popup; `prefix a m` opens an action menu (jump, worktree, resume, splits); `prefix a s` rescans; `prefix a t` opens the session tree.

@@ -9,7 +9,7 @@ IDLE_SECONDS="${AGENT_IDLE_SECONDS:-120}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$PANE_DIR"
 
-python3 - "$PANE_DIR" "$STATE" "$IDLE_SECONDS" "$SCRIPT_DIR" <<'PY'
+python3 -I - "$PANE_DIR" "$STATE" "$IDLE_SECONDS" "$SCRIPT_DIR" <<'PY'
 import hashlib, json, os, subprocess, sys, time
 from datetime import datetime, timezone
 

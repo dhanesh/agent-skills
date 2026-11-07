@@ -67,7 +67,7 @@ PANE_ID="$(tmux display-message -p -t "$SESSION:$WIN" '#{pane_id}')"
 # travel as argv so quotes/backslashes in the command can't break the JSON.
 META="$PANE_DIR/${PANE_ID#%}.json"
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-python3 - "$META" "$SCRIPT_DIR" "$AGENT_KIND" "$CWD" "$CMD" \
+python3 -I - "$META" "$SCRIPT_DIR" "$AGENT_KIND" "$CWD" "$CMD" \
   "${AGENT_NAME:-$NAME}" "$SESSION" "$WIN" "$PANE_ID" "$NOW" <<'PY'
 import json,sys
 path, mod_dir, agent, cwd, cmd, name, session, win, pane_id, now = sys.argv[1:11]
