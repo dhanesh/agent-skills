@@ -21,6 +21,13 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 AUDIT = os.path.join(os.path.dirname(HERE), "assets", "audit_posture.py")
+# Risky workflow text lives in labelled detector fixture files, not in this source.
+FIXTURES = os.path.join(os.path.dirname(HERE), "assets", "fixtures")
+
+
+def fixture(name):
+    with open(os.path.join(FIXTURES, name), encoding="utf-8") as fh:
+        return fh.read()
 
 _checks = []
 
@@ -83,16 +90,7 @@ def build_leaky(root):
           "app.run(host='0.0.0.0', debug=True)\n")
     write(root, "api.cfg", "Access-Control-Allow-Origin: *\n")
     write(root, "pip.conf", "[global]\nindex-url = http://pypi.internal.example/simple\n")
-    write(root, ".github/workflows/build.yml",
-          "on: pull_request_target\n"
-          "jobs:\n"
-          "  build:\n"
-          "    runs-on: ubuntu-latest\n"
-          "    steps:\n"
-          "      - uses: actions/checkout@v4\n"
-          "        with:\n"
-          "          ref: ${{ github.event.pull_request.head.sha }}\n"
-          "      - run: curl -sSL https://get.example.com/install | bash\n")
+    write(root, ".github/workflows/build.yml", fixture("leaky_workflow.yml"))
     write(root, "notes.txt", "world writable\n", mode=0o666)
     write(root, "tool.bin", "#!/bin/sh\n", mode=0o4755)
     # decoy inside a skipped dir: must NOT surface

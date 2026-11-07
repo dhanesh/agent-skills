@@ -104,5 +104,6 @@ See `SKILL.md` for the full procedure.
 
 ## Changes
 
+- **1.2.5.** `okf.py` runs every git command with `core.fsmonitor` and `core.hooksPath` switched off, so a source repo's own config cannot run a program. A git pin that is not a 40-hex commit SHA (with an optional `+dirty`) is now an ERROR for that source. No git command gets that pin. `status` exits 1 on ERROR, and `diff` exits 1 on ERROR.
 - **1.2.4.** SKILL.md states the fallback without Python in the body: run the walkthrough in conversation and skip persistence. The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.2.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

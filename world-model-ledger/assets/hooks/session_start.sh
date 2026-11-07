@@ -14,7 +14,7 @@ command -v find_python >/dev/null 2>&1 && find_python
 [ -n "${PY:-}" ] || { echo '{"continue": true}'; exit 0; }
 
 input="$(cat)"
-get() { printf '%s' "$input" | "$PY" -c "import json,sys
+get() { printf '%s' "$input" | "$PY" -I -c "import json,sys
 try: print(json.load(sys.stdin).get('$1',''))
 except Exception: print('')" 2>/dev/null; }
 
@@ -41,7 +41,7 @@ digest=".world-model/digest.md"
   "$PY" "$KIT_HOME/world_model.py" --db ".world-model/model.db" digest > "$digest" 2>/dev/null || true
 [[ -f "$digest" ]] || { echo '{"continue": true}'; exit 0; }
 
-"$PY" - "$digest" <<'PY'
+"$PY" -I - "$digest" <<'PY'
 import json, sys
 try:
     ctx = open(sys.argv[1]).read()

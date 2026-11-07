@@ -17,7 +17,7 @@ command -v find_python >/dev/null 2>&1 && find_python
 [ -n "${PY:-}" ] || { echo '{"continue": true}'; exit 0; }
 
 input="$(cat)"
-cwd="$(printf '%s' "$input" | "$PY" -c "import json,sys
+cwd="$(printf '%s' "$input" | "$PY" -I -c "import json,sys
 try: print((json.load(sys.stdin) or {}).get('cwd',''))
 except Exception: print('')" 2>/dev/null)"
 

@@ -37,6 +37,8 @@ flowchart LR
 
 An arrow from A to B means A sends work or data to B. `==>` contract envelope, `-->` required, `--o` handoff (you start the next skill), `-.->` optional (only when installed). The map of all skills is in the [root README](../README.md#how-the-skills-fit-together).
 <!-- skill-graph:end -->
+**1.5.0.** Node's precise discovery is now opt-in. It runs the analysed repo's own `typescript`, so it runs only when you pass `--precise`. The default run executes no repo code and reports `discovery: "heuristic"`. `--no-precise` is still accepted; on node it now changes nothing.
+
 **1.4.4.** The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 
 **1.4.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.
@@ -141,8 +143,8 @@ linux, no dependency added; the minors in between are expected by bracketing, no
 toolchains are where untested code lives, which is why the floor is five versions back and not one
 — for Rust, every 4th minor across about two years, since Rust itself supports only the latest
 stable. A repo no stack claims gets a note on stderr and an empty plan rather than a guess (see
-[`references/stacks.md`](references/stacks.md)). Node's optional precise discovery drives a
-`typescript` the repo already ships and never downloads one; Go's runs this skill's own `go/ast`
+[`references/stacks.md`](references/stacks.md)). Node's optional precise discovery runs only
+with `--precise`, drives a `typescript` the repo already ships and never downloads one; Go's runs this skill's own `go/ast`
 helper and never downloads a toolchain; Rust's guard needs a `Cargo.lock`, refuses a toolchain
 pin that is not installed rather than downloading it, and builds `--offline`, so a dependency must
 already be in the cargo cache.
@@ -179,7 +181,7 @@ every suspected bug (pinned, not blessed), everything it couldn't prove, and the
   scoring, the CLI and the JSON shape, plus the stack registry everything else hangs off.
 - `assets/stack_python.py` — the Python stack: unit discovery and testability triage.
 - `assets/stack_node.py` — the node/TypeScript stack: heuristic discovery of exported
-  units (plus the optional precise path through a `typescript` the repo already ships),
+  units (plus the opt-in `--precise` path through a `typescript` the repo already ships),
   the naming, lexing and import-grammar answers JS gives, and node's own I/O marker
   tables and triage.
 - `assets/stack_go.py` — the Go stack: heuristic and `go/ast` discovery of exported functions

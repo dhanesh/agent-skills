@@ -23,12 +23,12 @@ compatibility: >-
   1.86, 1.90, 1.94, 1.98 and 1.99 proven by CI's `versions` legs on amd64 linux, and 1.82 on arm64
   macOS too, the minors between expected by bracketing, not proven) (references/stacks.md). No pip, no npm, no network: node's optional
   precise discovery drives a `typescript` the repo already ships and never downloads one — that
-  runs the analysed repo's own compiler in-process, and `--no-precise` declines it — go's runs this
+  runs the analysed repo's own compiler in-process, so it runs only under `--precise` — go's runs this
   skill's own `go/ast` helper under `GOTOOLCHAIN=local`, and the rust guard builds `--offline`
   under `RUSTUP_AUTO_INSTALL=0`, so no toolchain or crate is ever fetched.
 metadata:
   author: dhanesh
-  version: "1.4.4"
+  version: "1.5.0"
   skill-contract: "1"
   tags: "testing,characterization,legacy-code,agent-safety,pytest,node,typescript,go,rust"
 ---
@@ -147,14 +147,16 @@ otherwise stop and tell the user that this skill needs Python 3.10 or newer.
    for `clean-code`; `covered` is a flat index of already-tested unit ids, not a fourth bucket — a
    `not_netted` unit can also appear in `covered`. `discovery` says which reader found the units
    (`precise` = a real parser, `heuristic` = a text reader); a node repo reads `heuristic` unless
-   it ships its own `typescript`, a go repo reads `precise` wherever `go` is on PATH, a rust repo
+   you pass `--precise` and it ships its own `typescript`, a go repo reads `precise` wherever `go` is on PATH, a rust repo
    always reads `heuristic` (Rust has one reader, and the ranker never runs cargo), and two runs
    are only comparable when it agrees. **Carry that
    value into your report's header**, as the template below does: a run that silently degraded is a
    run whose numbers cannot be compared to the last one's. Node's precise path reaches that repo's
-   own `typescript` by `require`ing it, so it EXECUTES code from the tree you are analysing; pass
-   `--no-precise` on any repo you were handed rather than wrote, and expect `heuristic` and fewer
-   units in exchange (`references/parameters.md`). Go's precise path executes none of the analysed
+   own `typescript` by `require`ing it, so it EXECUTES code from the tree you are analysing. It is
+   off by default: the default run executes no repo code and reads `heuristic`. Pass `--precise`
+   only on a repo you trust, and expect more units in exchange (`references/parameters.md`).
+   `--no-precise` is still accepted; on node it is now the default, so it changes nothing there.
+   Go's precise path executes none of the analysed
    repo's code — it is this skill's own `go/ast` helper reading the tree as text — so it is safe to
    leave on.
 

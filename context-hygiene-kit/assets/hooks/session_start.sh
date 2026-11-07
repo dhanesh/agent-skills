@@ -25,7 +25,7 @@ DIGEST="$(cat .context/digest.md 2>/dev/null || echo '(no digest yet)')"
 
 # additionalContext is injected as trusted scaffold; the digest itself already
 # fences untrusted card content in <data> blocks (two-channel boundary, LSC-7).
-"$PY" - "$DIGEST" <<'PY'
+"$PY" -I - "$DIGEST" <<'PY'
 import json, sys
 print(json.dumps({
     "hookSpecificOutput": {

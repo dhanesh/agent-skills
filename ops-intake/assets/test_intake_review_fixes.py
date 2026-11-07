@@ -74,17 +74,17 @@ class OversizeRunIdTests(unittest.TestCase):
 # -- A4 ---------------------------------------------------------------------------
 class HiddenCharacterTests(unittest.TestCase):
     def test_code_writes_hidden_characters_as_escapes(self):
-        self.assertEqual(IN.code("a\x1b[31mb‮c​d\x00"),
+        self.assertEqual(IN.code("a\x1b[31mb\u202ec\u200bd\x00"),
                          "`a\\u001b[31mb\\u202ec\\u200bd\\u0000`")
         self.assertEqual(IN.code("plain `x`"), "`` plain `x` ``")
 
     def test_list_and_show_print_no_raw_escape_or_bidi_character(self):
         root = repo(config=CI)
         imp(root, "gh-issues-json", "gh",
-            json.dumps([an_issue(1, title="evil \x1b]0;pwned\x07 ‮gnp.exe")]))
+            json.dumps([an_issue(1, title="evil \x1b]0;pwned\x07 \u202egnp.exe")]))
         for argv in (("list",), ("show", IN.item_id("gh", "1"))):
             out = cmd(root, *argv)[1]
-            self.assertFalse(any(c in out for c in "\x1b\x07‮"), out)
+            self.assertFalse(any(c in out for c in "\x1b\x07\u202e"), out)
             self.assertIn("\\u202e", out)
 
 

@@ -65,6 +65,8 @@ After setup the three hooks run automatically every turn — you don't re-invoke
 
 `SKILL_PYTHON` names the interpreter. In the hooks and installers it is one executable, a name or a path, with no arguments.
 
+Version 1.2.7: The hooks and the installer run their inline Python with `-I`. A `json.py` in the project directory no longer runs in place of the standard module.
+
 Version 1.2.6: The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 
 Version 1.2.5: SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

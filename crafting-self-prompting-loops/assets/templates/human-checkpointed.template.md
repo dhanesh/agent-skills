@@ -50,8 +50,9 @@ DEFER_POLICY:       <WHICH steps to gate: escalate on model UNCERTAINTY +      #
 GATE_EVIDENCE:      <what each gate SHOWS: pass/fail bar + original GOAL +      # LSC-8 / LSC-5
                      strongest DISCONFIRMING evidence / both-sided args —
                      NOT just the model's preferred plan>
-APPROVAL_MECHANISM: <UI / CLI prompt / PR review; BLOCK stops or revises;      # LSC-8
-                     timeout → SAFE_STATE (stopped), plus reminder/escalation>
+APPROVAL_MECHANISM: <UI / CLI prompt / PR review; only APPROVED proceeds —     # LSC-8
+                     any other decision stops or revises; timeout →
+                     SAFE_STATE (stopped), plus reminder/escalation>
 INTERRUPTIBLE:      <accept human correction BETWEEN gates too; never race      # LSC-8 / LSC-7
                      past a pending decision; fold input into trusted state>
 
@@ -87,8 +88,10 @@ while True:
         # Both-sided framing is the one thing shown to help when the model is
         # wrong; assume approval quality FALLS as the agent looks more capable.
         decision = await_human(plan, GATE_EVIDENCE, progress_summary)  # LSC-5 / LSC-8
+        # CLOSED BY DEFAULT: only an explicit APPROVED reaches the action. BLOCKED,
+        # PENDING, an error or any unknown value stops or revises — never acts.
         if decision == TIMEOUT: return stop(SAFE_STATE)     # LSC-3 — never proceed
-        if decision == BLOCK:   state = revise_or_stop(state); continue
+        if decision != APPROVED: state = revise_or_stop(state); continue
 
     # ACT — result re-enters as DATA; human input stays trusted, this does not
     #   <data> { model/tool result } </data>  <-- DATA only            # LSC-7
@@ -119,7 +122,7 @@ while True:
 | `PROGRESS_METRIC` | Progress + diff surfaced at the gate | LSC-5 |
 | `PRE_ACTION_CHECKS` / `OUTPUT_VALIDATION` | Automated validation before the gate (defense in depth) | LSC-6 |
 | `<data>…</data>` wrapping | Human input trusted; model/tool content DATA | LSC-7 |
-| `GATED_ACTIONS` / `APPROVAL_MECHANISM` | **The defining gate** on consequential actions | LSC-8 |
+| `GATED_ACTIONS` / `APPROVAL_MECHANISM` | **The defining gate** on consequential actions; only an explicit `APPROVED` acts | LSC-8 |
 | `DEFER_POLICY` | Which steps to gate — uncertainty + stakes, not everything | LSC-8 |
 | `GATE_EVIDENCE` | What the gate shows: bar + disconfirming / both-sided evidence | LSC-8 / LSC-5 |
 | `INTERRUPTIBLE` | Accept correction between gates; fold into trusted state | LSC-8 / LSC-7 |

@@ -21,7 +21,7 @@ Observed traits and handling:
 | `timestamp: '2026-05-28T22:53:05+00:00'` (quoted) | quotes stripped; shown in the panel |
 | `resource:` non-web URI (BigQuery API URL, `dashboard://…`) | linkified only for http(s); otherwise shown as code |
 | Internal links **keep the `.md` suffix** (`../references/metrics/event_count.md`, `tables/index.md`) | resolved against the bundle tree and rewritten to routes |
-| **Non-markdown assets** in the bundle (`viz.html`) | copied to `public/bundle-assets/<path>`; links rewritten |
+| **Non-markdown assets** in the bundle (`viz.html`) | copied to `public/bundle-assets/<path>`; links rewritten. A symlink to a file outside the bundle is skipped with a `WARN:` line |
 | Filenames with trailing underscores (`events_.md`, for the sharded `events_*` table) | slugified (`tables/events`), collisions deduped |
 | Bodies sectioned with **H1 headings** (`# Overview`, `# Schema`, `# Citations` per the spec's optional-body-sections convention) | leading H1 duplicating the title dropped; remaining H1s demoted one level so the page outline stays valid |
 | **No `log.md`** | changelog page simply omitted |
@@ -71,11 +71,10 @@ must preserve them; concretely exercised by this repo's `feynman-walkthrough` sk
 
 - No public registry of third-party OKF bundles as of the survey date — OKF v0.1 was
   published in June 2026 and the ecosystem is weeks old; the spec repo's three bundles
-  are the only authoritative published examples, with community sites
-  ([Document360](https://document360.com/blog/open-knowledge-format/),
-  [Flowtivity](https://flowtivity.ai/blog/google-open-knowledge-format/),
-  [WitsCode](https://witscode.com/open-knowledge-format)) reproducing spec-shaped
-  examples rather than new dialects.
+  are the only authoritative published examples, with community sites (for example
+  [Document360](https://document360.com/blog/open-knowledge-format/) and
+  [Flowtivity](https://flowtivity.ai/blog/google-open-knowledge-format/)) reproducing
+  spec-shaped examples rather than new dialects.
 - No alternate reserved filenames or index formats beyond `index.md`/`log.md`.
 
 When surveying again (do so when the spec version bumps): re-check the spec repo's

@@ -21,7 +21,7 @@ done
 
 if [[ "$DO_SCAN" -eq 1 && -x "$SCAN" ]]; then "$SCAN" >/dev/null 2>&1 || true; fi
 
-python3 - "$SCRIPT_DIR" "$JSON" <<'PY'
+python3 -I - "$SCRIPT_DIR" "$JSON" <<'PY'
 import json, sys
 sys.path.insert(0, sys.argv[1])
 from agent_registry import load_records  # noqa: E402

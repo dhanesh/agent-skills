@@ -1291,7 +1291,10 @@ def main():
               "  ScriptTarget: { Latest: 99 },\n"
               "  SyntaxKind: {},\n"
               "};\n")
-        r_shim = run_ranker(shim_repo, "--top-n", "20")
+        # The toolchain path is opt-in (run 5, D25), so the shim arm passes
+        # `--precise`. Without node on PATH the opt-in run declines with
+        # "could not run node", which is still a decline and still heuristic.
+        r_shim = run_ranker(shim_repo, "--top-n", "20", "--precise")
         shim_plan = load_json(r_shim)
         check("36 the node report names which reader found its units, and "
               "names it CORRECTLY: no toolchain reads `heuristic`, and a "
@@ -1866,6 +1869,48 @@ def main():
               grade_deliverable_gate_line(skill_md))
         check("57 NEGATIVE: grader flags a Deliverable template with the Gate line stripped",
               not grade_deliverable_gate_line(skill_md.replace(GATE_LINE, "")))
+
+        # ── 58-59: node's precise path runs repo code only on opt-in (D25) ─
+        #     The fixture's `typescript.js` only writes a marker. The default
+        #     run must leave no marker, report `heuristic` and print no
+        #     `declined` note (no toolchain was loaded). The NEGATIVE arm is
+        #     `--precise`: with node on PATH it must write the marker, which
+        #     proves the probe can see repo code run. With no node it reports
+        #     NOT GRADED HERE for that arm, in the same shape as checks 34/39.
+        mk_repo = os.path.join(tmp, "nodemarker")
+        mk_file = os.path.join(tmp, "nodemarker-ran.txt")
+        write(mk_repo, "package.json", '{"name": "marker", "version": "1.0.0"}\n')
+        write(mk_repo, "src/math.ts",
+              "export function add(a: number, b: number): number { return a + b; }\n"
+              "export function sub(a: number, b: number): number { return a - b; }\n")
+        write(mk_repo, "node_modules/typescript/lib/typescript.js",
+              "require('fs').appendFileSync(%s, 'loaded\\n');\n"
+              "module.exports = {};\n" % json.dumps(mk_file))
+        r_def = run_ranker(mk_repo, "--top-n", "20")
+        def_plan = load_json(r_def)
+        r_np = run_ranker(mk_repo, "--top-n", "20", "--no-precise")
+        check("58 node's default run executes no repo code: no marker, "
+              "`heuristic`, no `declined` note, and `--no-precise` is still "
+              "accepted",
+              r_def.returncode == 0 and r_np.returncode == 0
+              and def_plan.get("stack") == "node"
+              and def_plan.get("discovery") == "heuristic"
+              and def_plan.get("units_discovered") == 2
+              and "declined" not in (r_def.stderr or "")
+              and not os.path.exists(mk_file),
+              "rc=%r/%r discovery=%r units=%r marker=%r"
+              % (r_def.returncode, r_np.returncode, def_plan.get("discovery"),
+                 def_plan.get("units_discovered"), os.path.exists(mk_file)))
+        if shutil.which("node"):
+            r_opt = run_ranker(mk_repo, "--top-n", "20", "--precise")
+            check("59 NEGATIVE: `--precise` does run the repo's typescript.js "
+                  "(the marker appears), so check 58's probe can see it",
+                  r_opt.returncode == 0 and os.path.exists(mk_file)
+                  and "declined" in (r_opt.stderr or ""),
+                  "rc=%r marker=%r" % (r_opt.returncode, os.path.exists(mk_file)))
+        else:
+            print("NOT GRADED HERE: check 59 needs node on PATH")
+            check("59 NOT GRADED HERE (no node): `--precise` opt-in arm", True)
 
         n, k = len(_checks), sum(_checks)
         ok = k == n

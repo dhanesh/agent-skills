@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
 IDLE_SECONDS="${AGENT_IDLE_SECONDS:-120}"
 
-python3 - "$SCRIPT_DIR" "$TARGET" "$IDLE_SECONDS" "$ROOT" <<'PY'
+python3 -I - "$SCRIPT_DIR" "$TARGET" "$IDLE_SECONDS" "$ROOT" <<'PY'
 import hashlib, os, subprocess, sys
 sys.path.insert(0, sys.argv[1])
 from agent_registry import resolve  # noqa: E402

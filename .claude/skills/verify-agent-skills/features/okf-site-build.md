@@ -161,7 +161,7 @@ for line in open(sys.argv[1], encoding="utf-8"):
         print("CARD OK: attrs=%s" % sorted(attrs))
     for key, text in want.items():
         for attr in ("title", "description"):
-            if attrs.get(attr, "").startswith(key) and attrs[attr] != text and not bad:
+            if attrs.get(attr, "").startswith(key + '"') and attrs[attr] != text and not bad:
                 ok = False
                 print("CARD BAD: %s is %r, want %r" % (attr, attrs[attr], text))
 print("JSX_ATTRS: %s" % ("PASS" if ok else "FAIL"))

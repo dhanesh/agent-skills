@@ -359,6 +359,8 @@ spends one, so a session that keeps crashing still stops. A task past the cap pr
 
 ## Scheduled re-entry
 
+The conductor installs a re-entry timer only when the grant carries a `reentry` block, so a grant without one gets no timer on this machine.
+
 When the grant carries a `reentry` block, run `python3 "$SKILL_DIR/assets/conductor.py"
 reentry install --root <repo>` right after `init`, so a timer on this machine resumes the
 run if this session dies. It prints `REENTRY: installed every <n> min`. A timer's own PATH
