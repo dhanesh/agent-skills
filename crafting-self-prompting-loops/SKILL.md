@@ -14,7 +14,7 @@ license: MIT
 compatibility: Runtime-agnostic prompt skill; scaffolds target Claude Code primitives (/goal, /loop, Routines, ScheduleWakeup, Workflow) but degrade to framework-agnostic pseudocode. Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`) is optional, used only to validate skill-contract handoffs and check grants.
 metadata:
   author: dhanesh
-  version: "1.5.0"
+  version: "1.5.1"
   skill-contract: "1"
   tags: "agents,loops,self-prompting,safety,prompt-injection,termination,backstop"
 ---
