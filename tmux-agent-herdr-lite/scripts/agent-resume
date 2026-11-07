@@ -38,7 +38,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_PANE="${AGENT_PANE_BIN:-$SCRIPT_DIR/agent-pane}"
 
-python3 - "$SCRIPT_DIR" "$DRY" "$FORCE" "$TARGET" "$SESSION_ID" "$AGENT_PANE" <<'PY'
+python3 -I - "$SCRIPT_DIR" "$DRY" "$FORCE" "$TARGET" "$SESSION_ID" "$AGENT_PANE" <<'PY'
 import os, shlex, subprocess, sys
 sys.path.insert(0, sys.argv[1])
 from agent_registry import load_records, pane_alive, record_path, resolve  # noqa: E402
@@ -73,7 +73,13 @@ def relaunch(rec, resume_id=""):
         argv += ["--agent", agent]
     if rec.get("cwd"):
         argv += ["--cwd", rec["cwd"]]
-    argv += [rec.get("name", "agent"), cmd]
+    # agent-pane takes the command as separate words and runs no shell, so
+    # split the stored shell-quoted string back into its words.
+    try:
+        words = shlex.split(cmd)
+    except ValueError:
+        words = cmd.split()
+    argv += [rec.get("name", "agent")] + (words or [cmd])
     if dry:
         print("would run:", " ".join(shlex.quote(a) for a in argv))
         return

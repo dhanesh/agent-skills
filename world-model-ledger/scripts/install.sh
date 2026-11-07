@@ -46,7 +46,7 @@ done
 # Same resolver the hooks use; ships next to them in assets/hooks/.
 . "$ASSETS/hooks/find_python.sh"
 find_python
-{ [ -n "$PY" ] && "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; } \
+{ [ -n "$PY" ] && "$PY" -I -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; } \
   || { echo "error: this skill needs Python 3.10 or newer; set SKILL_PYTHON or install python3" >&2; exit 1; }
 
 # ── Operate-only fast path ───────────────────────────────────────────────────
@@ -130,7 +130,7 @@ if [[ "$MODE" == "project" ]]; then
   # Initialize the DB schema so the pre-call hook has something to query.
   ( cd "$TARGET" && "$PY" "$KIT_HOME/world_model.py" --db ".world-model/model.db" stats >/dev/null )
   if [[ "$WITH_CONSTRAINTS" == "1" ]]; then
-    ( cd "$TARGET" && "$PY" - "$KIT_HOME" <<'PY'
+    ( cd "$TARGET" && "$PY" -I - "$KIT_HOME" <<'PY'
 import json, os, sys
 sys.path.insert(0, sys.argv[1])
 from world_model import WorldModel

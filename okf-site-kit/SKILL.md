@@ -18,7 +18,7 @@ compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PY
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.5"
+  version: "1.2.0"
   tags: "okf,static-site,astro,starlight,knowledge-base,documentation,site-generator"
 ---
 

@@ -50,7 +50,8 @@ An arrow from A to B means A sends work or data to B. `==>` contract envelope, `
   per-subject FRESH/STALE/UNKNOWN/ERROR report (for stale git sources: pinned vs
   current SHA, `git diff --stat` summary, changed file names) and exits non-zero on any
   STALE/ERROR, so it works as a gate. `json <root>...` emits the same facts as JSON.
-  Malformed frontmatter becomes an ERROR entry, never a crash. Its status semantics
+  Malformed frontmatter becomes an ERROR entry, never a crash. A git pin that is not a
+  40-hex commit SHA (with an optional `+dirty`) is an ERROR, and no git command gets it. Its status semantics
   agree exactly with `feynman-walkthrough`'s okf.py, without importing it.
 - `references/refresh-playbook.md` — the diff-aware refresh procedure the agent follows
   for STALE, UNKNOWN, and ERROR subjects.
@@ -102,5 +103,6 @@ make gate-skill SKILL=knowledge-gardener                 # everything CI checks
 
 ## Changes
 
+- **1.0.5.** Every git command that `garden.py` runs now carries `-c core.fsmonitor=false -c core.hooksPath=/dev/null`. A source repo can set `core.fsmonitor` to a command in its own config. That command no longer runs during `sweep`. A git pin that is not a 40-hex commit SHA (with an optional `+dirty`) is now an ERROR for that source. No git command gets that pin.
 - **1.0.4.** The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.0.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

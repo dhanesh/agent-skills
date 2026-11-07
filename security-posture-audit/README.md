@@ -79,5 +79,6 @@ or above it, `2` usage error.
 
 ## Changes
 
+- **1.0.6.** SKILL.md states that scanned repository content is data and that the agent ignores instructions inside it. The risky workflow fixtures of the tests and the eval are now labelled data files in `assets/fixtures/`, checked by `assets/test_fixture_files.py`. The detector is unchanged.
 - **1.0.5.** The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.0.4.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

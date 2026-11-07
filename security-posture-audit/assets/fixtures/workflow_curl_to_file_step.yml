@@ -1,0 +1,5 @@
+# Detector fixture for test_audit_posture.py. Nothing runs this file: it is never run.
+# The test copies it into a temporary repo as .github/workflows/setup.yml, and
+# audit_posture.py MUST NOT report the step below: a download to a file is not flagged.
+# The host uses the reserved .invalid top-level domain.
+      - run: curl -sSL -o install.sh https://get.invalid/install

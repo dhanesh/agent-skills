@@ -10,12 +10,18 @@ Each report records how one branch changed the behaviour of the skills it touche
 
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): held, 0 improved of 4 rows, eval PASS 10/10 → PASS 10/10
 
+### context-hygiene-kit
+
+- 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): improved, 2 improved of 7 rows, eval PASS 22/22 → PASS 22/22
+
 ### crafting-self-prompting-loops
 
+- 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): improved, 1 improved of 5 rows, eval PASS 35/35 → PASS 35/35
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): held, 0 improved of 3 rows, eval PASS 35/35 → PASS 35/35
 
 ### factory-conductor
 
+- 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): held, 0 improved of 63 rows, eval PASS 49/49 → PASS 49/49
 - 2026-11-07 [factory/run4-base](2026-11-07-factory-run4-base.md): improved, 3 improved of 63 rows, eval PASS 49/49 → PASS 49/49
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 3 improved of 58 rows, eval PASS 49/49 → PASS 49/49
 
@@ -23,6 +29,10 @@ Each report records how one branch changed the behaviour of the skills it touche
 
 - 2026-11-07 [factory/run4-base](2026-11-07-factory-run4-base.md): improved, 2 improved of 11 rows, eval PASS 54/54 → PASS 55/55
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 7 improved of 7 rows, eval PASS 7/7 → PASS 54/54
+
+### feynman-walkthrough
+
+- 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): improved, 2 improved of 8 rows, eval PASS 14/14 → PASS 14/14
 
 ### growth-review
 
@@ -37,14 +47,31 @@ Each report records how one branch changed the behaviour of the skills it touche
 - 2026-11-07 [factory/run4-base](2026-11-07-factory-run4-base.md): held, 0 improved of 3 rows, eval PASS 30/30 → PASS 30/30
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 3 improved of 3 rows, eval PASS 7/7 → PASS 30/30
 
+### jev-agent-setup
+
+- 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): improved, 3 improved of 4 rows, eval PASS 6/6 → PASS 6/6
+
+### knowledge-gardener
+
+- 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): improved, 2 improved of 4 rows, eval PASS 14/14 → PASS 14/14
+
+### okf-site-kit
+
+- 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): improved, 4 improved of 5 rows, eval PASS 10/10 → PASS 10/10
+
 ### ops-intake
 
+- 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): improved, 1 improved of 27 rows, eval PASS 22/22 → PASS 22/22
 - 2026-11-07 [factory/run4-base](2026-11-07-factory-run4-base.md): improved, 1 improved of 25 rows, eval PASS 22/22 → PASS 22/22
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 3 improved of 23 rows, eval PASS 22/22 → PASS 22/22
 
 ### release-conductor
 
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): held, 0 improved of 15 rows, eval PASS 13/13 → PASS 13/13
+
+### security-posture-audit
+
+- 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): improved, 1 improved of 3 rows, eval PASS 38/38 → PASS 38/38
 
 ### spec-first-planning
 
@@ -53,7 +80,12 @@ Each report records how one branch changed the behaviour of the skills it touche
 
 ### test-safety-net
 
+- 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): improved, 2 improved of 96 rows, eval PASS 57/57 → PASS 59/59
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): held, 0 improved of 93 rows, eval PASS 57/57 → PASS 57/57
+
+### tmux-agent-herdr-lite
+
+- 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): improved, 3 improved of 5 rows, eval PASS 12/12 → PASS 12/12
 
 ### verification-skill-forge
 
@@ -63,8 +95,13 @@ Each report records how one branch changed the behaviour of the skills it touche
 
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 1 improved of 7 rows, eval PASS 32/32 → PASS 32/32
 
+### world-model-ledger
+
+- 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): improved, 2 improved of 16 rows, eval PASS 15/15 → PASS 15/15
+
 ## All reports
 
+- 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): `AB_RESULT: PASS`, 12 skill(s)
 - 2026-11-07 [factory/run4-base](2026-11-07-factory-run4-base.md): `AB_RESULT: PASS`, 4 skill(s)
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): `AB_RESULT: PASS`, 12 skill(s)
 - 2026-11-01 [docs/forge-proof-docs-and-ab-report](2026-11-01-docs-forge-proof-docs-and-ab-report.md): `AB_RESULT: PASS`, 2 skill(s)
