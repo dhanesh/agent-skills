@@ -5,7 +5,7 @@ license: MIT
 compatibility: Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, for the installer; uv plus network and a TypeSafe API key when the jev CLI runs; macOS or Linux home-directory layout.
 metadata:
   author: dhanesh
-  version: "0.1.4"
+  version: "0.1.5"
   tags: "typesafe,jev,system-one,agent-setup,bcp14"
 ---
 
@@ -75,6 +75,12 @@ inline dependency is `typesafe-sdk>=0.7.5` with no upper bound. uv reads no `uv.
 latest SDK, so a skill update needs no pin change. The cost: uv also ignores the user's own uv
 config, and a new SDK release installs with no review. Tell the user this when they ask why
 their uv settings do not apply to `jev`.
+
+**Images and Box.** A `box` question (where in an image) and an `{"image": "<path>"}`
+placeholder go out only with `jev --images`. Without the flag, `jev` exits 2 before any call.
+The installed block lets an agent send only image files that the user chose. The log keeps
+each image as its path and sha256, never its bytes, and `jev log` shows a box answer's four
+edges and its confidence.
 
 ## Deliverable
 

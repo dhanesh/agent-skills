@@ -62,8 +62,8 @@ jev log --json -n 0 | jq .   # raw JSONL, all records
 jev log --projects      # every project with a log
 ```
 
-Each record shows Noul as a probability bar, Choice as label + confidence, and Score as
-value/max + confidence. The log contains exactly what was sent to TypeSafe. It is 0600 and
+Each record shows Noul as a probability bar, Choice as label + confidence, Score as
+value/max + confidence, and Box as its four edges + confidence. The log contains exactly what was sent to TypeSafe. It is 0600 and
 never rotated, so prune it the way you would any payload archive.
 
 ## How this differs from the `typesafe-ai` skill
@@ -102,10 +102,13 @@ TypeSafe API key from https://console.typesafe.ai/.
 - `SKILL.md` — the agent-facing prompt.
 - `assets/install_jev_setup.py` — the installer; `assets/jev` — the CLI;
   `assets/jev-instructions.md` — the managed block.
-- `assets/test_install_jev_setup.py` — stdlib test suite.
+- `assets/test_install_jev_setup.py`, `assets/test_jev_script.py`, `assets/test_jev_images.py`,
+  `assets/test_jev_instructions.py` — stdlib test suites.
 - `eval/run_eval.py` — deterministic outcome eval (see the repo's docs/eval-standard.md).
 
 ## Changes
 
+- **0.1.5.** `jev --images` sends Box questions and `{"image": "<path>"}` placeholders. Without the flag, such a request exits 2 before any call. The log keeps each image as its path and sha256, and `jev log` shows box answers. The instruction block has a Box row and a rule: images go out only with `--images` and only from files the user chose.
+- **0.1.4.** The `jev` shebang runs `uv run --no-config`, so a repo cannot choose the package index. The SDK dependency is `typesafe-sdk>=0.7.5` with no upper bound.
 - **0.1.3.** The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **0.1.2.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.
