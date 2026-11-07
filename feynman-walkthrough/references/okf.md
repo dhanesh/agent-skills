@@ -132,7 +132,7 @@ sources:
 
 ```bash
 python3 okf.py init "ingest pipeline" --root knowledge --source /path/to/repo
-python3 okf.py status ingest-pipeline --root knowledge   # FRESH / STALE / UNKNOWN per source
+python3 okf.py status ingest-pipeline --root knowledge   # FRESH / STALE / UNKNOWN / ERROR per source
 python3 okf.py diff ingest-pipeline --root knowledge     # pinned vs current + changed files
 python3 okf.py pin ingest-pipeline --root knowledge      # re-fingerprint after refreshing
 python3 okf.py list --root knowledge
@@ -140,8 +140,12 @@ python3 okf.py list --root knowledge
 
 Fingerprints: git sources pin `HEAD` (with a `+dirty` marker for uncommitted changes);
 files and directories pin a sha256; `external` sources (URLs, plain topics) can't be
-fingerprinted locally and report UNKNOWN. `status` exits non-zero when any source is
-STALE, so it works as a scriptable check. `diff` shows, per git source, the pinned and
+fingerprinted locally and report UNKNOWN. A git pin must be a 40-hex commit SHA, with
+an optional `+dirty` suffix. Any other value (for example a hand edit such as
+`--output=<path>`) makes that source ERROR: the tool passes the value to no git
+command, and `diff` prints an `ERROR:` line in place of `PINNED:` and `CURRENT:`.
+`status` exits non-zero when any source is STALE or ERROR, so it works as a scriptable
+check. `diff` exits non-zero only on ERROR. `diff` shows, per git source, the pinned and
 current fingerprints plus the `git diff --name-status <pinned>..HEAD` file list and any
 dirty files (non-git sources just print their status) — the one-command entry into the
 diff-aware refresh flow. `init` writes skeleton concepts — replace their placeholder
