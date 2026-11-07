@@ -301,7 +301,7 @@ def rewrite_links(body, current_dir, bundle, routes, unresolved):
     asset_set = set(bundle.assets)
 
     def resolve(target):
-        if re.match(r"^[a-z][a-z0-9+.-]*:", target) or target.startswith(
+        if re.match(r"^[a-z][a-z0-9+.-]*:", target, re.I) or target.startswith(
                 ("#", "//")):
             return None
         raw, _, frag = target.partition("#")
@@ -338,6 +338,185 @@ def rewrite_links(body, current_dir, bundle, routes, unresolved):
     for line, fenced in _outside_fences(body):
         out.append(line if fenced else LINK_RE.sub(sub, line))
     return "\n".join(out)
+
+
+# ── Body sanitising ──────────────────────────────────────────────────────────
+# Bundle bodies are lower-trust input, and the site keeps raw HTML in .md
+# (meta_panel depends on it). So sanitize_body makes a body inert before it
+# is written: a javascript:, vbscript: or data: link target (any letter case,
+# entities, backslash escapes or control characters inside) becomes `#`, and
+# every raw HTML tag start `<` becomes `&lt;`, so no tag, comment or event
+# handler from a body reaches the page as markup. Text renders the same.
+# Kept as is: fenced code blocks that CommonMark is sure to read as code,
+# http(s)/mailto/ftp and e-mail autolinks, and normal markdown links. An
+# inline code span that holds a `<` tag start is written as an escaped
+# <code> element, so it still shows the same text.
+
+UNSAFE_SCHEMES = ("javascript:", "vbscript:", "data:")
+ASCII_PUNCT = frozenset("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+TAG_START = re.compile(r"<\s*[A-Za-z/!?]")
+SAFE_AUTOLINK = re.compile(
+    r"<(?:(?:https?|mailto|ftp):[^\s<>]*"
+    r"|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9]"
+    r"(?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>", re.I)
+INLINE_DEST = re.compile(
+    r"(\]\(\s*)(<[^<>\n]*>|(?:[^\s()\\]|\\.|\((?:[^\s()\\]|\\.)*\))+)")
+REF_DEST = re.compile(r"(\]:[ \t]*\n?[ \t]*)(<[^<>\n]*>|\S+)")
+FENCE_OPEN = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
+
+
+def unsafe_url(target):
+    """True when a link target would run as a script-capable URL.
+
+    Decodes the way a markdown renderer and a browser do (entities,
+    backslash escapes, dropped whitespace and control characters), so
+    `JaVaScRiPt:`, `java&#9;script:` and a backslash before the colon
+    all count.
+    """
+    text = html.unescape(target)
+    text = re.sub(r"\\([!-/:-@\[-`{-~])", r"\1", text)
+    text = re.sub(r"[\x00-\x20\x7f]", "", text).lower()
+    return text.startswith(UNSAFE_SCHEMES)
+
+
+def _neutralize_links(text):
+    def inline(match):
+        dest = match.group(2)
+        if dest.startswith("<"):
+            inner = dest[1:-1]
+            if unsafe_url(inner):
+                return match.group(1) + "#"
+            # the <...> form would leave a raw `<`; keep the same URL bare
+            return match.group(1) + (inner.replace(" ", "%20")
+                                     .replace("(", "%28").replace(")", "%29"))
+        return match.group(1) + ("#" if unsafe_url(dest) else dest)
+
+    def ref(match):
+        dest = match.group(2)
+        inner = dest[1:-1] if dest.startswith("<") and dest.endswith(">") else dest
+        return match.group(1) + ("#" if unsafe_url(inner) else dest)
+
+    return REF_DEST.sub(ref, INLINE_DEST.sub(inline, text))
+
+
+def _code_element(content):
+    """An inline code span as an escaped <code> element (same text shown)."""
+    if (len(content) > 1 and content[0] == " " and content[-1] == " "
+            and content.strip()):
+        content = content[1:-1]
+    out = []
+    for ch in content:
+        if ch in "&<>":
+            out.append(html.escape(ch))
+        elif ch in ASCII_PUNCT:
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "<code>" + "".join(out) + "</code>"
+
+
+def _escape_html_line(line):
+    out, i, n = [], 0, len(line)
+    while i < n:
+        c = line[i]
+        if c == "\\" and i + 1 < n:
+            if TAG_START.match(line, i + 1):
+                out.append("&lt;")  # `\<` shows `<` too, as plain text
+                i += 2
+            elif line[i + 1] in ASCII_PUNCT:
+                out.append(line[i:i + 2])  # an escaped char, never a delimiter
+                i += 2
+            else:
+                out.append(c)
+                i += 1
+            continue
+        if c == "`":
+            m = i
+            while m < n and line[m] == "`":
+                m += 1
+            size, j, close = m - i, m, -1
+            while j < n:
+                if line[j] != "`":
+                    j += 1
+                    continue
+                k = j
+                while k < n and line[k] == "`":
+                    k += 1
+                if k - j == size:
+                    close = j
+                    break
+                j = k
+            if close < 0:
+                out.append(line[i:m])
+                i = m
+                continue
+            content = line[m:close]
+            out.append(_code_element(content) if TAG_START.search(content)
+                       else line[i:close + size])
+            i = close + size
+            continue
+        if c == "<":
+            auto = SAFE_AUTOLINK.match(line, i)
+            if auto:
+                out.append(auto.group(0))
+                i = auto.end()
+                continue
+            if TAG_START.match(line, i):
+                out.append("&lt;")
+                i += 1
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _fence_opener(line):
+    m = FENCE_OPEN.match(line)
+    if not m or (m.group(2)[0] == "`" and "`" in m.group(3)):
+        return None
+    return m
+
+
+def sanitize_body(body):
+    """Make a bundle body inert: no script-scheme link, raw tag or handler.
+
+    A fenced code block is kept word for word only when its opening fence
+    starts in column 0, because only then is it sure to be a top-level
+    fence. After a fence that is indented 1-3 spaces (it can belong to a
+    list item, and CommonMark then closes it early), nothing more is kept
+    raw: every later line is escaped. That costs at most some `&lt;` text
+    in code, never live markup.
+    """
+    lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    segments, plain, trusting, fence = [], [], True, None
+
+    def flush():
+        if plain:
+            text = _neutralize_links("\n".join(plain))
+            segments.extend(_escape_html_line(ln) for ln in text.split("\n"))
+            plain.clear()
+
+    for line in lines:
+        if fence is not None:
+            segments.append(line)
+            close = re.match(r"^ {0,3}(%s{%d,})[ \t]*$"
+                             % (re.escape(fence[0]), len(fence)), line)
+            if close:
+                fence = None
+            continue
+        opener = _fence_opener(line)
+        if opener and trusting and not opener.group(1):
+            flush()
+            fence = opener.group(2)
+            segments.append(opener.group(2)
+                            + opener.group(3).replace("<", "&lt;"))
+            continue
+        if opener:
+            trusting = False
+        plain.append(line)
+    flush()
+    return "\n".join(segments)
 
 
 def normalize_headings(body, title):
@@ -452,7 +631,7 @@ def concept_page(rel, meta, body, bundle, routes, unresolved):
              or humanize(os.path.basename(rel)))
     current_dir = os.path.dirname(rel).replace(os.sep, "/")
     body = rewrite_links(body, current_dir, bundle, routes, unresolved)
-    body = normalize_headings(body, title)
+    body = sanitize_body(normalize_headings(body, title))
     return (page_frontmatter(title, meta.get("description"))
             + "\n" + meta_panel(meta) + "\n\n" + body.strip() + "\n")
 
@@ -460,7 +639,7 @@ def concept_page(rel, meta, body, bundle, routes, unresolved):
 def index_page(rel_dir, body, bundle, routes, unresolved, title=None):
     title = title or first_h1(body) or humanize(os.path.basename(rel_dir) or "Overview")
     body = rewrite_links(body, rel_dir, bundle, routes, unresolved)
-    body = normalize_headings(body, title)
+    body = sanitize_body(normalize_headings(body, title))
     label = "Overview" if rel_dir else None
     return (page_frontmatter(title, sidebar_label=label)
             + "\n" + body.strip() + "\n")
@@ -469,7 +648,7 @@ def index_page(rel_dir, body, bundle, routes, unresolved, title=None):
 def synthetic_index(rel_dir, bundle, routes):
     """Directory listing for a directory that ships no index.md."""
     title = humanize(os.path.basename(rel_dir))
-    lines = [page_frontmatter(title, sidebar_label="Overview"), ""]
+    lines = []
     for rel in sorted(bundle.concepts):
         if os.path.dirname(rel).replace(os.sep, "/") == rel_dir:
             meta, body = bundle.concepts[rel]
@@ -485,12 +664,15 @@ def synthetic_index(rel_dir, bundle, routes):
         if d and os.path.dirname(d) == rel_dir and d != rel_dir:
             lines.append("* [%s](/%s/)" % (humanize(os.path.basename(d)),
                                            routes["dir:" + d]))
-    return "\n".join(lines) + "\n"
+    head = [page_frontmatter(title, sidebar_label="Overview"), ""]
+    if lines:
+        head.append(sanitize_body("\n".join(lines)))
+    return "\n".join(head) + "\n"
 
 
 def changelog_page(log_body, bundle, routes, unresolved):
     body = re.sub(r"^#\s+.*\n+", "", log_body, count=1)
-    body = rewrite_links(body, "", bundle, routes, unresolved)
+    body = sanitize_body(rewrite_links(body, "", bundle, routes, unresolved))
     return page_frontmatter("Changelog") + "\n" + body.strip() + "\n"
 
 

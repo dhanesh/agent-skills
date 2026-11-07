@@ -16,6 +16,13 @@ braces, angle brackets or a backslash lands in the homepage <LinkCard>
 attributes as one literal string. The test reads each attribute the way a
 JSX parser does: a quoted value ends at the next `"` (no backslash escapes)
 and a `{...}` value passes only when it holds one JSON string literal.
+
+BodyMarkupTest: a `javascript:`, `vbscript:` or `data:` link (any letter
+case), a raw `<script` tag or an `on*=` handler in a bundle body does not
+reach a generated .md page as live markup. The page scan uses the same
+four patterns as the okf-site-build feature entry. The hostile payloads
+are plain text in this file on purpose (they are the fixture, labelled
+HOSTILE_*): each one calls okfProbe, which does not exist.
 """
 from __future__ import annotations
 
@@ -208,6 +215,163 @@ class LinkCardAttributeTest(unittest.TestCase):
         line = '<LinkCard title={okfProbe()} href="/x/" description="d" />'
         _, problem = linkcard_attrs(line)
         self.assertIsNotNone(problem)
+
+
+# The live-markup patterns of the okf-site-build feature entry.
+LIVE_PATTERNS = {
+    "md-link-scheme": re.compile(r"\]\(\s*(javascript|vbscript|data):", re.I),
+    "href-scheme": re.compile(
+        r"""href\s*=\s*["']?\s*(javascript|vbscript|data):""", re.I),
+    "script-tag": re.compile(r"<\s*script", re.I),
+    "on-handler": re.compile(r"<[a-z][^>]*\son[a-z]+\s*=", re.I),
+}
+
+HOSTILE_LINKS = ("[js](javascript:okfProbe) [vb](vbscript:okfProbe) "
+                 "[mixed](JaVaScRiPt:okfProbe) [dt](data:text/html;base64,PHA+)")
+HOSTILE_HTML = ('<img src="x" onerror="okfProbe()">\n\n'
+                "<script>okfProbe()</script>\n\n"
+                '<div onclick="okfProbe()">click</div>')
+HOSTILE_LOG = ('* [js](javascript:okfProbe) <a href="#" onclick="okfProbe()">'
+               "c</a> <script>okfProbe()</script>")
+
+# Bodies that hide a payload from a naive per-line or per-link filter.
+HOSTILE_EVASIONS = {
+    "link-on-next-line": "[x](\njavascript:okfProbe())",
+    "leading-space": "[x](  javascript:okfProbe())",
+    "angle-dest": "[x](<javascript:okfProbe()>)",
+    "entity-tab": "[x](java&#9;script:okfProbe())",
+    "entity-colon": "[x](javascript&#58;okfProbe())",
+    "backslash-colon": "[x](javascript\\:okfProbe())",
+    "reference": "[x][r]\n\n[r]:\n  JAVASCRIPT:okfProbe()",
+    "reference-angle": "[x][r]\n\n[r]: <vbscript:okfProbe()>",
+    "autolink": "<javascript:okfProbe()>",
+    "backslash-tag": "\\<script>okfProbe()</script>",
+    "escaped-tick": "\\`<script>okfProbe()</script>`",
+    "tick-in-dest": "[a](x`) <img src=y onerror=okfProbe()>`",
+    "comment-end": "<!-- --!><img src=x onerror=okfProbe()> -->",
+    "tag-over-lines": "<img\nsrc=x\nonerror=okfProbe()>",
+    "crlf-fence": "```\r\n```\r\n<script>okfProbe()</script>\r\n",
+    # CommonMark closes the indented fence when the list item ends, so the
+    # second column-0 fence closes a new block and the script is live.
+    "list-fence": "- item\n  ```\n  code\n```\n```\n<script>okfProbe()</script>",
+    "tick-info": "```a`b\n<script>okfProbe()</script>",
+}
+
+TAG_OPEN = re.compile(r"<\s*[A-Za-z/!?]")
+OUR_TAGS = re.compile(r"</?code>|<(?:https?|mailto):[^\s<>]*>"
+                      r"|<[\w.+-]+@[\w.-]+>")
+LINK_DEST = re.compile(r"\]\(\s*<?([^\s)>]*)|\]:\s*<?(\S*)")
+
+
+def live_lines(text):
+    """Return the feature-entry pattern labels that match a page body."""
+    return [label for line in text.split("\n")
+            for label, pat in LIVE_PATTERNS.items() if pat.search(line)]
+
+
+def raw_tags(text):
+    """Every `<` tag start that is not a <code> element or a safe autolink."""
+    return TAG_OPEN.findall(OUR_TAGS.sub("", text))
+
+
+def script_links(text):
+    """Link targets that decode to a script-capable scheme."""
+    bad = []
+    for match in LINK_DEST.finditer(text):
+        target = html.unescape(match.group(1) or match.group(2) or "")
+        target = re.sub(r"\\(.)", r"\1", target)
+        target = re.sub(r"[\x00-\x20]", "", target).lower()
+        if target.startswith(("javascript:", "vbscript:", "data:")):
+            bad.append(target)
+    return bad
+
+
+def page_body(path):
+    with open(path, encoding="utf-8") as fh:
+        lines = fh.read().split("\n")
+    start = lines.index("---", 1) + 1 if lines[0] == "---" else 0
+    return "\n".join(lines[start:])
+
+
+class BodyMarkupTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="okf-hostile-body-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        bundle = os.path.join(self.tmp, "bundle")
+        write_file(os.path.join(bundle, "index.md"),
+                   '---\nokf_version: "0.1"\n---\n# Probe bundle\n\n'
+                   "A plain tagline.\n\n* [Guides](guides/) - guides\n\n"
+                   "Overview links: %s and %s\n" % (HOSTILE_LINKS, HOSTILE_HTML))
+        write_file(os.path.join(bundle, "log.md"),
+                   "# Log\n\n## 2026-11-07\n%s\n" % HOSTILE_LOG)
+        write_file(os.path.join(bundle, "guides", "intro.md"),
+                   "---\ntype: Guide\ntitle: Intro <b onclick=okfProbe()>x</b>\n"
+                   "---\n# Intro\n\nRead the [overview](../index.md).\n")
+        write_file(os.path.join(bundle, "evil.md"),
+                   "---\ntype: Concept\ntitle: Evil\n---\n# Evil\n\n"
+                   "Body links: %s\n\n%s\n\n"
+                   "Kept: [site](https://example.test/a) <https://example.test/b>"
+                   " `ARRAY<STRING>`\n\n"
+                   "```html\n<b>fenced code stays</b>\n```\n"
+                   % (HOSTILE_LINKS, HOSTILE_HTML))
+        self.site = os.path.join(self.tmp, "site")
+        self.log = io.StringIO()
+        code = okf_site.main(["generate", bundle, "--out", self.site],
+                             out=self.log)
+        self.assertEqual(code, 0)
+        self.docs = os.path.join(self.site, "src", "content", "docs")
+
+    def pages(self):
+        found = {}
+        for base, _, files in os.walk(self.docs):
+            for name in files:
+                if name.endswith(".md"):
+                    path = os.path.join(base, name)
+                    found[os.path.relpath(path, self.docs)] = page_body(path)
+        return found
+
+    def test_scan_finds_no_live_markup_in_any_page(self):
+        pages = self.pages()
+        self.assertEqual(
+            sorted(pages),
+            ["changelog.md", "evil.md", os.path.join("guides", "index.md"),
+             os.path.join("guides", "intro.md"), "overview.md"])
+        hits = {rel: live_lines(body.replace("```html\n<b>fenced code "
+                                             "stays</b>\n```", ""))
+                for rel, body in pages.items()}
+        self.assertEqual({k: v for k, v in hits.items() if v}, {})
+
+    def test_mixed_case_scheme_is_no_unresolved_link(self):
+        self.assertNotIn("JaVaScRiPt", self.log.getvalue())
+
+    def test_normal_markdown_still_renders(self):
+        evil = self.pages()["evil.md"]
+        self.assertIn("[site](https://example.test/a)", evil)
+        self.assertIn("<https://example.test/b>", evil)
+        self.assertIn("<code>ARRAY&lt;STRING&gt;</code>", evil)
+        self.assertIn("```html\n<b>fenced code stays</b>\n```", evil)
+        self.assertIn('&lt;div onclick="okfProbe()">click&lt;/div>', evil)
+        self.assertIn('<div class="okf-meta">', evil)
+        intro = self.pages()[os.path.join("guides", "intro.md")]
+        self.assertIn("[overview](/)", intro)
+
+    def test_every_evasion_is_made_inert(self):
+        for name, body in HOSTILE_EVASIONS.items():
+            with self.subTest(name):
+                self.assertTrue(raw_tags(body) or script_links(body), name)
+                out = okf_site.sanitize_body(body)
+                self.assertEqual(raw_tags(out), [], out)
+                self.assertEqual(script_links(out), [], out)
+                self.assertEqual(live_lines(out), [], out)
+
+    def test_scan_catches_the_pre_fix_page(self):
+        # Negative fixture: the body as it was copied before the fix.
+        body = "%s\n\n%s\n%s" % (HOSTILE_LINKS, HOSTILE_HTML, HOSTILE_LOG)
+        self.assertEqual(
+            sorted(set(live_lines(body))),
+            ["md-link-scheme", "on-handler", "script-tag"])
+        self.assertEqual(len(script_links(body)), 5)
+        self.assertTrue(raw_tags(body))
 
 
 if __name__ == "__main__":

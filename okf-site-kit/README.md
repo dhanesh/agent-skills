@@ -82,5 +82,6 @@ green (9 pages + search index), homepage and concept pages visually checked.
 
 ## Changes
 
+- **1.2.0.** Bundle content from a lower-trust author stays inert in the site. A bundle title or description goes into the homepage `<LinkCard>` as one JSX string. A body link with a `javascript:`, `vbscript:` or `data:` target becomes `#`. Raw HTML in a body is escaped, so it shows as text and cannot run a script. Fenced code at column 0, normal links and http(s) autolinks do not change. `references/bundle-variations.md` no longer links the blocklisted community site.
 - **1.1.5.** The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.1.4.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.
