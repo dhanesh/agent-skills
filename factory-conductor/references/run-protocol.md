@@ -41,7 +41,7 @@ An exit 3 does not always mean the run stopped. Read the lines: `STOP:` means it
 | `resume` | `STATUS: run=<id> last_event=<e> at=<t>`, then any `PARK: <task> worktree-missing\|budget_dispatches`, `READY: <ids>`, one `NEXT: <task> <action>` per in-flight task and `NEXT: run next`; or `STOP: <reason>` and `NEXT: run finish`; or `GATE: ASK`, `STOP: grant_ask` and `NEXT: run ask`; on a finished run, `FINISH: <envelope>` and `NEXT: run finish\|done` (or `run ask`) | 0, including a finished run; 3 stopped (now or before) or gate asks |
 | `watch` | exactly one line: `REENTRY: disabled`, `no-run`, `done`, `superseded`, `ask`, `waiting-human`, `live`, `not-stalled`, `exhausted`, `started <n> pid=<pid>` or `failed` | 0; 2 `failed` |
 | `reentry install\|uninstall\|status` | install: `REENTRY: installed every <n> min`, `REENTRY: disabled`, a `GATE: ASK` line, or `REENTRY: failed`; uninstall: `REENTRY: uninstalled` or `REENTRY: failed`; status: `REENTRY: timer <paths or crontab line\|none>`, `REENTRY: lease <json\|null>`, `REENTRY: count <n>`, `REENTRY: last <event json\|none>` | 0; 3 `disabled` or gate asks (install); 2 `failed`, or no run |
-| `finish [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]` | in a tiered plan first one `INTEGRATION: <fail\|flaky\|unavailable\|stale-mutant\|uncaught> <task> proof <feature>:C<n>` line per proof re-run that did not pass (see "finish"), then `INTEGRATION: pass <sha>`, `INTEGRATION: fail <task> <command>` lines or `INTEGRATION: skipped grant_ask`, `FINISH: <envelope>`, then `STOP: integration_red` or `STOP: grant_ask`, or any `GATE: ASK` or `REMOTE: pending push pr (run finish --retry-remote)` | 0 all done; 3 integration red or skipped, or a remote step asked, failed or is pending; 2 refused, including a run branch that moved since the integration re-run |
+| `finish [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]` | in a tiered plan first one `INTEGRATION: <fail\|flaky\|unavailable\|stale-mutant\|uncaught> <task> proof <feature>:C<n>` line per proof re-run that did not pass (see "finish"), then `INTEGRATION: pass <sha>`, `INTEGRATION: fail <task> <command>` lines or `INTEGRATION: skipped grant_ask`, `FINISH: <envelope>`, then `STOP: integration_red` or `STOP: grant_ask`, or any `GATE: ASK` or `REMOTE: pending push pr (run finish --retry-remote)`, or `PR: <n> <envelope>` when the PR command printed a PR URL | 0 all done; 3 integration red or skipped, or a remote step asked, failed or is pending; 2 refused, including a run branch that moved since the integration re-run |
 
 ### init
 
@@ -144,6 +144,14 @@ sha256 recorded at `init`; state.json is never the source of the commands. Then:
   clone of the worktree's head, checked out with no inherited config, attributes, hooks or
   filters, and removed afterwards;
 - a committed symlink whose target is absolute or leaves the tree fails the verify;
+- a `{skill_dir:<name>}` that resolves to a skill inside the checkout fails its step with
+  `skill-shadow` when a skill of the same frontmatter name is also installed outside the
+  checkout (`SKILL_CONTRACT_PATH`, the user's `~/.agents/skills` and `~/.claude/skills`, or
+  user-scope plugins). The step does not run. Its record carries `skill_shadow` (`skill`,
+  `path`) and its line ends with `(skill-shadow: <name> -> <path>)`. A writer cannot replace
+  a pinned checker this way. A project skill with no installed twin still resolves to the
+  checkout copy. finish's integration re-run applies the same rule and writes the reason to
+  stderr;
 - each command's process group is killed when it ends (timeout 600 s);
 - a commit made while the verify ran fails it;
 - the very commit a failed review rejected fails it before any command runs ("no new commit
@@ -341,12 +349,26 @@ done or the integration was red, and, for an integration skipped because the gra
   lets a run end.
 - **Pull request.** It gates `open_pr`, then runs `--pr-cmd`, by default
   `["gh","pr","create","--title","{title}","--base","{base_branch}","--body-file","{body_file}"]`.
+  The allowlist is `gh pr create` followed only by `--title {title}`, `--base {base_branch}`
+  and `--body-file {body_file}`, in any order, each one time at most. `gh` is the bare
+  program name, found on PATH. Any other program, option, `--opt=value` form, `--` or extra
+  argument exits 2 with a `--pr-cmd ...` message before any push or PR step. The conductor
+  checks the command again right before the PR step runs, on `--retry-remote` too. To stub
+  the PR step in a test, put a stub `gh` first on PATH.
   The conductor never pushes the base branch, so it must already be on the remote (`init`
   warns when `origin` has no copy of it).
   Placeholders are whole tokens: `{run_branch}`, `{base_branch}`, `{title}`, `{body_file}`. The
   body lists proven, parked and blocked tasks, the stop, the budget and the budget note. Every
   string from the plan, a reviewer or a parker sits inside an inline code span, so it cannot add
   headings, links, @mentions or closing keywords.
+- **The PR envelope.** When the PR command's output holds a URL of the form
+  `https://<host>/<owner>/<repo>/pull/<n>`, `finish` writes a second `run-result/v1` envelope
+  and prints `PR: <n> <path>`. Its payload is the first payload plus `pr: {"number": n}` and
+  `replaces: {id, path, sha256}`, which name the first envelope. Its `wasRevisionOf` names the
+  first envelope too. Its subjects and assertions are the first envelope's. The run state then
+  points at the new envelope, and keeps the old path as `superseded`. A later `finish`,
+  `finish --retry-remote` and `resume` print and read the new envelope. When the output has no
+  PR URL, there is no second envelope. `--retry-remote` after a failed PR step writes it once.
 - **Remote steps.** The first ASK or failure skips the rest and exits 3. An exit 3 with no
   `GATE:` line means the push or PR command itself failed: its stderr says why, and a
   `--retry-remote` loop will not fix it. A later plain `finish`
@@ -796,7 +818,7 @@ STATUS: T2 proven
 STATUS: T3 parked reason="verify_red_after_repairs"
 STATUS: budget {"max_dispatches": 12, "max_parallel": 2, "max_repairs_per_task": 1, "max_usd": 5, "wall_clock_min": 120} dispatches=6
 STATUS: budget max_tokens/max_usd recorded, not enforced (the runtime does not expose usage)
-$ conductor finish --pr-cmd '["echo","https://github.com/o/r/pull/7"]'
+$ conductor finish                                             (a stub gh first on PATH)
 INTEGRATION: pass 52bf22e3013fc203fb897c612f6f2e0a63907c41
 FINISH: <repo>/.skill-contract/envelopes/run-result-v1-20260922T211857Z-e57aa8.json
 $ conductor next                                               (exit 2)
@@ -806,7 +828,7 @@ run finished: <repo>/.skill-contract/envelopes/run-result-v1-20260922T211857Z-e5
 Six dispatches: three executors, one repair, two reviewers. `finish` first re-ran T1's and
 T2's checks on the merged run branch (its head is T2's merge commit), then pushed
 `52bf22e3013fc203fb897c612f6f2e0a63907c41:refs/heads/factory/add-greeting` (the verified head) to a local bare `origin` and
-ran the PR step, stubbed here with `echo`, each after its gate said COVERED. T3's worktree and
+ran the PR step, stubbed here with a `gh` first on PATH, each after its gate said COVERED. T3's worktree and
 branch `factory/add-greeting--T3` are kept for the human. A receiver checks the result:
 
 ```text

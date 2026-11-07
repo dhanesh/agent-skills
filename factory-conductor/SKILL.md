@@ -63,7 +63,7 @@ Every command below is `python3 "$SKILL_DIR/assets/conductor.py" <command> --roo
 written `conductor <command>` for short. Run it with Python 3.10 or newer. Each command prints
 one machine line per event (`RUN:`, `READY:`, `NEXT:`, `START:`, `VERIFY:`, `REVIEW:`,
 `EVIDENCE:`, `MERGE:`, `PARK:`, `GATE:`, `STOP:`, `INTEGRATION:`, `FINISH:`, `STATUS:`,
-`ASSURANCE:`, `TRAIL:`, `REENTRY:`, `USAGE:`, `PROBLEM:`, and
+`ASSURANCE:`, `TRAIL:`, `REENTRY:`, `USAGE:`, `PROBLEM:`, `PR:`, and
 `REMOTE: pending push pr (run finish --retry-remote)`) and exits **0** for OK, **3** when a
 human is needed, the run stopped, or a task was sent back or parked, and **2** when the step was
 refused or its input is invalid (usage errors exit 2 as well). One exit 2 is not a refusal,
@@ -154,7 +154,10 @@ Each step is one command. Read its output lines, not just the exit code.
    head. That run is the proof. A test command that exits 0 but whose runner reports that no
    test ran (cargo, go, unittest, jest/vitest, mocha; pytest already exits 5) fails its step,
    printed as `(ran no tests: …)`, because it proves nothing. An uncommitted change or a symlink that escapes the tree fails
-   it. `VERIFY: <task> pass <sha>` names the proven commit and moves the task to review.
+   it. A `{skill_dir:<name>}` that resolves to a skill committed in the checkout, while a skill
+   of the same frontmatter name is installed outside it, fails its step unrun, printed as
+   `(skill-shadow: <name> -> <path>)`: committed content cannot replace a pinned checker. A
+   project skill with no installed twin still resolves to the checkout copy. `VERIFY: <task> pass <sha>` names the proven commit and moves the task to review.
    `VERIFY: <task> fail` (exit 3) sends it back: resume the same executor with the failing
    `VERIFY:` lines and the output tails in `state.json` under
    `tasks.<task>.verify_runs[].stdout_tail` and `stderr_tail`, then verify again.
@@ -191,8 +194,12 @@ Each step is one command. Read its output lines, not just the exit code.
 10. **Finish.** `conductor finish` first gates `local_reversible` and re-runs every proven
    task's verify commands on the merged run branch (`INTEGRATION: pass <sha>`), then writes
    the `run-result/v1` envelope (`FINISH: <path>`), then gates `push_branch` and pushes exactly
-   that verified commit, then gates `open_pr` and opens the PR against the base branch. See
-   "Ending the run" below.
+   that verified commit, then gates `open_pr` and opens the PR against the base branch. When
+   the PR command prints a PR URL, it writes a second run-result that adds `pr: {"number": n}`
+   and names the envelope it replaces (`PR: <n> <path>`); later commands read that one. The
+   PR command is always `gh pr create` with only `--title {title}`, `--base {base_branch}`
+   and `--body-file {body_file}`: any other `--pr-cmd` exits 2 before any push or PR step.
+   See "Ending the run" below.
 
 **Reading any step's output.**
 
@@ -288,8 +295,10 @@ refuses (exit 2), and `init` starts a new run.
 the PR or edit code yourself, even when a gate asks, because only `conductor` checks the grant
 before each step and records it in the run's log. You MUST NOT pass a `--pr-cmd` or
 `--push-cmd` that does anything but push the run branch or open the PR, because the conductor runs it in place of
-the push or PR step the grant approved. They exist for stubs and for hosts without `gh`, so by
-default pass neither. You MUST NOT edit, delete or recreate
+the push or PR step the grant approved. They exist for stubs, so by default pass neither.
+`finish` refuses (exit 2) a `--pr-cmd` that is not `gh pr create` with only the default
+options, as it refuses a push outside its allowlist; to stub the PR, put a stub `gh` first on
+PATH. You MUST NOT edit, delete or recreate
 `state.json`, `autonomy-log.jsonl` or anything under `.skill-contract/`, because they are the
 run's record that `resume` and `finish` read back and the human audits; report a mismatch
 instead.

@@ -50,6 +50,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -329,6 +330,11 @@ SINCE_AUTONOMOUS_FACTORY = "ae91125"  # the autonomous factory, runs 2 and 3: th
 # after the wave-0 merge (df60b6c, #119), the run-2 spec. Every change of both runs
 # (spec-first-planning, ops-intake, growth-review, factory-conductor, verifier-installer,
 # factory-pipeline, incident-watch) comes after it. The runs merge with merge commits, so
+# the hash stays the same on the way into main.
+SINCE_RUN4 = "d3d3c50"  # the autonomous factory, run 4: its first commit, the run-4 spec
+# (incident probe stage, PR number, two audit fixes). The factory-pipeline incident-probe
+# stage, factory-conductor's PR number, skill-shadow refusal and PR-command allowlist, and
+# the ops-intake squash resolve all come after it. The run merges with a merge commit, so
 # the hash stays the same on the way into main.
 
 
@@ -6007,6 +6013,19 @@ _FC_AT_LEAST_TWO = ["{python}", "-c",
                     "import os,sys; sys.exit(0 if len(os.listdir('d')) >= 2 else 1)"]
 
 
+def _fc_gh_env(tmp):
+    """The environment for a conductor `finish` whose PR step must run on both arms: a stub
+    `gh` (exit 0, no PR URL) first on PATH, so the default PR command (`gh pr create ...`)
+    runs. The head conductor refuses any other --pr-cmd (D22); the baseline accepts both."""
+    d = os.path.join(tmp, "gh-bin")
+    os.makedirs(d, exist_ok=True)
+    gh = os.path.join(d, "gh")
+    with open(gh, "w") as f:
+        f.write('#!/bin/sh\n[ "$1 $2" = "pr create" ] || exit 9\necho "stub gh pr create"\n')
+    os.chmod(gh, 0o755)
+    return dict(os.environ, PATH=d + os.pathsep + os.environ.get("PATH", ""))
+
+
 def _fc_pair_pushed(tree, cmd):
     """1 when the tree's conductor pushes the run branch of a two-task run to a scratch
     bare origin, else 0. T1 and T2 are both started from the same run branch, each adds
@@ -6026,9 +6045,11 @@ def _fc_pair_pushed(tree, cmd):
         subprocess.run(["git", "-C", root, "remote", "add", "origin", origin], check=True,
                        capture_output=True)
 
+        env = _fc_gh_env(tmp)
+
         def run(*argv):
             return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
-                                  capture_output=True, text=True, timeout=300)
+                                  capture_output=True, text=True, timeout=300, env=env)
 
         run("init", "--plan", plan_env)
         wts = {}
@@ -6048,7 +6069,7 @@ def _fc_pair_pushed(tree, cmd):
         for tid in ("T1", "T2"):
             run("merge", tid)
         run("next")
-        run("finish", "--pr-cmd", json.dumps([sys.executable, "-c", "pass"]))
+        run("finish")
         return 1 if subprocess.run(["git", "--git-dir", origin, "rev-parse", "-q", "--verify",
                                     "refs/heads/factory/pair"],
                                    capture_output=True).returncode == 0 else 0
@@ -6062,9 +6083,9 @@ _FC_LOCAL = {"read_only": "auto", "local_reversible": "grant", "push_branch": "a
              "open_pr": "ask"}
 
 
-def _fc_one_proven(conductor, CC, root, cmd, policy, origin=None):
+def _fc_one_proven(conductor, CC, root, cmd, policy, origin=None, env=None):
     """A one-task run (T1 proven by `cmd`, its work t1.txt) driven until `next` stops it.
-    Returns (run, plan envelope path)."""
+    Returns (run, plan envelope path). env, when given, is the environment of every run."""
     plan_env = _fc_fixture(CC, root, {"T1": cmd}, policy)
     if origin:
         subprocess.run(["git", "init", "-q", "--bare", origin], check=True, capture_output=True)
@@ -6073,7 +6094,7 @@ def _fc_one_proven(conductor, CC, root, cmd, policy, origin=None):
 
     def run(*argv):
         return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
-                              capture_output=True, text=True, timeout=300)
+                              capture_output=True, text=True, timeout=300, env=env)
 
     run("init", "--plan", plan_env)
     _fc_drive(run, ["T1"])
@@ -6093,8 +6114,8 @@ def _fc_moved_head_pushed(tree, move):
     root, origin = os.path.join(tmp, "repo"), os.path.join(tmp, "origin.git")
     try:
         run, plan_env = _fc_one_proven(conductor, CC, root, ["test", "-f", "t1.txt"],
-                                       _FC_LOCAL, origin=origin)
-        run("finish", "--pr-cmd", json.dumps([sys.executable, "-c", "pass"]))
+                                       _FC_LOCAL, origin=origin, env=_fc_gh_env(tmp))
+        run("finish")
         checked = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True,
                                  text=True).stdout.strip()
         if move:
@@ -6105,7 +6126,7 @@ def _fc_moved_head_pushed(tree, move):
             subprocess.run(["git", "-C", root, "commit", "-q", "-m", "late"], check=True,
                            capture_output=True, env=_FC_GENV)
         _fc_write_grant(CC, root, plan_env, _FC_FULL, after=2)
-        run("finish", "--retry-remote", "--pr-cmd", json.dumps([sys.executable, "-c", "pass"]))
+        run("finish", "--retry-remote")
         r = subprocess.run(["git", "--git-dir", origin, "rev-parse", "-q", "--verify",
                             "refs/heads/factory/pair"], capture_output=True, text=True)
         if r.returncode != 0:
@@ -10750,7 +10771,9 @@ def fixture(label, grant=True):
     pid = os.path.basename(K.pipeline_grant(repo))[:-len(".json")] if grant else None
     return repo, K.stubs(os.path.join(tmp, label, "skills")), pid
 def stages(text):
-    return [ln.split()[1] for ln in text.splitlines() if ln.startswith("STAGE: ")]
+    # The incident-probe stage (run 4) is new; drop it, so both arms compare one order.
+    return [ln.split()[1] for ln in text.splitlines()
+            if ln.startswith("STAGE: ") and ln.split()[1:2] != ["incident-probe"]]
 def task_plans(repo):
     d = os.path.join(repo, ".skill-contract", "envelopes")
     return [n for n in (os.listdir(d) if os.path.isdir(d) else [])
@@ -10956,6 +10979,356 @@ def check_af_incident_watch(old, new):
             "0 -> 1", since=SINCE_AUTONOMOUS_FACTORY)
 
 
+# ── the autonomous factory, run 4 ───────────────────────────────────────────
+# The tick probe: the tree's own pipeline, its pipeline and incident-watch testkits, a stub
+# skills dir with the tree's REAL incident-watch and ops-intake copied in, and a recipe
+# whose health probe fails. Both arms run the same fixture.
+_R4_FP_PROBE = r"""
+import shutil, subprocess
+import pipeline_testkit as K
+HERE = sys.path[0]
+SKILLS = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, os.path.join(SKILLS, "incident-watch", "assets"))
+import incident_testkit as IK
+TOOL = os.path.join(HERE, "pipeline.py")
+INTAKE_FILES = ("intake.py", "adapters.py", "contract_check.py", "intake_sweep.py")
+tmp = tempfile.mkdtemp()
+env = dict(os.environ, FACTORY_CONDUCTOR_TIMER_DRYRUN="1",
+           FACTORY_CONDUCTOR_TIMER_HOME=os.path.join(tmp, "timer-home"))
+for k in ("SKILL_CONTRACT_PATH", "FACTORY_PIPELINE_SKILLS"):
+    env.pop(k, None)
+def fixture(label):
+    repo = os.path.join(tmp, label, "repo")
+    os.makedirs(repo)
+    IK.fixture(repo)
+    sk = K.stubs(os.path.join(tmp, label, "skills"))
+    K.release_stub(sk)
+    d = os.path.join(sk, "incident-watch", "assets")
+    os.makedirs(d, exist_ok=True)
+    shutil.copyfile(os.path.join(SKILLS, "incident-watch", "SKILL.md"),
+                    os.path.join(sk, "incident-watch", "SKILL.md"))
+    shutil.copyfile(os.path.join(SKILLS, "incident-watch", "assets", "incident.py"),
+                    os.path.join(d, "incident.py"))
+    d = os.path.join(sk, "ops-intake")
+    shutil.rmtree(d, True)
+    os.makedirs(os.path.join(d, "assets"))
+    shutil.copyfile(os.path.join(SKILLS, "ops-intake", "SKILL.md"), os.path.join(d, "SKILL.md"))
+    for name in INTAKE_FILES:
+        shutil.copyfile(os.path.join(SKILLS, "ops-intake", "assets", name),
+                        os.path.join(d, "assets", name))
+    shutil.copytree(os.path.join(SKILLS, "ops-intake", "assets", "schemas"),
+                    os.path.join(d, "assets", "schemas"))
+    os.makedirs(os.path.join(repo, ".intake"), exist_ok=True)
+    with open(os.path.join(repo, ".intake", "config.json"), "w", encoding="utf-8") as f:
+        json.dump({"sources": {"incident-watch": {"enabled": True,
+                                                  "formats": ["intake-signals-jsonl"]}}}, f)
+    K.pipeline_grant(repo)
+    return repo, sk
+def tick(repo, sk):
+    return subprocess.run([sys.executable, TOOL, "--root", repo, "--skills-dir", sk, "tick"],
+                          capture_output=True, text=True, timeout=180,
+                          stdin=subprocess.DEVNULL, env=env)
+def probe_records(repo):
+    path = os.path.join(repo, ".skill-contract", "incidents", "probes.jsonl")
+    if not os.path.isfile(path):
+        return 0
+    with open(path, encoding="utf-8") as f:
+        return sum(1 for ln in f if ln.strip())
+def incident_items(repo):
+    path = os.path.join(repo, ".skill-contract", "intake", "queue.json")
+    if not os.path.isfile(path):
+        return 0
+    with open(path, encoding="utf-8") as f:
+        q = json.load(f)
+    items = q["items"].values() if isinstance(q.get("items"), dict) else q.get("items", [])
+    return sum(1 for i in items if i.get("source") == "incident-watch"
+               and i.get("kind") == "incident")
+out = {}
+try:
+    repo, sk = fixture("fail")
+    IK.behave(repo, "health", 1)
+    first = tick(repo, sk)
+    out["probes"] = probe_records(repo)
+    second = tick(repo, sk)
+    out["imported"] = incident_items(repo)
+    out["ticks_ok"] = int(first.returncode == 0 and second.returncode == 0)
+    # Never a rollback, a deploy or any recipe command other than the probes (S1).
+    out["non_probe"] = sum(1 for n in IK.ran(repo) if n in IK.NON_PROBE)
+    repo, sk = fixture("no-recipe")
+    os.remove(os.path.join(repo, ".release", "recipe.json"))
+    cp = tick(repo, sk)
+    out["no_recipe_calls"] = len(IK.calls(repo))
+    out["no_recipe_ok"] = int(cp.returncode == 0)
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+print(json.dumps(out))
+"""
+
+
+def check_run4_factory_pipeline(old, new):
+    a = probe(old, "factory-pipeline/assets", _R4_FP_PROBE)
+    b = probe(new, "factory-pipeline/assets", _R4_FP_PROBE)
+    if _errored(a, b):
+        return
+    s = "factory-pipeline (incident-probe)"
+    row(s, "probe records after one tick with a recipe (higher=better)",
+        a.get("probes"), b.get("probes"),
+        a.get("probes") == 0 and b.get("probes") == 1 and b.get("ticks_ok") == 1,
+        "a .release/recipe.json whose health probe fails: the tick runs `incident probe` "
+        "once, right after sweep, and it logs one probe record. The baseline tick has no "
+        "incident-probe stage", since=SINCE_RUN4)
+    row(s, "incident items in the intake queue after two failing ticks (higher=better)",
+        a.get("imported"), b.get("imported"),
+        a.get("imported") == 0 and b.get("imported") == 1,
+        "the second failing probe opens an incident, and the same tick imports it into "
+        "the real ops-intake (the owner's .intake/config.json enables the incident-watch "
+        "source): one item of kind incident", since=SINCE_RUN4)
+    row(s, "rollback, deploy and other non-probe recipe commands run (lower=better)",
+        a.get("non_probe"), b.get("non_probe"), a.get("non_probe") == b.get("non_probe") == 0,
+        "the stage runs only the recipe's probes, never a rollback or a deploy (S1)",
+        kind="guard")
+    row(s, "recipe commands a tick runs with no .release/recipe.json",
+        a.get("no_recipe_calls"), b.get("no_recipe_calls"),
+        a.get("no_recipe_calls") == b.get("no_recipe_calls") == 0
+        and a.get("no_recipe_ok") == b.get("no_recipe_ok") == 1,
+        "with no recipe the stage prints a skip line and the tick still exits 0",
+        kind="guard")
+
+
+def _r4_gh_env(tmp, url):
+    """A stub `gh` first on PATH that logs each call and exits 9 unless called as
+    `gh pr create ...`. With url it prints the PR URL https://github.com/acme/widgets/
+    pull/42, as gh does; without, a line with no PR URL. Returns (env, calls log)."""
+    d = os.path.join(tmp, "gh-bin")
+    os.makedirs(d, exist_ok=True)
+    log = os.path.join(d, "calls.log")
+    gh = os.path.join(d, "gh")
+    with open(gh, "w") as f:
+        f.write('#!/bin/sh\necho "$*" >> %s\n[ "$1 $2" = "pr create" ] || exit 9\n'
+                'echo "Creating pull request"\necho "%s"\n'
+                % (shlex.quote(log), "https://github.com/acme/widgets/pull/42" if url
+                   else "pull request queued"))
+    os.chmod(gh, 0o755)
+    return dict(os.environ, PATH=d + os.pathsep + os.environ.get("PATH", "")), log
+
+
+def _r4_calls(log):
+    if not os.path.isfile(log):
+        return 0
+    with open(log) as f:
+        return sum(1 for ln in f if ln.strip())
+
+
+def _r4_run_results(CC, root):
+    """The payloads of the run-result envelopes under root."""
+    d = os.path.join(root, ".skill-contract", "envelopes")
+    out = []
+    for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        try:
+            with open(os.path.join(d, name), encoding="utf-8") as f:
+                doc = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if doc.get("predicateType", "").endswith("/skill-contract/run-result/v1"):
+            out.append(doc["predicate"]["payload"])
+    return out
+
+
+def _r4_pushed(origin):
+    return subprocess.run(["git", "--git-dir", origin, "rev-parse", "-q", "--verify",
+                           "refs/heads/factory/p"], capture_output=True).returncode == 0
+
+
+def _r4_finish(tree, pr_cmd=None, url=True):
+    """A one-task run, proven and merged, then `finish` under a grant that covers the push
+    and the PR, with a stub gh first on PATH and a scratch bare origin. Returns a dict:
+    rc, gh calls, pushed (0/1), and pr_numbered: the run-result envelopes whose payload
+    names pr {number: 42}. None when the tree has no conductor."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return None
+    tmp = tempfile.mkdtemp()
+    root, origin = os.path.join(tmp, "repo"), os.path.join(tmp, "origin.git")
+    try:
+        env, log = _r4_gh_env(tmp, url)
+        run, _plan = _fc_one_proven(conductor, CC, root, ["test", "-f", "t1.txt"], _FC_FULL,
+                                    origin=origin, env=env)
+        argv = ["finish"] + (["--pr-cmd", json.dumps(pr_cmd)] if pr_cmd else [])
+        r = run(*argv)
+        payloads = _r4_run_results(CC, root)
+        return {"rc": r.returncode, "calls": _r4_calls(log), "pushed": int(_r4_pushed(origin)),
+                "results": len(payloads),
+                "pr_numbered": sum(1 for p in payloads if p.get("pr") == {"number": 42})}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _r4_shadow(tree, installed):
+    """verify on a task whose pinned check is {skill_dir:zz-ab-shadow}/check.py, after the
+    writer commits a project skill of that name. With `installed`, a skill of the same name
+    also sits outside the checkout (HOME/.agents/skills). Returns (verify rc, the committed
+    stub ran 0/1, "skill-shadow" printed 0/1), or None when the tree has no conductor."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return None
+    name = "zz-ab-shadow"
+    tmp = tempfile.mkdtemp()
+    root, home = os.path.join(tmp, "repo"), os.path.join(tmp, "home")
+    marker = os.path.join(tmp, "stub-ran")
+
+    def skill(d, body):
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "SKILL.md"), "w") as f:
+            f.write("---\nname: %s\ndescription: d\n---\nbody\n" % name)
+        with open(os.path.join(d, "check.py"), "w") as f:
+            f.write(body)
+    try:
+        os.makedirs(home)
+        env = {k: v for k, v in os.environ.items() if k != "SKILL_CONTRACT_PATH"}
+        env["HOME"] = home
+        if installed:
+            skill(os.path.join(home, ".agents", "skills", name), "print('installed')\n")
+        plan_env = _fc_fixture(CC, root, {"T1": ["{python}",
+                                                 "{skill_dir:%s}/check.py" % name]},
+                               {"local_reversible": "grant"})
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=300, env=env)
+        run("init", "--plan", plan_env)
+        wt = None
+        for line in run("start", "T1").stdout.splitlines():
+            if line.startswith("START: T1 "):
+                wt = line.split(" ", 2)[2].strip()
+        if not wt or not os.path.isdir(wt):
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "skill-shadow probe: start T1 gave no worktree"))
+            return None
+        skill(os.path.join(wt, ".agents", "skills", "zz"),
+              "open(%r, 'w').write('ran')\n" % marker)
+        subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "work"], check=True,
+                       capture_output=True, env=dict(env, **{k: _FC_GENV[k] for k in (
+                           "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME",
+                           "GIT_COMMITTER_EMAIL")}))
+        v = run("verify", "T1")
+        return v.returncode, int(os.path.exists(marker)), int("skill-shadow" in v.stdout)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def check_run4_factory_conductor(old, new):
+    a, b = _r4_finish(old), _r4_finish(new)
+    if a is None or b is None:
+        PROBE_ERRORS.append((new, "factory-conductor/assets/conductor.py",
+                             "pr-number probe: a tree has no conductor (%r -> %r)" % (a, b)))
+        return
+    row("factory-conductor (pr-number)",
+        "run-results naming pr {number: 42} after gh prints the PR URL (higher=better)",
+        a["pr_numbered"], b["pr_numbered"],
+        a["pr_numbered"] == 0 and b["pr_numbered"] == 1 and b["rc"] == 0
+        and b["results"] == 2 and b["calls"] == 1,
+        "the default `gh pr create ...` through a stub gh that prints .../pull/42: finish "
+        "writes a second run-result with pr {number: 42}; the baseline writes only the "
+        "first, with no pr", since=SINCE_RUN4)
+    a, b = _r4_finish(old, url=False), _r4_finish(new, url=False)
+    if a is None or b is None:
+        return
+    row("factory-conductor (pr-number)", "run-results when gh prints no PR URL",
+        a["results"], b["results"],
+        a["results"] == b["results"] == 1 and a["rc"] == b["rc"] == 0,
+        "a PR command whose output has no PR URL gives no second envelope (D18)",
+        kind="guard")
+
+    bad = ["gh", "pr", "create", "--title", "{title}", "--base", "{base_branch}",
+           "--body-file", "{body_file}", "--repo", "evil/repo"]
+    a, b = _r4_finish(old, pr_cmd=bad), _r4_finish(new, pr_cmd=bad)
+    if a is None or b is None:
+        return
+    ra = int(a["rc"] == 2 and a["calls"] == 0 and not a["pushed"])
+    rb = int(b["rc"] == 2 and b["calls"] == 0 and not b["pushed"])
+    row("factory-conductor (pr-cmd allowlist)",
+        "--pr-cmd with an extra --repo option refused before any push or gh call (1=right)",
+        ra, rb, ra == 0 and rb == 1,
+        "the default PR command plus `--repo evil/repo`, a stub gh first on PATH: finish "
+        "exits 2, nothing is pushed and gh never runs. The baseline pushes and runs it "
+        "(old: rc=%s gh calls=%s pushed=%s)" % (a["rc"], a["calls"], a["pushed"]),
+        since=SINCE_RUN4)
+
+    a, b = _r4_shadow(old, True), _r4_shadow(new, True)
+    if a is None or b is None:
+        return
+    ra = int(a[0] == 3 and a[1] == 0 and a[2] == 1)
+    rb = int(b[0] == 3 and b[1] == 0 and b[2] == 1)
+    row("factory-conductor (skill-shadow)",
+        "verify fails a committed skill that shadows an installed one, unrun (1=right)",
+        ra, rb, ra == 0 and rb == 1,
+        "the writer commits .agents/skills/zz naming zz-ab-shadow, also installed under "
+        "HOME/.agents/skills: verify exits 3 with skill-shadow and the committed check never "
+        "runs (old: rc=%s ran=%s)" % (a[0], a[1]), since=SINCE_RUN4)
+    a, b = _r4_shadow(old, False), _r4_shadow(new, False)
+    if a is None or b is None:
+        return
+    row("factory-conductor (skill-shadow)",
+        "a project skill with no installed twin still runs and passes (rc, ran)",
+        "%s,%s" % a[:2], "%s,%s" % b[:2], a[:2] == b[:2] == (0, 1),
+        "D21: a project-only skill resolves to the checkout copy, as before", kind="guard")
+
+
+# ops-intake: the head's end-to-end squash test drives the flow (pick, plan, grant,
+# conductor finish with a stub gh that prints .../pull/42, a squash merge on the hosting
+# side, a release-result, intake sync) through the TREE's own tools: its module paths are
+# pointed at the tree before the flow runs, so both arms run the same fixture.
+_R4_OI_PROBE = r"""
+import importlib.util, io, unittest
+import contract_check  # the tree's own copy, cached before the driver imports it
+HERE = sys.path[0]
+SKILLS = os.path.dirname(os.path.dirname(HERE))
+spec = importlib.util.spec_from_file_location("r4_squash_e2e", %r)
+M = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(M)
+M.INTAKE = os.path.join(HERE, "intake.py")
+M.PLANNING = os.path.join(SKILLS, "spec-first-planning", "assets")
+M.CONDUCTOR = os.path.join(SKILLS, "factory-conductor", "assets", "conductor.py")
+M.RELEASE_DIR = os.path.join(SKILLS, "release-conductor", "assets")
+out = {}
+for mode in ("url", "none"):
+    t = M.SquashEndToEnd("test_a_squash_merge_of_the_runs_pr_resolves_with_no_resolve")
+    try:
+        t.setUp()
+        iid, _sync = t.flow(mode)
+        out[mode] = t.item(iid)
+        out[mode + "_owner_resolve"] = int("resolve" in [a[0] for a in t.intake_argvs])
+    finally:
+        t.doCleanups()
+print(json.dumps(out))
+"""
+
+
+def check_run4_ops_intake(old, new):
+    driver = os.path.join(REPO, "ops-intake", "assets", "test_intake_squash_e2e.py")
+    if not os.path.isfile(driver):
+        PROBE_ERRORS.append((new, "ops-intake/assets/test_intake_squash_e2e.py",
+                             "the tree under review has no squash end-to-end driver"))
+        return
+    code = _R4_OI_PROBE % driver
+    a = probe(old, "ops-intake/assets", code)
+    b = probe(new, "ops-intake/assets", code)
+    if _errored(a, b):
+        return
+    row("ops-intake", "squash-merged item after conductor finish + intake sync (resolved=right)",
+        a.get("url"), b.get("url"),
+        a.get("url") == "planned+needs-resolve" and b.get("url") == "resolved"
+        and a.get("url_owner_resolve") == b.get("url_owner_resolve") == 0,
+        "the real flow: pick, plan, conductor finish with a stub gh that prints .../pull/42, "
+        "a squash merge with subject `(#42)`, a release-result, sync. The head conductor's "
+        "second run-result names the PR, so sync resolves the item with no owner `resolve`",
+        since=SINCE_RUN4)
+    row("ops-intake", "the same flow when gh prints no PR URL", a.get("none"), b.get("none"),
+        a.get("none") == b.get("none") == "planned+needs-resolve",
+        "no PR number, so the item still needs the owner's resolve (D20)", kind="guard")
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -11078,6 +11451,9 @@ def main():
         check_af_verifier_installer(old, REPO)
         check_af_factory_pipeline(old, REPO)
         check_af_incident_watch(old, REPO)
+        check_run4_factory_pipeline(old, REPO)
+        check_run4_factory_conductor(old, REPO)
+        check_run4_ops_intake(old, REPO)
         if report_dir:
             # The evals need the baseline tree, so they run before it is removed.
             import ab_report

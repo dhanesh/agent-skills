@@ -1,10 +1,10 @@
 # factory-pipeline
 
-**Status: built.** `pipeline tick` ships with all nine stages.
+**Status: built.** `pipeline tick` ships with all ten stages.
 
 This skill is the scheduled driver of the software factory. One `pipeline tick` runs each
-factory stage in order: sweep, growth review, idea follow-up, autopick, plan, derive
-grant, build, release stage and digest. It prints one `STAGE: <name> <result>` line for
+factory stage in order: sweep, incident probe, growth review, idea follow-up, autopick,
+plan, derive grant, build, release stage and digest. It prints one `STAGE: <name> <result>` line for
 each stage. Each stage calls the tool of the skill that owns it. The tick uses no shell.
 
 What runs today:
@@ -28,6 +28,14 @@ What runs today:
   `.skill-contract/pipeline/cap-stops.jsonl` and skips the stages that the cap gates. A count that it cannot
   make is also a stop. The stages that only read, sweep or report still run.
 - `sweep` runs ops-intake `intake sweep`.
+- `incident-probe` runs incident-watch `incident probe` once, when `.release/recipe.json`
+  exists. The stage line names the probe result, for example
+  `STAGE: incident-probe ok probe=pass commands=4 failed=0`. With no recipe, it runs
+  nothing and prints `STAGE: incident-probe skip no-recipe`. The probe runs only the
+  recipe's read-only probes. It never runs a rollback, a deploy or another recipe command.
+  When the probe opens an incident record, the stage imports the record's signal into
+  the queue in the same tick, with ops-intake `intake import --format intake-signals-jsonl
+  --source incident-watch`. The stage line then ends `incident=opened import=ok`.
 - `growth-review` runs growth-review `growth auto` and imports its breaches with ops-intake
   `intake import`.
 - `autopick` runs ops-intake `intake autopick`.
@@ -111,6 +119,7 @@ flowchart LR
     out_factory_conductor["factory-conductor"]
     out_growth_review["growth-review"]
     out_idea_validation["idea-validation"]
+    out_incident_watch["incident-watch"]
     out_ops_intake["ops-intake"]
     out_release_conductor["release-conductor"]
     out_spec_first_planning["spec-first-planning"]
@@ -118,7 +127,8 @@ flowchart LR
   self_factory_pipeline -->|"when: a tick has an unbuilt grant, or at schedule install<br/>why: conductor init starts one run per tick, its timer runs the tick"| out_factory_conductor
   self_factory_pipeline -->|"when: each tick, after the sweep<br/>why: its breaches go into the intake queue"| out_growth_review
   self_factory_pipeline -->|"when: each tick, before autopick<br/>why: it lists ideas due or expired and plans each go idea once"| out_idea_validation
-  self_factory_pipeline -->|"when: each tick, after the grant check<br/>why: it sweeps sources, imports breaches and picks queue items"| out_ops_intake
+  self_factory_pipeline -->|"when: each tick, right after the sweep, when a recipe exists<br/>why: its read-only probes find an incident, and the tick queues it"| out_incident_watch
+  self_factory_pipeline -->|"when: each tick, after the grant check<br/>why: it sweeps, imports breaches and new incidents, picks queue items"| out_ops_intake
   self_factory_pipeline -->|"when: a prepped release is merged and its release grant is live<br/>why: release stage starts once, under the owner's release grant"| out_release_conductor
   self_factory_pipeline -->|"when: before any stage, and for each plan<br/>why: it checks the grant, drafts and checks specs, derives plan grants"| out_spec_first_planning
   classDef self stroke-width:4px,font-weight:bold

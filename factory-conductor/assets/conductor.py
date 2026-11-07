@@ -188,14 +188,21 @@ url.<x>.insteadOf cannot turn it into an ext:: command. Like every conductor git
 (spec section 7a), so the user's own pre-push hooks do NOT run.
 Then `gate open_pr`, and on COVERED the --pr-cmd (default: gh pr create --title <plan
 title> --base <base branch> --body-file <tmp>), the body built from the payload with all
-plan, park and review text inside inline code spans. The commands are JSON argv lists; a
+plan, park and review text inside inline code spans. The --pr-cmd is allowlisted like the
+push (pr_cmd_problem): `gh pr create` with only --title {title}, --base {base_branch} and
+--body-file {body_file}, each at most once; anything else exits 2 before any remote step,
+and it is checked again right before the PR step runs. The commands are JSON argv lists; a
 token that is exactly {run_branch}, {base_branch}, {title} or {body_file} is replaced.
 The first ASK prints GATE: ASK, skips the rest and exits 3 (the run's recorded stop is
 left as it was); a failed step exits 3 too. Completed steps are recorded (finished.pushed,
 finished.pr, with the envelope's sha256: --retry-remote refuses, exit 2, an envelope
 that changed since). A later `finish` prints the same FINISH: line; while a step is pending it
 also prints REMOTE: pending push|pr and exits 3, and `finish --retry-remote` re-gates and
-runs just the pending steps. The push sends <integration head>:refs/heads/<rb>, and
+runs just the pending steps. When the PR command's output holds a URL
+https://<host>/<owner>/<repo>/pull/<n>, finish writes a second run-result envelope (a
+revision of the first: payload plus pr {number} and replaces {id, path, sha256}), prints
+PR: <n> <path>, and records it as finished.envelope (the old path as finished.superseded),
+so later commands read it; no URL, no second envelope. The push sends <integration head>:refs/heads/<rb>, and
 refuses (exit 2) when the run branch has moved since the integration re-run verified it.
 Once finished, next, start, verify, review, merge, park and decision refuse with exit 2
 ("run finished"); resume prints FINISH: and NEXT: run finish (a remote step is pending:
@@ -2446,13 +2453,23 @@ def _run_steps(task, steps, checkout, quiet=False):
     (none when quiet: finish's integration re-run prints its own INTEGRATION: lines)."""
     python_argv = CC.resolve_python()
     skill_dirs = CC.skill_index(cwd=checkout)  # the task's own copy of a project skill
+    installed = None  # names of skills outside the checkout, read on first need
     runs = []
     for v in steps:
         cmd = v["command"]
+        shadow = None
         if not isinstance(cmd, list) or not cmd or not all(isinstance(a, str) for a in cmd):
             rc, out, err, argv = (None, "", "command is not a non-empty list of strings: %r"
                                   % (cmd,), cmd)
         else:
+            if installed is None:
+                installed = _installed_skill_names(checkout)
+            shadow = _skill_shadow(cmd, skill_dirs, checkout, installed)
+        if shadow:
+            # A committed skill claims the name of one installed outside the checkout:
+            # its copy would run as the pinned check, so the step fails unrun (S2, D21).
+            rc, out, err, argv = None, "", "skill-shadow: %s -> %s" % shadow, cmd
+        elif isinstance(cmd, list) and cmd and all(isinstance(a, str) for a in cmd):
             try:
                 argv = CC.resolve_command(cmd, python_argv, skill_dirs)
             except LookupError as e:
@@ -2467,11 +2484,47 @@ def _run_steps(task, steps, checkout, quiet=False):
             # Exit 0, but nothing was tested: the step proves nothing, so it fails.
             ok = False
             record["no_tests"] = empty
+        if shadow:
+            record["skill_shadow"] = {"skill": shadow[0], "path": shadow[1]}
         runs.append(record)
-        if not quiet:
-            print("VERIFY: %s %s %s%s" % (task, "ok" if ok else "fail", _shown(argv),
-                                         " (ran no tests: %s)" % empty if empty else ""))
+        if quiet:
+            if shadow:
+                sys.stderr.write("task %s: skill-shadow: %s -> %s\n" % ((task,) + shadow))
+        else:
+            print("VERIFY: %s %s %s%s%s" % (task, "ok" if ok else "fail", _shown(argv),
+                                           " (ran no tests: %s)" % empty if empty else "",
+                                           " (skill-shadow: %s -> %s)" % shadow
+                                           if shadow else ""))
     return runs
+
+
+def _inside(path, top):
+    """True when path (resolved) is top or lies under it (resolved)."""
+    p, t = os.path.realpath(path), os.path.realpath(top)
+    return p == t or p.startswith(t.rstrip(os.sep) + os.sep)
+
+
+def _installed_skill_names(checkout):
+    """The frontmatter names of the skills found outside the checkout: the same roots
+    skill_index searches, minus the checkout's own project roots."""
+    roots = [r for r in CC.skill_roots(cwd=checkout, warnings=[]) if r[0] != "project"]
+    return {name for _label, d, name, _fm, _err in CC.iter_skills(roots)
+            if not _inside(d, checkout)}
+
+
+def _skill_shadow(cmd, skill_dirs, checkout, installed):
+    """(name, path relative to the checkout) for the first {skill_dir:<name>} in cmd that
+    resolves inside the checkout while a skill of that name is installed outside it;
+    None when there is none. A project skill with no installed twin is not a shadow."""
+    for arg in cmd:
+        m = CC.SKILL_DIR_RE.match(arg)
+        if not m:
+            continue
+        name = m.group("name")
+        d = skill_dirs.get(name)
+        if d is not None and name in installed and _inside(d, checkout):
+            return name, os.path.relpath(os.path.realpath(d), os.path.realpath(checkout))
+    return None
 
 
 def _shown(argv):
@@ -4411,6 +4464,39 @@ def push_cmd_problem(argv, run_branch):
     return None
 
 
+# The PR command's allowlist: `gh pr create` and only the options DEFAULT_PR_CMD uses,
+# each followed by the placeholder it carries there (D22).
+PR_CMD_PREFIX = ["gh", "pr", "create"]
+PR_OPTIONS = {DEFAULT_PR_CMD[i]: DEFAULT_PR_CMD[i + 1]
+              for i in range(len(PR_CMD_PREFIX), len(DEFAULT_PR_CMD), 2)}
+
+
+def pr_cmd_problem(argv):
+    """None when argv (placeholders NOT yet expanded) is a PR command finish may run,
+    else why not. The only shape allowed is
+
+        gh pr create [--title {title}] [--base {base_branch}] [--body-file {body_file}]
+
+    in any order, each option at most once and followed by exactly its placeholder: no
+    other option, no --opt=value form, no `--`, no extra positional. `gh` is the bare
+    program name, found on PATH."""
+    if argv[:3] != PR_CMD_PREFIX:
+        return "the PR command must start with exactly: gh pr create"
+    rest, seen = argv[3:], set()
+    if len(rest) % 2:
+        return "every option must be followed by its placeholder, got %r" % (rest,)
+    for opt, val in zip(rest[::2], rest[1::2]):
+        if opt not in PR_OPTIONS:
+            return "option %r is not allowed (allowed: %s)" % (
+                opt, ", ".join("%s %s" % kv for kv in sorted(PR_OPTIONS.items())))
+        if opt in seen:
+            return "option %s appears more than once" % opt
+        seen.add(opt)
+        if val != PR_OPTIONS[opt]:
+            return "option %s must carry %s, got %r" % (opt, PR_OPTIONS[opt], val)
+    return None
+
+
 def explicit_push(argv, run_branch, sha=None):
     """An allowlisted push argv with its run-branch positional (the last one) rewritten to
     the explicit, non-forced refspec refs/heads/<rb>:refs/heads/<rb>. A refspec with no
@@ -4479,6 +4565,10 @@ def cmd_finish(args):
     why = push_cmd_problem(expand_cmd(push_cmd, {"run_branch": st.run_branch}), st.run_branch)
     if why:
         sys.stderr.write("--push-cmd is not a push a grant covers: %s\n" % why)
+        return 2
+    why = pr_cmd_problem(pr_cmd)
+    if why:
+        sys.stderr.write("--pr-cmd is not a PR command finish may run: %s\n" % why)
         return 2
     if isinstance(st.finished, dict) and st.finished.get("envelope"):
         return _finish_again(st, args, push_cmd, pr_cmd)
@@ -4748,6 +4838,10 @@ def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):
         if not ok:
             _print_pending(st)
             return 3
+        why = pr_cmd_problem(pr_cmd)  # checked again, right before it runs
+        if why:
+            sys.stderr.write("--pr-cmd is not a PR command finish may run: %s\n" % why)
+            return 2
         fd, body_path = tempfile.mkstemp(dir=st.dir, prefix=".pr-body.", suffix=".md")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -4762,8 +4856,73 @@ def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):
         if not ok:
             return 3
         st.finished["pr"] = _tail(out).strip() or True
+        number = pr_number(out)
+        if number is not None:
+            _write_pr_envelope(st, number)
         st.save()
     return 0
+
+
+# The PR URL the PR command prints: https://<host>/<owner>/<repo>/pull/<n>, a whole token.
+PR_URL_RE = re.compile(r"(?:^|\s)https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9._-]+/"
+                       r"[A-Za-z0-9._-]+/pull/([1-9][0-9]{0,17})/?(?=\s|$)")
+
+
+def pr_number(out):
+    """The PR number in the PR command's output: the last URL of the form
+    https://<host>/<owner>/<repo>/pull/<n>, or None when it prints none."""
+    found = PR_URL_RE.findall(out or "")
+    return int(found[-1]) if found else None
+
+
+def _write_pr_envelope(st, number):
+    """After the PR command printed a PR URL (D18): write a second run-result envelope, a
+    revision of the recorded one. Its payload is the recorded payload plus `pr` {number}
+    and `replaces` {id, path, sha256}; its subjects and assertions are the recorded ones,
+    and log_sha256 still covers the same log prefix. st.finished then names the new
+    envelope (the old path kept as finished.superseded), so status, resume and a later
+    finish read it. Prints PR: <n> <path>. Never raises: on a problem it writes stderr
+    and leaves the recorded envelope as the run's result (the caller saves st)."""
+    old = st.finished.get("envelope")
+    try:
+        got = CC.sha256_file(old)
+    except (OSError, TypeError):
+        got = None
+    doc, err = CC.load_envelope(old) if got else (None, ["unreadable"])
+    if (got is None or got != st.finished.get("sha256") or err or not isinstance(doc, dict)
+            or doc.get("predicateType") != RUN_RESULT_KIND):
+        sys.stderr.write("PR #%d is open, but the run-result envelope %s cannot be revised "
+                         "(changed or unreadable); it stays the run's result\n" % (number, old))
+        return
+    pred = doc["predicate"]
+    then = _dt.datetime.strptime(pred["generatedAtTime"], "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=_dt.timezone.utc)
+    # Strictly later than the envelope it replaces, so a reader that takes the newest
+    # run-result by generatedAtTime never ties with it.
+    now = max(CC.utc_now(), then + _dt.timedelta(seconds=1))
+    payload = dict(pred["payload"], pr={"number": number},
+                   replaces={"id": pred["id"], "path": _rel(st, old), "sha256": got})
+    statement = {
+        "_type": doc["_type"], "subject": doc["subject"], "predicateType": RUN_RESULT_KIND,
+        "predicate": {
+            "skillContract": pred["skillContract"], "id": CC.new_id(RUN_RESULT_KIND, now),
+            "wasAttributedTo": {"skill": CONDUCTOR_SKILL, "version": CONDUCTOR_VERSION},
+            "generatedAtTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "wasRevisionOf": pred["id"], "payload": payload,
+            "assertions": pred["assertions"]}}
+    viol = CC.check_statement(statement)
+    if viol:
+        for n, detail in viol:
+            sys.stderr.write("FAIL: C%d: %s\n" % (n, detail))
+        sys.stderr.write("PR #%d is open, but its run-result envelope would be invalid; "
+                         "%s stays the run's result\n" % (number, old))
+        return
+    path = CC.write_envelope(st.root, statement)
+    eid = statement["predicate"]["id"]
+    st.finished.update(envelope=path, id=eid, sha256=CC.sha256_file(path), superseded=old,
+                       pr_number=number)
+    st.log("pr_result", id=eid, envelope=_rel(st, path), pr=number, replaces=pred["id"])
+    print("PR: %d %s" % (number, path))
 
 
 # watch's wait for the run lock. A timer tick must never hang: a lock held longer means

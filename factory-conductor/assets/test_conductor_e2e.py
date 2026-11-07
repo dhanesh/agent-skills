@@ -25,7 +25,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C  # noqa: E402
 import contract_check as CC  # noqa: E402
 import reentry as R  # noqa: E402
-from conductor_testkit import GIT, repo, tmpdir, write_grant, write_plan_envelope  # noqa: E402
+from conductor_testkit import (GIT, repo, stub_gh, tmpdir, write_grant,  # noqa: E402
+                               write_plan_envelope)  # noqa: E402
 
 PUSH_PR_STUB = r'''
 import json, sys
@@ -186,10 +187,11 @@ class EndToEndTests(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(root, "t1.txt")))
         self.assertTrue(os.path.exists(os.path.join(root, "t2.txt")))
 
-        pr_cmd = [sys.executable, self.stub, self.record, "pr", "--title", "{title}",
-                  "--base", "{base_branch}", "--body-file", "{body_file}"]
-        with mock.patch.dict(os.environ, {"PATH": self.bin + os.pathsep + os.environ["PATH"]}):
-            rc, out, err = self.out(["finish", "--root", root, "--pr-cmd", json.dumps(pr_cmd)])
+        # The default PR command (`gh pr create ...`) reaches a stub `gh` first on PATH.
+        gh = stub_gh([sys.executable, self.stub, self.record])
+        path = os.pathsep.join([gh, self.bin, os.environ["PATH"]])
+        with mock.patch.dict(os.environ, {"PATH": path}):
+            rc, out, err = self.out(["finish", "--root", root])
         self.assertEqual(rc, 0, err)
         lines = [l for l in out.splitlines() if l.startswith("FINISH: ")]
         self.assertEqual(len(lines), 1, out)

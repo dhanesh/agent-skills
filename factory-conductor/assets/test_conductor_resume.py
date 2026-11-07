@@ -25,7 +25,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C  # noqa: E402
-from conductor_testkit import GIT, repo, write_grant, write_plan_envelope  # noqa: E402
+from conductor_testkit import GIT, repo, stub_gh, write_grant, write_plan_envelope  # noqa: E402
 
 
 def tasks(n):
@@ -59,6 +59,12 @@ class ResumeNextTests(unittest.TestCase):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = C.main(argv)
         return rc, out.getvalue(), err.getvalue()
+
+    def finish(self, *extra):
+        """finish with the default PR command, which reaches a stub `gh` first on PATH."""
+        path = stub_gh() + os.pathsep + os.environ["PATH"]
+        with mock.patch.dict(os.environ, {"PATH": path}):
+            return self.run_main(["finish", "--root", self.root] + list(extra))
 
     def st(self):
         return C.State.load(C.state_path(self.root))
@@ -283,6 +289,7 @@ class ResumeReviewFixTests(unittest.TestCase):
 
     init = ResumeNextTests.init
     run_main = ResumeNextTests.run_main
+    finish = ResumeNextTests.finish
     st = ResumeNextTests.st
     ok = ResumeNextTests.ok
     resume = ResumeNextTests.resume
@@ -338,8 +345,7 @@ class ResumeReviewFixTests(unittest.TestCase):
         if breaks:
             commit_in(self.root, "bad.txt")
         self.ok("next")
-        rc, out, err = self.run_main(["finish", "--root", self.root, "--pr-cmd",
-                                      json.dumps([sys.executable, "-c", "pass"])])
+        rc, out, err = self.finish()
         return rc, [l for l in out.splitlines() if l.startswith("FINISH: ")][0]
 
     def test_a_finished_run_whose_pending_push_is_asked_says_run_ask_then_finish(self):
@@ -356,8 +362,7 @@ class ResumeReviewFixTests(unittest.TestCase):
         write_grant(self.root, self.plan)  # the user grants the push and the PR
         rc, nxt, out = self.resume()
         self.assertEqual((rc, nxt), (0, ["NEXT: run finish"]))
-        rc, out, err = self.run_main(["finish", "--root", self.root, "--retry-remote",
-                                      "--pr-cmd", json.dumps([sys.executable, "-c", "pass"])])
+        rc, out, err = self.finish("--retry-remote")
         self.assertEqual(rc, 0, out + err)
         rc, nxt, out = self.resume()
         self.assertEqual((rc, nxt), (0, ["NEXT: run done"]))

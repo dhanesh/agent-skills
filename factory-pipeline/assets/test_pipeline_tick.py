@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""`pipeline tick` (R12): nine STAGE: lines in order, exit 0, in a fixture repo with stub
+"""`pipeline tick` (R12): ten STAGE: lines in order, exit 0, in a fixture repo with stub
 sibling skills and a live pipeline grant. R13: with no live pipeline grant (none, revoked,
 revoked by the kill switch, expired, superseded, tracked by git), the tick runs no stage,
 prints `STOP: no-grant`, and exits 2. Stdlib unittest; offline, deterministic; scratch only
@@ -22,8 +22,8 @@ import pipeline as P  # noqa: E402
 import pipeline_testkit as K  # noqa: E402
 
 TOOL = os.path.join(HERE, "pipeline.py")
-ORDER = ["sweep", "growth-review", "idea-follow-up", "autopick", "plan", "derive-grant",
-         "build", "release-stage", "digest"]
+ORDER = ["sweep", "incident-probe", "growth-review", "idea-follow-up", "autopick", "plan",
+         "derive-grant", "build", "release-stage", "digest"]
 
 
 class Fixture(unittest.TestCase):
@@ -58,11 +58,11 @@ class TestTick(Fixture):
         super().setUp()
         self.gid = self.write_grant()
 
-    def test_nine_stage_lines_in_order_and_exit_0(self):
+    def test_ten_stage_lines_in_order_and_exit_0(self):
         cp, res, order = self.tick()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(order, ORDER)
-        self.assertTrue(cp.stdout.splitlines()[-1].startswith("TICK: done stages=9"))
+        self.assertTrue(cp.stdout.splitlines()[-1].startswith("TICK: done stages=10"))
         self.assertIn("TICK: grant %s expires_at " % self.gid, cp.stdout)
 
     def test_built_stages_run_their_tools(self):

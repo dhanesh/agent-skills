@@ -113,7 +113,7 @@ class PlanFixture(unittest.TestCase):
         for plan in ready:
             self.assertIn((("plan-read", plan, "waiting for owner's read: "
                             "reason=planner-tamper-%s" % what)), seen["waiting"])
-        self.assertIn("TICK: done stages=9 tamper=%s" % what, text)
+        self.assertIn("TICK: done stages=10 tamper=%s" % what, text)
         self.assertNotIn("under-pipeline", [c["key"] for c in K.calls(self.skills)])
 
 
@@ -488,7 +488,7 @@ class TestProgramTamper(PlanFixture):
         self.assertEqual(seen["plans"], [])
         self.assertEqual(seen["grants"], [])
         self.assertNotIn("under-pipeline", [c["key"] for c in K.calls(self.skills)])
-        self.assertIn("TICK: done stages=9 tamper=programs", text)
+        self.assertIn("TICK: done stages=10 tamper=programs", text)
 
     def test_the_fixture_interpreter_runs_the_tick(self):
         self.pick("I0000000001")
@@ -785,8 +785,8 @@ class TestTamperPersists(PlanFixture):
         self.assertEqual(log[1]["by"], "Owner")
         code, text, res, seen = self.tick()
         self.assertNotIn("persisted", text)
-        self.assertEqual(len(res), 9, text)
-        self.assertIn("TICK: done stages=9", text)
+        self.assertEqual(len(res), 10, text)
+        self.assertIn("TICK: done stages=10", text)
 
     def test_tamper_clear_without_by_exits_2_and_keeps_the_marker(self):
         self.poisoned()
@@ -849,7 +849,7 @@ class TestCapInTick(PlanFixture):
         # The cap stop and the plan it held back, then the derived grant that build
         # could not start (the stub skills hold no conductor.py).
         self.assertEqual([w[0] for w in seen["waiting"]], ["cap", "cap", "build"])
-        self.assertIn("TICK: done stages=9 cap=max_plans_per_day", text)
+        self.assertIn("TICK: done stages=10 cap=max_plans_per_day", text)
 
 
 if __name__ == "__main__":
