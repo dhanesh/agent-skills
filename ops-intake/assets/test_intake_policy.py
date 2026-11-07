@@ -77,7 +77,7 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(len(json.load(f)["registrations"]), 1)
 
     def test_an_agent_cannot_register(self):
-        for name in ("agent:claude", "Agent", "  ", "ag​ent"):
+        for name in ("agent:claude", "Agent", "  ", "ag\u200bent"):
             rc, out = self.cmd("register-policy", "--by", name)
             self.assertEqual(rc, 2, name)
             self.assertTrue(out.startswith("STOP: "), out)
