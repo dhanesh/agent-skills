@@ -15,7 +15,7 @@ license: MIT
 compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, and a POSIX shell; git is needed only to check git-pinned sources. Fully offline.
 metadata:
   author: dhanesh
-  version: "1.0.4"
+  version: "1.0.5"
   tags: "okf,knowledge,maintenance,drift,staleness,refresh,feynman-walkthrough,okf-site-kit"
 ---
 

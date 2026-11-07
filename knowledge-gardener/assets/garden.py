@@ -161,14 +161,21 @@ def _sha256_file(path):
     return h.hexdigest()
 
 
+# Every git call switches off the config keys that make an ordinary command run a
+# program: a pinned source repo controls its own config, so a `core.fsmonitor` or
+# `core.hooksPath` set there would otherwise run on `git status`. Same idea as
+# GIT_SAFE in factory-pipeline/assets/pipeline.py.
+GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+
+
 def _git(args, cwd):
+    argv = ["git", *GIT_SAFE] + list(args)
     try:
         return subprocess.run(
-            ["git"] + args, cwd=cwd, capture_output=True, text=True,
-            check=False)
+            argv, cwd=cwd, capture_output=True, text=True, check=False)
     except (FileNotFoundError, OSError):
         return subprocess.CompletedProcess(
-            args=["git"] + args, returncode=127, stdout="",
+            args=argv, returncode=127, stdout="",
             stderr="git unavailable")
 
 

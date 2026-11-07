@@ -102,5 +102,6 @@ make gate-skill SKILL=knowledge-gardener                 # everything CI checks
 
 ## Changes
 
+- **1.0.5.** Every git command that `garden.py` runs now carries `-c core.fsmonitor=false -c core.hooksPath=/dev/null`. A source repo can set `core.fsmonitor` to a command in its own config. That command no longer runs during `sweep`.
 - **1.0.4.** The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.0.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.
