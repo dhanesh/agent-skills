@@ -21,7 +21,10 @@ def grade_task2(src):
                        ("still imports deprecated legacy_config" if uses_legacy else "no config loader used"))}
 
 def grade_task3(src):
-    # functional correctness of slugify, executed in a subprocess sandbox
+    # Functional correctness of slugify. The candidate runs in a separate process: an
+    # isolated interpreter (-I) whose working directory is a fresh temporary directory.
+    # This is not an OS-level confinement; it only keeps the caller's directory and any
+    # module beside the candidate file out of the candidate's reach by relative path.
     prog = src + """
 import sys
 _cases = [("Hello, World!", "hello-world"), ("  Foo__Bar  ", "foo-bar"), ("a", "a"),
@@ -35,16 +38,17 @@ for _in, _want in _cases:
         print("MISMATCH", repr(_in), "->", repr(_got), "want", repr(_want)); sys.exit(1)
 print("OK")
 """
-    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
-        f.write(prog); path = f.name
-    try:
-        r = subprocess.run([sys.executable, path], capture_output=True, text=True, timeout=10)
-        ok = r.returncode == 0 and r.stdout.strip().endswith("OK")
-        return {"pass": ok, "reason": (r.stdout.strip() or r.stderr.strip())[:120]}
-    except subprocess.TimeoutExpired:
-        return {"pass": False, "reason": "timeout"}
-    finally:
-        os.unlink(path)
+    with tempfile.TemporaryDirectory() as work:
+        path = os.path.join(work, "candidate.py")
+        with open(path, "w") as f:
+            f.write(prog)
+        try:
+            r = subprocess.run([sys.executable, "-I", path], cwd=work,
+                               capture_output=True, text=True, timeout=10)
+            ok = r.returncode == 0 and r.stdout.strip().endswith("OK")
+            return {"pass": ok, "reason": (r.stdout.strip() or r.stderr.strip())[:120]}
+        except subprocess.TimeoutExpired:
+            return {"pass": False, "reason": "timeout"}
 
 GRADERS = {"task1": grade_task1, "task2": grade_task2, "task3": grade_task3}
 

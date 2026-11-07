@@ -12,7 +12,7 @@ command -v find_python >/dev/null 2>&1 && find_python
 [ -n "${PY:-}" ] || { echo '{"continue": true}'; exit 0; }
 
 input="$(cat)"
-get() { printf '%s' "$input" | "$PY" -c "import json,sys
+get() { printf '%s' "$input" | "$PY" -I -c "import json,sys
 try: print(json.load(sys.stdin)$1)
 except Exception: print('')" 2>/dev/null; }
 
@@ -34,7 +34,7 @@ if [[ -z "$summary" ]]; then
 fi
 
 # Emit as additionalContext (best-effort; ignored gracefully by older clients).
-"$PY" - "$summary" <<'PY'
+"$PY" -I - "$summary" <<'PY'
 import json, sys
 ctx = sys.argv[1]
 print(json.dumps({
