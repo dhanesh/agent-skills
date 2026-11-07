@@ -23,12 +23,15 @@ placeholder into an SDK Image read from that regular file (no directory, no syml
 Without --images, a request with either exits 2 before any call.
 
 Answers: {"<id>": {"type": "noul", "noul": 0.93} | {"type": "choice", "choice": "a", "confidence": 0.8,
-          "probabilities": {...}} | {"type": "score", "score": 1.7, "confidence": 0.9, ...}}
+          "probabilities": {...}} | {"type": "score", "score": 1.7, "confidence": 0.9, ...}
+          | {"type": "box", "box": {"top": 0.2, "bottom": 0.6, "left": 0.1, "right": 0.5},
+             "confidence": 0.9}}
 
 Every call is appended to a per-project JSONL log (0600) at
   ${JEV_LOG_DIR:-${XDG_STATE_HOME:-~/.local/state}/jev}/projects/<name>-<hash>.jsonl
 where the project is the git root of the current directory (else the directory itself).
-Set JEV_LOG=0 to disable. The log holds the state you sent, so treat it like the payload.
+Set JEV_LOG=0 to disable. The log holds the state you sent, so treat it like the payload; each
+image placeholder is logged as {"image": "<path>", "sha256": "<hex>"}, never its bytes.
 
 Key: TYPESAFE_API_KEY, else ~/.config/typesafe/env. Exit codes — any non-zero exit means "no Jev
 verdict", never a yes or a no:
@@ -199,6 +202,18 @@ def to_sdk_images(o, cache: dict, image_cls):
     return o
 
 
+def log_images(o, cache: dict):
+    """The tree for the log: each placeholder keeps its path and gains the sha256 of the
+    bytes already read, so the log never holds image bytes."""
+    if _is_placeholder(o):
+        return {"image": o["image"], "sha256": hashlib.sha256(cache[o["image"]]).hexdigest()}
+    if isinstance(o, dict):
+        return {k: log_images(v, cache) for k, v in o.items()}
+    if isinstance(o, list):
+        return [log_images(v, cache) for v in o]
+    return o
+
+
 def ask(src: str, images: bool = False) -> int:
     raw = Path(src).read_text() if src != "-" else sys.stdin.read()
     try:
@@ -224,6 +239,8 @@ def ask(src: str, images: bool = False) -> int:
     record = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
               "project": str(project_root(cwd)), "cwd": str(cwd),
               "model": req.get("model", "jev-latest"), "state": state, "questions": questions}
+    if needs_images:
+        record.update(state=log_images(state, cache), questions=log_images(questions, cache))
     if not load_key():
         print("jev: TYPESAFE_API_KEY not set and ~/.config/typesafe/env has none", file=sys.stderr)
         append_log({**record, "exit": 2, "error": "no API key"})
@@ -271,6 +288,12 @@ def _answer_str(a: dict) -> str:
     if t == "score":
         top = max(len(a.get("legend") or {}) - 1, 0)
         return _c("35", f"{a['score']:.2f}") + f"/{top}  conf {a.get('confidence', 0):.2f}"
+    if t == "box" and isinstance(a.get("box"), dict):
+        b, conf = a["box"], a.get("confidence")
+        edges = "  ".join(f"{e} {b[e]:.2f}" if isinstance(b.get(e), (int, float)) else f"{e} ?"
+                          for e in ("top", "bottom", "left", "right"))
+        conf_s = f"{conf:.2f}" if isinstance(conf, (int, float)) else "—"
+        return _c("34", edges) + f"  conf {conf_s}"
     return json.dumps(a)
 
 

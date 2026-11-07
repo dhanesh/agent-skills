@@ -5,6 +5,7 @@ PYTHONPATH. The stub records each system_one call in a JSON file and returns fix
 so no test reaches the network or needs a real API key. A missing record file means jev
 made no call.
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -77,7 +78,8 @@ class JevImagesTest(unittest.TestCase):
                "JEV_LOG_DIR": str(self.root / "log"), "TYPESAFE_API_KEY": "dummy-not-a-key",
                "PYTHONPATH": str(self.root / "stub"), "JEV_STUB_OUT": str(self.out)}
         return subprocess.run([sys.executable, str(JEV), *map(str, args)], env=env,
-                              cwd=str(self.root), capture_output=True, text=True, timeout=60)
+                              cwd=str(self.root), stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=60)
 
     def call(self):
         return json.loads(self.out.read_text())
@@ -130,6 +132,11 @@ class JevImagesTest(unittest.TestCase):
         crit = self.call()["questions"]["q"]["criteria"]["true"]
         self.assertEqual(crit["IMAGE"], len(IMAGE_BYTES))
 
+    def log_records(self):
+        logs = list((self.root / "log").rglob("*.jsonl"))
+        self.assertTrue(logs)
+        return [json.loads(line) for p in logs for line in p.read_text().splitlines()]
+
     def test_log_keeps_no_image_bytes(self):
         r = self.run_jev("--images", self.request("box.json", self.box_request(self.image)))
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -137,6 +144,49 @@ class JevImagesTest(unittest.TestCase):
         self.assertTrue(logs)
         for p in logs:
             self.assertNotIn(IMAGE_BYTES.decode(), p.read_text())
+
+    def test_log_records_image_as_path_and_sha256(self):
+        r = self.run_jev("--images", self.request("box.json", self.box_request(self.image)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (rec,) = self.log_records()
+        self.assertEqual(rec["state"]["shot"],
+                         {"image": str(self.image), "sha256": hashlib.sha256(IMAGE_BYTES).hexdigest()})
+        self.assertEqual(rec["answers"]["where"]["box"]["top"], 0.2)
+
+    def test_log_records_criteria_image_as_path_and_sha256(self):
+        req = {"state": {"x": "a page"},
+               "questions": {"q": {"type": "noul", "instructions": "Same?",
+                                   "criteria": {"true": {"image": str(self.image)}}}}}
+        r = self.run_jev("--images", self.request("crit.json", req))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (rec,) = self.log_records()
+        self.assertEqual(rec["questions"]["q"]["criteria"]["true"]["sha256"],
+                         hashlib.sha256(IMAGE_BYTES).hexdigest())
+
+    def test_jev_log_shows_box_edges_and_confidence(self):
+        r = self.run_jev("--images", self.request("box.json", self.box_request(self.image)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.run_jev("log", "-v", "-n", "0")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        line = next(l for l in r.stdout.splitlines() if l.lstrip().startswith("where"))
+        for part in ("box", "top 0.20", "bottom 0.60", "left 0.10", "right 0.50", "conf 0.90"):
+            self.assertIn(part, line)
+        self.assertNotIn('"type"', line)  # rendered, not raw JSON
+        self.assertNotIn(IMAGE_BYTES.decode(), r.stdout)
+
+    def test_jev_log_shows_box_with_null_confidence(self):
+        rec = {"ts": "2026-11-07T00:00:00.000+00:00", "project": str(self.root), "cwd": str(self.root),
+               "model": "jev-latest", "exit": 0, "state": {}, "latency_ms": 5,
+               "questions": {"where": {"type": "box"}},
+               "answers": {"where": {"type": "box", "confidence": None,
+                                     "box": {"top": 0.0, "bottom": 1.0, "left": 0.25, "right": 0.75}}}}
+        logs = self.root / "log" / "projects"
+        logs.mkdir(parents=True)
+        r = self.run_jev("log", "--path")
+        Path(r.stdout.strip()).write_text(json.dumps(rec) + "\n")
+        r = self.run_jev("log")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("top 0.00  bottom 1.00  left 0.25  right 0.75  conf —", r.stdout)
 
     # placeholders that are not regular files: refused before any call
 
