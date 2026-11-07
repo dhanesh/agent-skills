@@ -5,7 +5,7 @@ license: MIT
 compatibility: Requires tmux 3.2+, bash, python3, and a POSIX-like shell. Optional clipboard support uses pbcopy, xclip, or wl-copy; optional sounds use paplay, pw-play, or afplay; optional persistence uses TPM with tmux-resurrect/tmux-continuum.
 metadata:
   author: dhanesh
-  version: "2.3.2"
+  version: "2.3.3"
   tags: "tmux,zellij,herdr,coding-agents,terminal-multiplexer,automation"
 ---
 
@@ -107,7 +107,7 @@ Mention these when the human asks how to open, pick, or clean up sessions; agent
 ## The agent coordination API (scripts/)
 
 - `agent-workspace` — create or attach the `agents` cockpit session.
-- `agent-pane [--agent <kind>] [--cwd <dir>] <name> <command...>` — launch and register an agent.
+- `agent-pane [--agent <kind>] [--cwd <dir>] <name> <command...>` — launch and register an agent. Pass the command as separate words (`claude --model opus`); no shell parses them, so wrap shell code in `sh -c '...'`.
 - `agent-list [--json]` — registry with statuses.
 - `agent-status-scan` / `agent-status-summary` / `agent-dashboard` — status pipeline.
 - `agent-jump <state>` — focus the next pane in a state (repeat to cycle).
@@ -189,7 +189,7 @@ tmux -V
 # Exactly ONE source line for the config, and it must sit before any TPM run line:
 grep -n 'source-file .*agent-panes/tmux-agent.conf\|run .*tpm/tpm' ~/.tmux.conf
 "$SKILL_DIR/scripts/agent-workspace"
-"$SKILL_DIR/scripts/agent-pane" smoke 'echo AGENT_STATUS: working; sleep 1; echo ok; sleep 5'
+"$SKILL_DIR/scripts/agent-pane" smoke sh -c 'echo AGENT_STATUS: working; sleep 1; echo ok; sleep 5'
 "$SKILL_DIR/scripts/agent-wait" smoke --status done --timeout 30
 "$SKILL_DIR/scripts/agent-explain" smoke
 "$SKILL_DIR/scripts/agent-list" --json

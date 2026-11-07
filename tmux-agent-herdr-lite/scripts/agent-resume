@@ -73,7 +73,13 @@ def relaunch(rec, resume_id=""):
         argv += ["--agent", agent]
     if rec.get("cwd"):
         argv += ["--cwd", rec["cwd"]]
-    argv += [rec.get("name", "agent"), cmd]
+    # agent-pane takes the command as separate words and runs no shell, so
+    # split the stored shell-quoted string back into its words.
+    try:
+        words = shlex.split(cmd)
+    except ValueError:
+        words = cmd.split()
+    argv += [rec.get("name", "agent")] + (words or [cmd])
     if dry:
         print("would run:", " ".join(shlex.quote(a) for a in argv))
         return

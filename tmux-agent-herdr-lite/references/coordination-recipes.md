@@ -9,7 +9,7 @@ bare for readability, but they are not on PATH: invoke each one as
 ## Run a dev server and wait until it is ready
 
 ```bash
-agent-pane server 'npm run dev'
+agent-pane server npm run dev
 agent-wait server --match 'ready|listening on' --timeout 120
 agent-read server --lines 20
 ```
@@ -17,7 +17,7 @@ agent-read server --lines 20
 ## Run tests beside your work and inspect the result
 
 ```bash
-agent-pane tests 'uv run pytest -q'
+agent-pane tests uv run pytest -q
 agent-wait tests --status done --timeout 600 || agent-read tests --lines 50
 agent-read tests --lines 40 --source recent
 ```
@@ -29,7 +29,7 @@ the command finishes.
 ## Spawn a coding agent and hand it a task
 
 ```bash
-agent-pane --agent claude reviewer 'claude'
+agent-pane --agent claude reviewer claude
 agent-wait reviewer --status idle --timeout 60   # wait for the prompt box
 agent-run reviewer 'Review the diff in HEAD~1 and list defects only.'
 agent-wait reviewer --status done --timeout 1800

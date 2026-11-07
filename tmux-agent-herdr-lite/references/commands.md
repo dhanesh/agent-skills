@@ -19,6 +19,12 @@ Launch a command in a new registered window. Writes a JSON record under
 `panes/` (name, window, pane id, command, agent kind, cwd, status) that every
 other command resolves targets through.
 
+Give the command as separate words: `agent-pane tests uv run pytest -q`.
+Each word reaches the program as one literal argument. No shell parses the
+words, so `;`, `$(...)` and quotes in a word stay as text. To run shell code
+(a pipe, `&&`, a variable), pass it to a shell yourself:
+`agent-pane build sh -c 'make && make test'`.
+
 - `--agent` — detection manifest to use: `claude`, `codex`, `gemini`,
   `opencode` (also `kilo`), `amp`, `cursor`, `copilot`, `droid`, `cline`,
   `devin`, `kimi`, `kiro`, `grok`, `hermes`, `qodercli`, `antigravity`, `pi`.
