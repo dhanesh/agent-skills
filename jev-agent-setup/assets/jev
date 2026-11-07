@@ -5,7 +5,7 @@
 # ///
 """jev — call TypeSafe's Jev (System One) from any agent's shell, and review past calls.
 
-  jev [FILE|-]            ask: JSON request on stdin (or FILE) → typed answers on stdout
+  jev [--images] [FILE|-] ask: JSON request on stdin (or FILE) → typed answers on stdout
   jev log [options]       show this project's logged requests/responses in the terminal
 
 Request JSON:
@@ -15,6 +15,12 @@ Request JSON:
      "route":  {"type": "choice", "instructions": "...", "criteria": {"a": "...", "b": "..."}},
      "rank_1": {"type": "score",  "instructions": "...", "criteria": ["level 0", "level 1", "level 2"]}},
    "model": "jev-latest"}                       # optional
+
+Images and box questions (opt-in): a {"type": "box", "instructions": "..."} question and an
+{"image": "<path>"} placeholder (anywhere in state, instructions or criteria) run only with
+--images. --images sends the TypeSafe-Danger-Zone-Images: true header and turns each
+placeholder into an SDK Image read from that regular file (no directory, no symlink).
+Without --images, a request with either exits 2 before any call.
 
 Answers: {"<id>": {"type": "noul", "noul": 0.93} | {"type": "choice", "choice": "a", "confidence": 0.8,
           "probabilities": {...}} | {"type": "score", "score": 1.7, "confidence": 0.9, ...}}
@@ -26,7 +32,8 @@ Set JEV_LOG=0 to disable. The log holds the state you sent, so treat it like the
 
 Key: TYPESAFE_API_KEY, else ~/.config/typesafe/env. Exit codes — any non-zero exit means "no Jev
 verdict", never a yes or a no:
-  2  bad input JSON or no API key (fix the caller)
+  2  bad input JSON, no API key, or a box question / image placeholder without --images or
+     with a path that is not a regular file (fix the caller)
   3  unavailable: timeout, connection error, 429 or 5xx — retryable after a backoff
   4  rejected: TypeSafe refused the request (400/401/403/404/422, e.g. unknown model or a
      malformed question) — retrying unchanged will fail again
@@ -35,6 +42,7 @@ import argparse
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -121,7 +129,77 @@ def load_key() -> bool:
     return bool(os.environ.get("TYPESAFE_API_KEY"))
 
 
-def ask(src: str) -> int:
+IMAGES_HEADER = {"TypeSafe-Danger-Zone-Images": "true"}
+
+
+class ImageError(ValueError):
+    pass
+
+
+def _is_placeholder(o) -> bool:
+    return isinstance(o, dict) and len(o) == 1 and isinstance(o.get("image"), str)
+
+
+def has_images(o) -> bool:
+    if _is_placeholder(o):
+        return True
+    if isinstance(o, dict):
+        return any(has_images(v) for v in o.values())
+    if isinstance(o, list):
+        return any(has_images(v) for v in o)
+    return False
+
+
+def has_box(questions: dict) -> bool:
+    return any(isinstance(q, dict) and q.get("type") == "box" for q in questions.values())
+
+
+def read_image_file(path: str) -> bytes:
+    """Bytes of a regular file. A directory, a missing path or a symlink is refused."""
+    try:
+        st = os.lstat(path)
+    except OSError as e:
+        raise ImageError(f"image {path!r}: {e.strerror or e}") from None
+    if stat.S_ISLNK(st.st_mode):
+        raise ImageError(f"image {path!r}: is a symlink, not a regular file")
+    if not stat.S_ISREG(st.st_mode):
+        raise ImageError(f"image {path!r}: not a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as e:
+        raise ImageError(f"image {path!r}: {e.strerror or e}") from None
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise ImageError(f"image {path!r}: not a regular file")
+        return f.read()
+
+
+def load_images(o, cache: dict):
+    """Check every placeholder and read its bytes; returns the tree with bytes in place."""
+    if _is_placeholder(o):
+        p = o["image"]
+        if p not in cache:
+            cache[p] = read_image_file(p)
+        return ("__jev_image__", p)
+    if isinstance(o, dict):
+        return {k: load_images(v, cache) for k, v in o.items()}
+    if isinstance(o, list):
+        return [load_images(v, cache) for v in o]
+    return o
+
+
+def to_sdk_images(o, cache: dict, image_cls):
+    if isinstance(o, tuple) and len(o) == 2 and o[0] == "__jev_image__":
+        return image_cls(cache[o[1]])
+    if isinstance(o, dict):
+        return {k: to_sdk_images(v, cache, image_cls) for k, v in o.items()}
+    if isinstance(o, list):
+        return [to_sdk_images(v, cache, image_cls) for v in o]
+    return o
+
+
+def ask(src: str, images: bool = False) -> int:
     raw = Path(src).read_text() if src != "-" else sys.stdin.read()
     try:
         req = json.loads(raw)
@@ -130,6 +208,18 @@ def ask(src: str) -> int:
     except (json.JSONDecodeError, KeyError, AssertionError, TypeError) as e:
         print(f"jev: expected {{\"state\": ..., \"questions\": {{id: question}}}} ({e})", file=sys.stderr)
         return 2
+    needs_images = has_box(questions) or has_images(state) or has_images(questions)
+    if needs_images and not images:
+        print("jev: this request has a box question or an {\"image\": \"<path>\"} placeholder; "
+              "these go out only with --images", file=sys.stderr)
+        return 2
+    cache: dict = {}
+    if needs_images:
+        try:
+            loaded_state, loaded_questions = load_images(state, cache), load_images(questions, cache)
+        except ImageError as e:
+            print(f"jev: {e}", file=sys.stderr)
+            return 2
     cwd = Path.cwd()
     record = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
               "project": str(project_root(cwd)), "cwd": str(cwd),
@@ -140,10 +230,18 @@ def ask(src: str) -> int:
         return 2
     from typesafe_sdk import TypeSafeClient
 
+    call = {"model": record["model"], "state": state, "questions": questions}
+    if images:
+        call["extra_headers"] = dict(IMAGES_HEADER)
+    if needs_images:
+        from typesafe_sdk import Image
+
+        call.update(state=to_sdk_images(loaded_state, cache, Image),
+                    questions=to_sdk_images(loaded_questions, cache, Image))
     t0 = time.monotonic()
     try:
         with TypeSafeClient() as client:
-            answers = client.system_one(model=record["model"], state=state, questions=questions).answers
+            answers = client.system_one(**call).answers
     except Exception as e:  # any service failure = no verdict
         info = classify(e)
         hint = "retryable" if info["retryable"] else "not retryable unchanged"
@@ -286,7 +384,9 @@ def main() -> int:
     if args and args[0] in ("-h", "--help"):
         print(__doc__)
         return 0
-    return ask(args[0] if args else "-")
+    images = "--images" in args
+    args = [a for a in args if a != "--images"]
+    return ask(args[0] if args else "-", images=images)
 
 
 if __name__ == "__main__":

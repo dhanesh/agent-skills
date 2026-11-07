@@ -90,9 +90,7 @@ mkdir -p "$JV/stub/typesafe_sdk" "$JV/shome" "$JV/log" "$JV/img"
 cat > "$JV/stub/typesafe_sdk/__init__.py" <<'STUB'
 import hashlib, json, os
 class Image:
-    def __init__(self, data): self.n, self.sha = len(data), hashlib.sha256(data).hexdigest()
-    @classmethod
-    def from_bytes(cls, data): return cls(bytes(data))
+    def __init__(self, data): data = bytes(data); self.n, self.sha = len(data), hashlib.sha256(data).hexdigest()
 class _A(dict):
     def model_dump(self): return dict(self)
 def _enc(o):
