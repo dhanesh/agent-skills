@@ -1,7 +1,7 @@
-#!/usr/bin/env -S uv run --quiet --script
+#!/usr/bin/env -S uv run --quiet --no-config --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["typesafe-sdk>=0.7"]
+# dependencies = ["typesafe-sdk>=0.7.5"]
 # ///
 """jev — call TypeSafe's Jev (System One) from any agent's shell, and review past calls.
 
