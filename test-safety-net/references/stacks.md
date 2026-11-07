@@ -60,12 +60,13 @@ wins; `--stack` overrides, and a tie is
 reported rather than guessed), discovers top-level `export`ed functions and classes, and triages
 them against node's own I/O marker tables into the same four tiers Python uses.
 
-Discovery has **two** paths and the report's `discovery` key says which one ran. Where the repo
-ships its own `node_modules/typescript`, the ranker drives that compiler's parser and reads the
+Discovery has **two** paths and the report's `discovery` key says which one ran. The precise
+path runs only when you pass `--precise`. Then, where the repo ships its own
+`node_modules/typescript`, the ranker drives that compiler's parser and reads the
 export forms a text reader cannot — destructured exports, quoted keys in `module.exports`, a
 whole-module `module.exports = fn` — so a precise run finds *more* units than a heuristic one on
-the same tree. Where it does not (no install, Yarn PnP, no `node`, a compiler that times out or
-fails), it falls back to the heuristic reader and reports `heuristic`. **The toolchain is never
+the same tree. Without `--precise`, or where that compiler is not usable (no install, Yarn PnP,
+no `node`, a compiler that times out or fails), it falls back to the heuristic reader and reports `heuristic`. **The toolchain is never
 downloaded** — `npx tsc` on a miss would fetch an unpinned compiler, so the precise path
 `require`s one already on disk or declines. Two node runs are comparable only when the key
 agrees.
@@ -74,9 +75,10 @@ agrees.
 `<repo>/node_modules/typescript/lib/typescript.js` executes that file, in a node process, during
 what is otherwise a read-only analysis of a tree nobody has vetted yet. Nothing is downloaded and
 no package runner is involved, but a repo that ships a hostile — or merely broken — `typescript`
-gets to run it. Pass **`--no-precise`** to decline the path outright; the run then reports
-`discovery: "heuristic"` and finds fewer units, which is the trade. Python's precise path is
-stdlib `ast` and executes nothing, so the flag is a no-op there.
+gets to run it. So the path is **off by default**: a default run starts no node process and
+reports `discovery: "heuristic"`. Pass **`--precise`** only on a repo you trust; it can find
+more units, which is the trade. `--no-precise` is still accepted and, on node, changes nothing.
+Python's precise path is stdlib `ast` and executes nothing, so neither flag changes it.
 
 **A degraded precise run declines rather than under-reporting.** A toolchain that loads but
 cannot parse — an aliased or shimmed compiler, a version whose AST this walker does not share —
@@ -85,7 +87,7 @@ nothing worth testing" while wearing the label you are told to trust more. Any u
 or no units at all over a non-empty source tree, hands the run back to the heuristic reader with
 a `note:` on stderr naming the reason.
 
-**Which path to expect.** `heuristic`, in most repos you meet. `precise` needs a real
+**Which path to expect.** `heuristic`, in most repos you meet. `precise` needs `--precise` and a real
 `node_modules/typescript` already installed in the tree being analysed — not one hoisted into a
 parent workspace this run cannot see, not a Yarn PnP zip, and not one this run could install. So
 plan on `heuristic`, treat `precise` as the upgrade it is, and never compare a run's unit counts

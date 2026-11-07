@@ -841,7 +841,7 @@ _STMT_KEYWORDS = ("export", "import", "const", "let", "var", "function",
                   "class", "module", "exports", "return", "async")
 
 
-def discover_units(root: str, precise: bool = True):
+def discover_units(root: str, precise: bool = False):
     """Interface entry point: `(units, discovery_path)`.
 
     Two paths, and the label says which one ran (multistack design, D1),
@@ -855,13 +855,16 @@ def discover_units(root: str, precise: bool = True):
     would be worse than no precise path at all -- it would make the skill's
     answer depend on whether somebody had run `npm ci` today.
 
-    `precise=False` (`--no-precise` on the CLI) declines the toolchain path
-    without trying it, and the label then honestly says `"heuristic"`. THE
-    REASON IT EXISTS: the precise path `require`s
+    THE TOOLCHAIN PATH IS OPT-IN. It runs only under `precise=True`
+    (`--precise` on the CLI); the default, `precise=False`, declines it
+    without trying it, starts no node process, and the label then honestly
+    says `"heuristic"`. (`--no-precise` stays accepted and now changes
+    nothing here.) THE REASON: the precise path `require`s
     `<analysed repo>/node_modules/typescript/lib/typescript.js` in a node
     process, which is the ANALYSED REPO'S OWN CODE, executing. Everything else
-    this skill does to a target tree reads it. An agent handed a repo nobody
-    has vetted is entitled to say no to that, and to be told it is happening --
+    this skill does to a target tree reads it. A repo nobody has vetted must
+    not get to run code just because it was analysed, so running it is a
+    choice the user makes explicitly, and is told about --
     `references/parameters.md` and `references/stacks.md` say so where a user
     reaches them.
     """

@@ -900,7 +900,7 @@ class TestPreciseDiscovery(NodeCase):
         self.stub_typescript('throw new Error("boom");\n')
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            units, mode = stack_node.discover_units(self.root)
+            units, mode = stack_node.discover_units(self.root, precise=True)
         self.assertEqual(mode, "heuristic")
         self.assertEqual([u["id"] for u in units], ["src/util.ts::parse"])
         # A toolchain that was FOUND and then failed is the surprising case,
@@ -912,11 +912,17 @@ class TestPreciseDiscovery(NodeCase):
         self.stub_typescript('process.stdout.write("<html>nope</html>");'
                              'process.exit(0);\n')
         with contextlib.redirect_stderr(io.StringIO()):
-            units, mode = stack_node.discover_units(self.root)
+            units, mode = stack_node.discover_units(self.root, precise=True)
         self.assertEqual(mode, "heuristic")
         self.assertEqual([u["id"] for u in units], ["src/util.ts::parse"])
 
+    def need_node(self):
+        if shutil.which("node") is None:
+            self.skipTest("node is not available: this case needs node to run "
+                          "the stub toolchain")
+
     def test_falls_back_when_the_toolchain_hangs(self):
+        self.need_node()
         write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
         lib = self.stub_typescript(
             "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000);\n")
@@ -939,7 +945,8 @@ class TestPreciseDiscovery(NodeCase):
         write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
         write(self.root, ".pnp.cjs", "// zip-backed resolution\n")
         self.assertIsNone(stack_node._typescript_lib(self.root))
-        self.assertEqual(stack_node.discover_units(self.root)[1], "heuristic")
+        self.assertEqual(stack_node.discover_units(self.root, precise=True)[1],
+                         "heuristic")
 
     def test_the_mode_label_follows_the_path_that_actually_ran(self):
         write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
@@ -948,7 +955,7 @@ class TestPreciseDiscovery(NodeCase):
             {"id": "src/util.ts::parse", "path": "src/util.ts", "name": "parse",
              "lineno": 1, "kind": "function"}]
         self.addCleanup(setattr, stack_node, "_units_precise", real)
-        units, mode = stack_node.discover_units(self.root)
+        units, mode = stack_node.discover_units(self.root, precise=True)
         self.assertEqual(mode, "precise")
         self.assertEqual([u["id"] for u in units], ["src/util.ts::parse"])
 
@@ -980,6 +987,7 @@ class TestPreciseDiscovery(NodeCase):
         nothing worth testing", which is the failure mode this whole stack was
         built to refuse.
         """
+        self.need_node()
         for i in range(5):
             write(self.root, "src/m%d.ts" % i,
                   "export function f%d(s: string) { return s; }\n" % i)
@@ -993,7 +1001,7 @@ class TestPreciseDiscovery(NodeCase):
             "};\n")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            units, mode = stack_node.discover_units(self.root)
+            units, mode = stack_node.discover_units(self.root, precise=True)
         self.assertEqual(mode, "heuristic")
         self.assertEqual(len(units), 5)
         self.assertIn("unreadable", err.getvalue())
@@ -1022,46 +1030,101 @@ class TestPreciseDiscovery(NodeCase):
         # a degraded run.
         self.assertIsNone(stack_node._decline_reason({"units": [], "unreadable": 0}, []))
 
-    def test_no_precise_refuses_to_run_the_analysed_repos_compiler(self):
-        """F6: running a target repo's own code is a decision a user may refuse.
+    def marker_typescript(self):
+        """A fake `typescript.js` whose only effect is to write a marker file.
 
-        The precise path `require`s `<analysed repo>/node_modules/typescript/lib/
-        typescript.js` in a node process. That is the repo's own code, executing,
-        during what SKILL.md pitches as a read-only analysis of a tree nobody
-        trusts yet. The flag is the important half of the disclosure: an agent
-        handed a repo it did not write needs a way to say no.
+        It is not a compiler, so a run that loads it then declines and falls
+        back to the heuristic. The marker is the observation: it exists only
+        if the analysed repo's own code ran.
         """
-        write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
         marker = os.path.join(self.root, "PWNED")
         self.stub_typescript(
             "require('fs').writeFileSync(%r, 'the analysed repo ran');\n"
             "throw new Error('and then failed');\n" % marker)
-        with contextlib.redirect_stderr(io.StringIO()):
-            units, mode = stack_node.discover_units(self.root, precise=False)
-        self.assertEqual(mode, "heuristic")
-        self.assertEqual([u["id"] for u in units], ["src/util.ts::parse"])
-        self.assertFalse(os.path.exists(marker),
-                         "--no-precise still executed the analysed repo's compiler")
-        # …and the negative arm: with the default, it DOES run, which is the
-        # behaviour the flag exists to let a user decline.
-        with contextlib.redirect_stderr(io.StringIO()):
-            stack_node.discover_units(self.root)
-        self.assertTrue(os.path.exists(marker))
+        return marker
 
-    def test_the_cli_flag_reaches_the_stack(self):
-        # The flag is worth nothing if it stops at argparse.
-        write(self.root, "package.json", '{"name": "demo"}\n')
+    def test_the_default_runs_no_repo_code(self):
+        """D25: running a target repo's own code is opt-in, never the default.
+
+        The precise path `require`s `<analysed repo>/node_modules/typescript/lib/
+        typescript.js` in a node process. That is the repo's own code, executing,
+        during what SKILL.md pitches as a read-only analysis of a tree nobody
+        trusts yet. So the default declines the path without trying it, and
+        `precise=False` (`--no-precise`) is the same as the default. Needs no
+        node: a default run never starts one.
+        """
         write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
-        marker = os.path.join(self.root, "PWNED")
-        self.stub_typescript(
-            "require('fs').writeFileSync(%r, 'ran');\n"
-            "throw new Error('nope');\n" % marker)
+        marker = self.marker_typescript()
+        for kwargs in ({}, {"precise": False}):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                units, mode = stack_node.discover_units(self.root, **kwargs)
+            self.assertEqual(mode, "heuristic", kwargs)
+            self.assertEqual([u["id"] for u in units], ["src/util.ts::parse"], kwargs)
+            self.assertFalse(os.path.exists(marker),
+                             "%r executed the analysed repo's compiler" % (kwargs,))
+            # No toolchain was loaded, so there is nothing to decline.
+            self.assertNotIn("declined", err.getvalue(), kwargs)
+
+    def test_the_default_never_spawns_a_process(self):
+        # The mechanism behind the marker: the default path does not reach
+        # `_units_precise` at all, so it cannot start node on any machine.
+        write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
+        self.marker_typescript()
+        real = stack_node._units_precise
+        calls = []
+        stack_node._units_precise = lambda root, **kw: calls.append(root)
+        self.addCleanup(setattr, stack_node, "_units_precise", real)
+        stack_node.discover_units(self.root)
+        rank_risk.rank(self.root, since="10 years ago", stack=stack_node)
+        self.assertEqual(calls, [])
+
+    def test_precise_opts_in_to_running_the_analysed_repos_compiler(self):
+        # The positive arm: with the opt-in, the repo's `typescript.js` DOES
+        # run -- the behaviour the default exists to refuse.
+        self.need_node()
+        write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
+        marker = self.marker_typescript()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            units, mode = stack_node.discover_units(self.root, precise=True)
+        self.assertTrue(os.path.exists(marker))
+        self.assertEqual(mode, "heuristic")      # the fake compiler gives no answer
+        self.assertEqual([u["id"] for u in units], ["src/util.ts::parse"])
+        self.assertIn("precise discovery declined", err.getvalue())
+
+    def cli(self, *flags):
         err, out = io.StringIO(), io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
-            code = rank_risk.main([self.root, "--since", "10 years ago", "--no-precise"])
+            code = rank_risk.main([self.root, "--since", "10 years ago", *flags])
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out.getvalue())["discovery"], "heuristic")
-        self.assertFalse(os.path.exists(marker))
+        return json.loads(out.getvalue()), err.getvalue()
+
+    def test_the_cli_default_and_no_precise_run_no_repo_code(self):
+        # The default is worth nothing if the CLI passes something else.
+        # `--no-precise` stays accepted for callers that pass it; on node it is
+        # now the default, so it changes nothing.
+        write(self.root, "package.json", '{"name": "demo"}\n')
+        write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
+        marker = self.marker_typescript()
+        for flags in ((), ("--no-precise",)):
+            plan, err = self.cli(*flags)
+            self.assertEqual(plan["stack"], "node", flags)
+            self.assertEqual(plan["discovery"], "heuristic", flags)
+            self.assertEqual(plan["units_discovered"], 1, flags)
+            self.assertNotIn("declined", err, flags)
+            self.assertFalse(os.path.exists(marker), flags)
+
+    def test_the_cli_precise_flag_reaches_the_stack(self):
+        # The opt-in is worth nothing if it stops at argparse.
+        self.need_node()
+        write(self.root, "package.json", '{"name": "demo"}\n')
+        write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
+        marker = self.marker_typescript()
+        plan, err = self.cli("--precise")
+        self.assertEqual(plan["discovery"], "heuristic")
+        self.assertIn("precise discovery declined", err)
+        self.assertTrue(os.path.exists(marker))
 
     def test_python_accepts_the_same_flag_and_is_unaffected(self):
         # The interface is one signature for every stack. Python's `ast` is
@@ -1118,7 +1181,8 @@ class TestDiscoveryIsReported(NodeCase):
             {"id": "src/utils.js::parse", "path": "src/utils.js", "name": "parse",
              "lineno": 1, "kind": "function"}]
         self.addCleanup(setattr, stack_node, "_units_precise", real)
-        plan = rank_risk.rank(self.root, since="10 years ago", stack=stack_node)
+        plan = rank_risk.rank(self.root, since="10 years ago", stack=stack_node,
+                              precise=True)
         self.assertEqual(plan["discovery"], "precise")
 
 
