@@ -23,6 +23,13 @@ reach a generated .md page as live markup. The page scan uses the same
 four patterns as the okf-site-build feature entry. The hostile payloads
 are plain text in this file on purpose (they are the fixture, labelled
 HOSTILE_*): each one calls okfProbe, which does not exist.
+
+AssetSymlinkTest: a bundle asset that is a symlink to a file outside the
+bundle (here a dummy secret) is not copied into public/bundle-assets/, as a
+file or as a link, and the run prints a WARN line for it. A dangling
+symlink is skipped the same way. A symlink whose target stays inside the
+bundle is still copied, as a regular file with the target's bytes. A
+normal asset is still copied.
 """
 from __future__ import annotations
 
@@ -372,6 +379,90 @@ class BodyMarkupTest(unittest.TestCase):
             ["md-link-scheme", "on-handler", "script-tag"])
         self.assertEqual(len(script_links(body)), 5)
         self.assertTrue(raw_tags(body))
+
+
+# Fixture: a dummy marker, not a real secret. It is the same text as the
+# okf-site-build feature entry uses, so a leak is easy to grep for.
+DUMMY_SECRET = "OKF-DUMMY-SECRET-123\n"  # scan-leaks:ignore (dummy fixture value)
+
+
+@unittest.skipUnless(hasattr(os, "symlink"), "needs os.symlink")
+class AssetSymlinkTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="okf-hostile-asset-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.bundle = os.path.join(self.tmp, "bundle")
+        write_file(os.path.join(self.tmp, "outside", "secret.txt"),
+                   DUMMY_SECRET)
+        write_file(os.path.join(self.bundle, "index.md"),
+                   '---\nokf_version: "0.1"\n---\n# Probe bundle\n\n'
+                   "A plain tagline.\n")
+        write_file(os.path.join(self.bundle, "assets", "ok.txt"),
+                   "plain asset\n")
+        assets = os.path.join(self.bundle, "assets")
+        try:
+            os.symlink(os.path.join("..", "..", "outside", "secret.txt"),
+                       os.path.join(assets, "leak.txt"))
+            os.symlink(os.path.join(self.tmp, "outside", "secret.txt"),
+                       os.path.join(assets, "abs-leak.txt"))
+            os.symlink("missing.txt", os.path.join(assets, "dangling.txt"))
+            os.symlink("ok.txt", os.path.join(assets, "inside.txt"))
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("cannot make symlinks here: %s" % exc)
+        self.site = os.path.join(self.tmp, "site")
+        self.log = io.StringIO()
+        code = okf_site.main(["generate", self.bundle, "--out", self.site],
+                             out=self.log)
+        self.assertEqual(code, 0, self.log.getvalue())
+        self.out_assets = os.path.join(self.site, "public", "bundle-assets",
+                                       "assets")
+
+    def test_outside_symlinks_are_not_copied(self):
+        for name in ("leak.txt", "abs-leak.txt", "dangling.txt"):
+            with self.subTest(name):
+                path = os.path.join(self.out_assets, name)
+                self.assertFalse(os.path.lexists(path), path)
+                self.assertIn("WARN: asset skipped", self.log.getvalue())
+                self.assertIn("assets/" + name, self.log.getvalue())
+
+    def test_no_site_file_holds_the_secret(self):
+        for base, _, files in os.walk(self.site):
+            for name in files:
+                path = os.path.join(base, name)
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    self.assertNotIn(DUMMY_SECRET.strip(), fh.read(), path)
+
+    def test_normal_and_inside_assets_are_copied(self):
+        for name in ("ok.txt", "inside.txt"):
+            with self.subTest(name):
+                path = os.path.join(self.out_assets, name)
+                self.assertTrue(os.path.isfile(path), path)
+                self.assertFalse(os.path.islink(path), path)
+                with open(path, encoding="utf-8") as fh:
+                    self.assertEqual(fh.read(), "plain asset\n")
+        self.assertIn("2 asset(s)", self.log.getvalue())
+
+    def test_copy_rechecks_containment(self):
+        # The scan accepted the asset; the link is swapped before the copy.
+        bundle = okf_site.scan_bundle(self.bundle)
+        self.assertIn("assets/ok.txt", bundle.assets)
+        ok = os.path.join(self.bundle, "assets", "ok.txt")
+        os.remove(ok)
+        os.symlink(os.path.join(self.tmp, "outside", "secret.txt"), ok)
+        site = os.path.join(self.tmp, "site2")
+        okf_site.generate_site(bundle, site, {"title": "T"})
+        self.assertFalse(os.path.lexists(
+            os.path.join(site, "public", "bundle-assets", "assets", "ok.txt")))
+
+    def test_pre_fix_copy_would_leak(self):
+        # Negative fixture: a plain copyfile follows the link, as the
+        # generator did before the fix, so the check above can see a leak.
+        dst = os.path.join(self.tmp, "prefix-copy.txt")
+        shutil.copyfile(os.path.join(self.bundle, "assets", "leak.txt"), dst)
+        with open(dst, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), DUMMY_SECRET)
+        self.assertFalse(okf_site.asset_inside(
+            self.bundle, os.path.join(self.bundle, "assets", "leak.txt")))
 
 
 if __name__ == "__main__":

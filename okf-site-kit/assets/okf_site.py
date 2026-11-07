@@ -195,6 +195,22 @@ class Bundle:
         self.warnings = []
 
 
+def asset_inside(root, path):
+    """True when `path` is a regular file whose real path is inside `root`.
+
+    A symlink is resolved first. A symlink whose target is outside the
+    bundle, or that points to no regular file (dangling, a directory), is
+    not an asset: copying it would publish a file from outside the bundle.
+    A symlink whose target stays inside the bundle is kept, and its target's
+    bytes are copied as a regular file.
+    """
+    real_root = os.path.realpath(root)
+    real = os.path.realpath(path)
+    if not real.startswith(real_root.rstrip(os.sep) + os.sep):
+        return False
+    return os.path.isfile(real)
+
+
 def scan_bundle(root):
     b = Bundle(root)
     if not os.path.isdir(root):
@@ -211,7 +227,12 @@ def scan_bundle(root):
             rel = (rel_dir + "/" + name) if rel_dir else name
             path = os.path.join(base, name)
             if not name.endswith(".md"):
-                b.assets.append(rel)
+                if asset_inside(b.root, path):
+                    b.assets.append(rel)
+                else:
+                    b.warnings.append(
+                        "asset skipped, it is a symlink that points outside "
+                        "the bundle or to no regular file: %s" % rel)
                 continue
             with open(path, encoding="utf-8", errors="replace") as f:
                 text = f.read()
@@ -1023,9 +1044,13 @@ def generate_site(bundle, out, opts):
           homepage(opts, bundle, routes, has_overview, has_changelog))
     # assets
     for rel in bundle.assets:
+        src = os.path.join(bundle.root, rel)
+        # re-check just before the copy: the bundle can change after the scan
+        if not asset_inside(bundle.root, src):
+            continue
         dst = os.path.join(out, "public", "bundle-assets", rel)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copyfile(os.path.join(bundle.root, rel), dst)
+        shutil.copyfile(os.path.realpath(src), dst)
     # project scaffolding
     write("src/content.config.ts", CONTENT_CONFIG)
     write("src/styles/okf.css", OKF_CSS.replace("%%", "%"))
