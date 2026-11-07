@@ -344,6 +344,8 @@ SINCE_RUN5 = "a643177"  # the autonomous factory, run 5: its first commit, the r
 # the approve-only checkpoint gate, test-safety-net's opt-in --precise and the fixture
 # moves in ops-intake and security-posture-audit -- comes after it. The run merges with
 # a merge commit, so the hash stays the same on the way into main.
+SINCE_OKF_MD_SYMLINK = "dc04763"  # okf-site-kit 1.2.1: a .md symlink to a file outside
+# the bundle (or to no file) is no longer read as a page, the follow-up run 5's T16 found.
 
 
 def _git_out(*args):
@@ -11770,6 +11772,68 @@ def check_run5_okf_site(old, new):
         "neither is copied, and the normal asset still is", since=SINCE_RUN5)
 
 
+_OKF_MD_SYMLINK = r"""
+import io, shutil, tempfile
+import okf_site
+MARK = "OKF-PAGE-PROBE-7"
+out = {}
+tmp = tempfile.mkdtemp(prefix="ab-okf-md-")
+try:
+    def bundle(name, links):
+        b = os.path.join(tmp, name)
+        os.makedirs(b)
+        with open(os.path.join(b, "index.md"), "w") as fh:
+            fh.write('---\nokf_version: "0.1"\n---\n# Probe\n\nA tagline.\n')
+        with open(os.path.join(b, "plain.md"), "w") as fh:
+            fh.write("---\ntype: Concept\n---\n# Plain\n\nPlain body.\n")
+        for link, target in links:
+            os.symlink(target, os.path.join(b, link))
+        return b
+    outside = os.path.join(tmp, "outside.md")
+    with open(outside, "w") as fh:
+        fh.write("# Outside\n\n" + MARK + "\n")
+    def build(b, site):
+        try:
+            return okf_site.main(["generate", b, "--out", site], out=io.StringIO())
+        except (Exception, SystemExit):
+            return 99
+    site = os.path.join(tmp, "site-leak")
+    out["leak_rc"] = build(bundle("leak", [("leak.md", outside)]), site)
+    leaked = 0
+    for base, _, files in os.walk(site):
+        for name in files:
+            with open(os.path.join(base, name), encoding="utf-8", errors="replace") as fh:
+                leaked += int(MARK in fh.read())
+    out["leaked"] = leaked
+    out["dangling_rc"] = build(bundle("dangling", [("gone.md", "missing.md")]),
+                               os.path.join(tmp, "site-dangling"))
+    out["inside_rc"] = build(bundle("inside", [("alias.md", "plain.md")]),
+                             os.path.join(tmp, "site-inside"))
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+print(json.dumps(out))
+"""
+
+
+def check_okf_md_symlink(old, new):
+    a, b = (probe(t, "okf-site-kit/assets", _OKF_MD_SYMLINK) for t in (old, new))
+    if _errored(a, b):
+        return
+    s = "okf-site-kit (pages)"
+    row(s, "site files holding a page symlinked from outside the bundle (lower=better)",
+        a["leaked"], b["leaked"], a["leaked"] > 0 and b["leaked"] == 0 and b["leak_rc"] == 0,
+        "a .md symlink to a markdown file outside the bundle: the head skips it with "
+        "WARN: page skipped, the baseline published it as a concept page",
+        since=SINCE_OKF_MD_SYMLINK)
+    row(s, "builds that fail on a dangling .md symlink (lower=better)",
+        int(a["dangling_rc"] != 0), int(b["dangling_rc"] != 0),
+        a["dangling_rc"] != 0 and b["dangling_rc"] == 0,
+        "the baseline's scan opened the broken link and stopped the build",
+        since=SINCE_OKF_MD_SYMLINK)
+    row(s, "a .md symlink inside the bundle still builds (rc)", a["inside_rc"], b["inside_rc"],
+        a["inside_rc"] == b["inside_rc"] == 0, "an alias page stays a page", kind="guard")
+
+
 _R5_LOOPS = r"""
 C = _load(TESTS["gate"], "r5_checkpoint")
 with open(os.path.join(HERE, "templates", "human-checkpointed.template.md"),
@@ -12057,6 +12121,7 @@ def main():
         check_run5_world_model(old, REPO)
         check_run5_tmux(old, REPO)
         check_run5_okf_site(old, REPO)
+        check_okf_md_symlink(old, REPO)
         check_run5_loops(old, REPO)
         check_run5_test_safety_net(old, REPO)
         check_run5_fixture_moves(old, REPO)
