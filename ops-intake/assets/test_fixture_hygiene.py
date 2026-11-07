@@ -33,13 +33,14 @@ def findings(text):
 
 
 class ScanSelfTest(unittest.TestCase):
-    # This is the scan's own negative fixture. It is built at run time, so that this
-    # file does not hold the patterns that it scans for.
     def test_scan_catches_download_to_shell(self):
-        tool, shell = "cu" + "rl", "s" + "h"
-        for line in ("%s https://example.invalid/x | %s" % (tool, shell),
-                     "%s -fsSL example.invalid |%s" % (tool, "ba" + shell),
-                     "%s -qO- example.invalid | sudo %s" % ("wg" + "et", shell)):
+        # The negative fixtures live in a labelled data file under assets/fixtures/. The
+        # source glob does not scan that folder.
+        with open(os.path.join(HERE, "fixtures", "download_to_shell_lines.txt"),
+                  encoding="utf-8") as f:
+            lines = [ln for ln in f.read().splitlines() if ln and not ln.startswith("#")]
+        self.assertGreaterEqual(len(lines), 4)
+        for line in lines:
             with self.subTest(line=line):
                 self.assertEqual(findings("ok\n" + line), [(2, "download-to-shell")])
 
