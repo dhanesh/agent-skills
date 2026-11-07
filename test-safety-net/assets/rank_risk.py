@@ -76,14 +76,17 @@ it belongs to the stack; if it only orchestrates or scores, it stays here.
                                                  never over-credit.
 
   analysis
-    discover_units(root, precise=True)           the units, plus WHICH
+    discover_units(root, precise=...)            the units, plus WHICH
         -> (units, path)                         discovery path ran
                                                  ("precise" | "heuristic").
-                                                 `precise=False` declines any
-                                                 path that would EXECUTE the
+                                                 A path that would EXECUTE the
                                                  analysed repo's own toolchain
-                                                 (node's does; Python's `ast`
-                                                 does not, and ignores it)
+                                                 runs only under precise=True
+                                                 (node's; its default is
+                                                 False). `precise=False`
+                                                 declines every toolchain
+                                                 path (Python's `ast` runs
+                                                 nothing, and ignores it)
     triage(root, unit) -> (tier, reason)         the FILTER -- never the
                                                  enforcement; the runtime
                                                  guard enforces the no-I/O
@@ -219,13 +222,25 @@ UNCONTROLLABLE = stack_python.UNCONTROLLABLE
 triage = stack_python.triage
 
 
-def discover_units(root: str, stack=None, precise: bool = True):
+def _discover(stack, root: str, precise=None):
+    """`stack.discover_units`, passing `precise` only when the caller chose.
+
+    None means "this stack's own default": node runs no repo code unless
+    asked, go and python run their precise readers (neither executes the
+    analysed repo's code).
+    """
+    if precise is None:
+        return stack.discover_units(root)
+    return stack.discover_units(root, precise=precise)
+
+
+def discover_units(root: str, stack=None, precise=None):
     """The discovered units alone, dropping the discovery-path label.
 
     The stack interface returns `(units, discovery_path)`; this preserves the
     single-value contract callers had before the label existed.
     """
-    return (stack or detect_stack(root)).discover_units(root, precise=precise)[0]
+    return _discover(stack or detect_stack(root), root, precise)[0]
 
 def _git_prefix(root: str) -> str:
     """`root`'s path INSIDE its git repo, slash-terminated ("pkg/sub/"), or "".
@@ -615,7 +630,7 @@ def _normalise(value, hi):
 
 
 def rank(root: str, since: str = "6 months ago", top_n: int = 10,
-         stack=None, precise: bool = True) -> dict:
+         stack=None, precise=None) -> dict:
     """The plan: what to net, what cannot be netted, and what is already covered.
 
     `ranked`, `remainder` and `not_netted` partition the discovered units by
@@ -636,10 +651,11 @@ def rank(root: str, since: str = "6 months ago", top_n: int = 10,
     # says which reader produced each. Python is always "precise" (`ast` is
     # stdlib and cannot go missing); node is "precise" only where the repo
     # ships its own `typescript`.
-    # `precise=False` is the caller declining any discovery path that would
-    # EXECUTE code from the analysed repo. Only node has one; see
-    # `stack_node.discover_units`.
-    units, discovery = stack.discover_units(root, precise=precise)
+    # `precise=None` keeps each stack's own default; node's default executes
+    # no code from the analysed repo, and only `precise=True` (`--precise`)
+    # opts in to its toolchain path. `precise=False` declines every toolchain
+    # path. See `stack_node.discover_units`.
+    units, discovery = _discover(stack, root, precise)
     churn_by_path = churn(root, since)
     refs = inbound_refs(root, units, stack)
     covered = already_covered(root, units, stack)
@@ -715,10 +731,22 @@ def main(argv=None) -> int:
     # process). Everything else this tool does to a target tree reads it. That
     # is a real decision on a repo nobody has vetted, so it gets a way to say
     # no -- and the `discovery` key then honestly reports "heuristic".
+    #
+    # SO IT IS OPT-IN (run 5, D25). Node's precise path runs only under
+    # `--precise`; the default executes no code from the analysed repo.
+    # `precise` stays None unless a flag is given, so each stack keeps its own
+    # default: node declines, go still runs this skill's own `go/ast` helper
+    # (no repo code), python's `ast` is always precise. `--no-precise` stays
+    # accepted -- it is now node's default, so there it changes nothing, and
+    # on go it still declines the helper as before.
+    p.add_argument("--precise", dest="precise", action="store_true", default=None,
+                   help="opt in to node's precise discovery: it requires the "
+                        "analysed repo's own typescript in a node process, which "
+                        "RUNS THAT REPO'S CODE (default: off, heuristic reader)")
     p.add_argument("--no-precise", dest="precise", action="store_false",
-                   help="never execute the analysed repo's own toolchain; use the "
-                        "heuristic reader only (node's precise path requires that "
-                        "repo's typescript in-process)")
+                   help="never execute any discovery toolchain; use the heuristic "
+                        "reader only (the default on node already; on go it also "
+                        "declines the go/ast helper)")
     args = p.parse_args(argv)
     if not os.path.isdir(args.repo):
         sys.stderr.write(f"error: not a directory: {args.repo}\n")
