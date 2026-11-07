@@ -71,11 +71,10 @@ must preserve them; concretely exercised by this repo's `feynman-walkthrough` sk
 
 - No public registry of third-party OKF bundles as of the survey date — OKF v0.1 was
   published in June 2026 and the ecosystem is weeks old; the spec repo's three bundles
-  are the only authoritative published examples, with community sites
-  ([Document360](https://document360.com/blog/open-knowledge-format/),
-  [Flowtivity](https://flowtivity.ai/blog/google-open-knowledge-format/),
-  [WitsCode](https://witscode.com/open-knowledge-format)) reproducing spec-shaped
-  examples rather than new dialects.
+  are the only authoritative published examples, with community sites (for example
+  [Document360](https://document360.com/blog/open-knowledge-format/) and
+  [Flowtivity](https://flowtivity.ai/blog/google-open-knowledge-format/)) reproducing
+  spec-shaped examples rather than new dialects.
 - No alternate reserved filenames or index formats beyond `index.md`/`log.md`.
 
 When surveying again (do so when the spec version bumps): re-check the spec repo's
