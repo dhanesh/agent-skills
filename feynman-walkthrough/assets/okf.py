@@ -429,11 +429,24 @@ def fingerprint(locator, source_type, bundle_root=None):
     return None  # external
 
 
+# A git pin is a full 40-hex commit SHA, with "+dirty" when the worktree had changes.
+# The pin comes from the explainer file, which anyone can edit, and its SHA part goes
+# into `git diff <sha>..HEAD`. A pin such as `--output=<path>` would act as a git
+# option and write a file, so any other value is an ERROR and never reaches git.
+GIT_PIN_RE = re.compile(r"[0-9a-f]{40}(\+dirty)?")
+
+
+def valid_git_pin(pinned_fp):
+    """True when `pinned_fp` is a 40-hex commit SHA with an optional +dirty."""
+    return isinstance(pinned_fp, str) and GIT_PIN_RE.fullmatch(pinned_fp) is not None
+
+
 def git_drift(locator, pinned_fp, bundle_root=None):
     """Classify a git source against its pinned fingerprint.
 
     Returns (state, current_fp, committed, dirty): state is FRESH/STALE/
-    UNKNOWN; committed is the sorted `git diff --name-status` lines between
+    UNKNOWN, or ERROR when the pin is not a valid git pin (see
+    `valid_git_pin`; no git command runs then); committed is the sorted `git diff --name-status` lines between
     the pinned SHA and HEAD; dirty is the sorted worktree-change paths — both
     with everything under the bundle root filtered out when the bundle lives
     inside the repo (self-pin: committing the bundle must not STALE it).
@@ -442,6 +455,8 @@ def git_drift(locator, pinned_fp, bundle_root=None):
     compares by its SHA part — the dirty content it saw was never
     fingerprintable, so only committed/current drift can be judged.
     """
+    if not valid_git_pin(pinned_fp):
+        return "ERROR", None, [], []
     current = fingerprint(locator, "git", bundle_root)
     if current is None:
         return "UNKNOWN", None, [], []
@@ -625,8 +640,9 @@ def diff_okf(subject_dir, bundle_root=None):
     sources `committed` holds `git diff --name-status <pinned>..HEAD` lines
     and `dirty` the worktree-change paths, both excluding the bundle root
     when it lives inside the repo (see `git_drift`). Non-git sources carry
-    just their state. Overall is STALE if any source drifted, else UNKNOWN
-    if any can't be fingerprinted, else FRESH.
+    just their state. A git source whose pin is not a valid git pin is
+    ERROR. Overall is ERROR if any source is ERROR, else STALE if any source
+    drifted, else UNKNOWN if any can't be fingerprinted, else FRESH.
     """
     if bundle_root is None:
         bundle_root = os.path.dirname(os.path.abspath(subject_dir))
@@ -654,7 +670,9 @@ def diff_okf(subject_dir, bundle_root=None):
                 entry["state"] = "FRESH" if current == pinned else "STALE"
         entries.append(entry)
     states = [e["state"] for e in entries]
-    if "STALE" in states:
+    if "ERROR" in states:
+        overall = "ERROR"
+    elif "STALE" in states:
         overall = "STALE"
     elif "UNKNOWN" in states:
         overall = "UNKNOWN"
@@ -664,9 +682,9 @@ def diff_okf(subject_dir, bundle_root=None):
 
 
 def status_okf(subject_dir, bundle_root=None):
-    """Return (overall, [(source, state), ...]) — states FRESH/STALE/UNKNOWN.
+    """Return (overall, [(source, state), ...]) — states FRESH/STALE/UNKNOWN/ERROR.
 
-    Overall is STALE if any source drifted, else UNKNOWN if any source can't
+    Overall is ERROR if any git pin is invalid, else STALE if any source drifted, else UNKNOWN if any source can't
     be fingerprinted (external URL/topic, or a moved path), else FRESH.
     Changes confined to the bundle root itself (default: the subject dir's
     parent) never count as git drift — see `git_drift`.
@@ -773,7 +791,11 @@ def main(argv=None, out=None):
             source = entry["source"]
             out.write("SOURCE: %s %s -> %s\n"
                       % (source["type"], source["locator"], entry["state"]))
-            if source["type"] == "git":
+            if entry["state"] == "ERROR":
+                out.write("  ERROR: pinned fingerprint %r is not a 40-hex commit"
+                          " SHA (optional +dirty); no git diff was run\n"
+                          % (entry["pinned"],))
+            elif source["type"] == "git":
                 out.write("  PINNED: %s\n" % entry["pinned"])
                 out.write("  CURRENT: %s\n" % (entry["current"] or "unavailable"))
                 for line in entry["committed"]:
@@ -782,7 +804,7 @@ def main(argv=None, out=None):
                     out.write("  DIRTY\t%s\n" % path)
         out.write("OKF_DIFF: %s %s\n"
                   % (os.path.basename(subject_dir), overall))
-        return 0
+        return 1 if overall == "ERROR" else 0
 
     # status
     if args.subject:
@@ -803,7 +825,7 @@ def main(argv=None, out=None):
             out.write("SOURCE: %s %s -> %s\n"
                       % (source["type"], source["locator"], state))
         out.write("OKF_STATUS: %s %s\n" % (os.path.basename(subject_dir), overall))
-        if overall == "STALE":
+        if overall in ("STALE", "ERROR"):
             exit_code = 1
     return exit_code
 

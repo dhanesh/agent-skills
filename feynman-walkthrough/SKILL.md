@@ -19,7 +19,7 @@ compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PY
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.2.4"
+  version: "1.2.5"
   tags: "learning,feynman,walkthrough,explainer,okf,knowledge-base,spaced-repetition,onboarding"
 ---
 
@@ -159,6 +159,9 @@ before, check the knowledge root first (`python3 "$SKILL_DIR/assets/okf.py" stat
   explains never trips STALE — the tool ignores changes confined to the bundle root.)
 - **UNKNOWN** (external URL/topic sources) → ask whether the source changed, or
   re-check it yourself before leaning on the explainer.
+- **ERROR** (a git pin that is not a 40-hex commit SHA, with an optional `+dirty`) → the
+  explainer's `sources:` were edited by hand or damaged; the tool runs no git command
+  with that pin. Re-pin with `okf.py pin <subject>` once you trust the explainer again.
 
 For **one** subject the flow above is the whole story. For a whole knowledge root — sweeping
 many bundles, finding every drifted subject, regenerating a published site — hand off to the
