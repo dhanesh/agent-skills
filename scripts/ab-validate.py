@@ -336,6 +336,14 @@ SINCE_RUN4 = "d3d3c50"  # the autonomous factory, run 4: its first commit, the r
 # stage, factory-conductor's PR number, skill-shadow refusal and PR-command allowlist, and
 # the ops-intake squash resolve all come after it. The run merges with a merge commit, so
 # the hash stays the same on the way into main.
+SINCE_RUN5 = "a643177"  # the autonomous factory, run 5: its first commit, the run-5 spec
+# (scanner ratings and audit fixes, factory/run5-base). Every fix of the run -- git
+# config and fingerprint pins (feynman-walkthrough, knowledge-gardener), jev's SDK and
+# --images, -I on inline Python (context-hygiene-kit, world-model-ledger,
+# tmux-agent-herdr-lite), agent-pane argv, okf-site-kit's escaping and asset symlinks,
+# the approve-only checkpoint gate, test-safety-net's opt-in --precise and the fixture
+# moves in ops-intake and security-posture-audit -- comes after it. The run merges with
+# a merge commit, so the hash stays the same on the way into main.
 
 
 def _git_out(*args):
@@ -11329,6 +11337,594 @@ def check_run4_ops_intake(old, new):
         "no PR number, so the item still needs the owner's resolve (D20)", kind="guard")
 
 
+# ── autonomous factory, run 5: scanner ratings and audit fixes ──────────────
+# Each probe loads the HEAD's own new test module for its fixture (so no hostile
+# payload is copied into this file: it stays in the labelled test or fixture file),
+# points that module's paths at the tree under test, and measures the tree's tool.
+# The tree's module is imported first, so a test module that puts its own folder on
+# sys.path still gets the tree's copy. Both arms run offline: no network, no real tmux
+# server, no Jev API (a stub typesafe_sdk records the call).
+_R5_PRELUDE = r"""
+import importlib.util, io, re, shutil, subprocess, unittest
+HERE = sys.path[0]
+def _load(path, name):
+    keep = list(sys.path)
+    spec = importlib.util.spec_from_file_location(name, path)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    sys.path[:] = keep
+    return m
+def _passes(case):
+    r = unittest.TestResult()
+    case.run(r)
+    return int(r.testsRun == 1 and r.wasSuccessful() and not r.skipped)
+"""
+
+
+def _r5_probe(tree, subdir, tests, body):
+    """probe() with TESTS = {key: head path} and the run-5 prelude in front of body."""
+    head = {k: os.path.join(REPO, v) for k, v in tests.items()}
+    return probe(tree, subdir, _R5_PRELUDE + "TESTS = %r\n" % head + body)
+
+
+def _r5_pair(subdir, tests, body):
+    return (lambda old, new: (_r5_probe(old, subdir, tests, body),
+                              _r5_probe(new, subdir, tests, body)))
+
+
+_R5_OKF = r"""
+import okf
+G = _load(TESTS["safe"], "r5_okf_git_safe")
+F = _load(TESTS["pin"], "r5_okf_fingerprint")
+G.OKF = F.OKF = os.path.join(HERE, "okf.py")
+out = {}
+t = G.GitSafeOnHostileRepo("test_status_runs_no_fsmonitor_and_every_git_call_is_safe")
+t.setUp()
+try:
+    t.okf("status", "evil")
+    t.okf("diff", "evil")
+    out["fsmonitor"] = int(os.path.exists(t.marker))
+finally:
+    t.tearDown()
+t = F.OptionPinIsAnError("test_status_reports_error_and_writes_no_file")
+t.setUp()
+try:
+    t.okf("status", "normal")
+    t.okf("diff", "normal")
+    out["clobber"] = len(t.clobber_files())
+finally:
+    t.tearDown()
+out["normal"] = _passes(G.NormalRepoRegression("test_fresh_then_stale_with_changed_file"))
+print(json.dumps(out))
+"""
+
+
+def check_run5_feynman(old, new):
+    a, b = _r5_pair("feynman-walkthrough/assets",
+                    {"safe": "feynman-walkthrough/assets/test_okf_git_safe.py",
+                     "pin": "feynman-walkthrough/assets/test_okf_fingerprint.py"},
+                    _R5_OKF)(old, new)
+    if _errored(a, b):
+        return
+    row("feynman-walkthrough (git-safe)",
+        "core.fsmonitor marker after okf status + diff on a hostile pin (lower=better)",
+        a["fsmonitor"], b["fsmonitor"], a["fsmonitor"] == 1 and b["fsmonitor"] == 0,
+        "an embedded bare repo set to core.bare false and core.worktree .., pinned, then "
+        "given a core.fsmonitor command: every okf git call now carries "
+        "-c core.fsmonitor=false -c core.hooksPath=/dev/null", since=SINCE_RUN5)
+    row("feynman-walkthrough (fingerprint)",
+        "files a `--output=<dir>/clobber` pin makes git write (lower=better)",
+        a["clobber"], b["clobber"], a["clobber"] >= 1 and b["clobber"] == 0,
+        "a pin that is not a 40-hex SHA (optional +dirty) is an ERROR for its source and "
+        "never reaches git", since=SINCE_RUN5)
+    row("feynman-walkthrough (git-safe)", "a normal pin goes FRESH, then STALE (1=right)",
+        a["normal"], b["normal"], a["normal"] == b["normal"] == 1,
+        "the head's NormalRepoRegression case, run against each tree", kind="guard")
+
+
+_R5_GARDEN = r"""
+import garden
+G = _load(TESTS["safe"], "r5_garden_git_safe")
+F = _load(TESTS["pin"], "r5_garden_fingerprint")
+G.GARDEN = F.GARDEN = os.path.join(HERE, "garden.py")
+out = {}
+t = G.GitSafeOnHostileRepo("test_sweep_runs_no_fsmonitor")
+t.setUp()
+try:
+    t.sweep()
+    out["fsmonitor"] = int(os.path.exists(t.marker))
+finally:
+    t.tearDown()
+t = F.OptionPinIsAnError("test_sweep_reports_error_and_writes_no_file")
+t.setUp()
+try:
+    t.sweep()
+    out["clobber"] = len(t.clobber_files())
+finally:
+    t.tearDown()
+out["normal"] = _passes(F.NormalPinRegression("test_fresh_then_stale_with_changed_file"))
+print(json.dumps(out))
+"""
+
+
+def check_run5_gardener(old, new):
+    a, b = _r5_pair("knowledge-gardener/assets",
+                    {"safe": "knowledge-gardener/assets/test_garden_git_safe.py",
+                     "pin": "knowledge-gardener/assets/test_garden_fingerprint.py"},
+                    _R5_GARDEN)(old, new)
+    if _errored(a, b):
+        return
+    row("knowledge-gardener (git-safe)",
+        "core.fsmonitor marker after garden.py sweep on a hostile pin (lower=better)",
+        a["fsmonitor"], b["fsmonitor"], a["fsmonitor"] == 1 and b["fsmonitor"] == 0,
+        "the same embedded-bare-repo fixture, pinned one commit back so the sweep takes "
+        "the STALE path: every garden git call now carries the two safe switches",
+        since=SINCE_RUN5)
+    row("knowledge-gardener (fingerprint)",
+        "files a `--output=<dir>/clobber` pin makes git write (lower=better)",
+        a["clobber"], b["clobber"], a["clobber"] >= 1 and b["clobber"] == 0,
+        "the sweep reports the pin as an ERROR and passes it to no git command",
+        since=SINCE_RUN5)
+    row("knowledge-gardener (git-safe)", "a normal pin goes FRESH, then STALE (1=right)",
+        a["normal"], b["normal"], a["normal"] == b["normal"] == 1,
+        "the head's NormalPinRegression case, run against each tree", kind="guard")
+
+
+_R5_JEV = r"""
+import hashlib
+from pathlib import Path
+J = _load(TESTS["images"], "r5_jev_images")
+J.JEV = Path(HERE) / "jev"
+out = {}
+with open(J.JEV, encoding="utf-8") as f:
+    out["no_config"] = int("--no-config" in f.readline())
+t = J.JevImagesTest("test_box_without_images_exits_2_and_makes_no_call")
+t.setUp()
+try:
+    t.run_jev(t.request("box.json", t.box_request(t.image)))
+    out["box_called"] = int(t.out.exists())
+finally:
+    t.tearDown()
+t = J.JevImagesTest("test_log_records_image_as_path_and_sha256")
+t.setUp()
+try:
+    t.run_jev("--images", t.request("box.json", t.box_request(t.image)))
+    want = {"image": str(t.image), "sha256": hashlib.sha256(J.IMAGE_BYTES).hexdigest()}
+    logs = list((t.root / "log").rglob("*.jsonl"))
+    recs = [json.loads(ln) for p in logs for ln in p.read_text().splitlines() if ln.strip()]
+    out["image_logged"] = sum(1 for r in recs
+                              if (r.get("state") or {}).get("shot") == want)
+    out["bytes_logged"] = sum(1 for p in logs if J.IMAGE_BYTES.decode() in p.read_text())
+finally:
+    t.tearDown()
+out["plain"] = _passes(J.JevImagesTest("test_plain_noul_sends_no_header"))
+print(json.dumps(out))
+"""
+
+
+def check_run5_jev(old, new):
+    a, b = _r5_pair("jev-agent-setup/assets",
+                    {"images": "jev-agent-setup/assets/test_jev_images.py"},
+                    _R5_JEV)(old, new)
+    if _errored(a, b):
+        return
+    s = "jev-agent-setup"
+    row(s, "the jev shebang carries uv --no-config (1=right)", a["no_config"],
+        b["no_config"], a["no_config"] == 0 and b["no_config"] == 1,
+        "D23: `uv run --quiet --no-config --script`, so the owner's uv user config "
+        "cannot pin or redirect the SDK; the dependency is typesafe-sdk>=0.7.5",
+        since=SINCE_RUN5)
+    row(s + " (images)", "a box request with no --images reaches the SDK (lower=better)",
+        a["box_called"], b["box_called"], a["box_called"] == 1 and b["box_called"] == 0,
+        "a stub typesafe_sdk on PYTHONPATH records each call: without --images a box "
+        "question or an image placeholder now exits 2 before any call", since=SINCE_RUN5)
+    row(s + " (images)", "logged image placeholders kept as path + sha256 (higher=better)",
+        a["image_logged"], b["image_logged"],
+        a["image_logged"] == 0 and b["image_logged"] == 1 and b["bytes_logged"] == 0,
+        "`jev --images box.json`: the log records the image as its path and sha256, never "
+        "its bytes; the baseline has no --images flag and logs nothing",
+        since=SINCE_RUN5)
+    row(s + " (images)", "a plain noul request: no header, same answer (1=right)",
+        a["plain"], b["plain"], a["plain"] == b["plain"] == 1,
+        "the head's test_plain_noul_sends_no_header case, run against each tree",
+        kind="guard")
+
+
+_R5_HYGIENE = r"""
+from pathlib import Path
+H = _load(TESTS["iso"], "r5_hygiene_iso")
+H.HOOKS = Path(HERE) / "hooks"
+out = {"marker": 0, "ok": 0}
+for name in ("session_start.sh", "stop.sh"):
+    t = H.HooksIgnorePlantedModules("test_stop_ignores_planted_json")
+    t.setUp()
+    try:
+        r = t.run_hook(name)
+        out["ok"] += int(r.returncode == 0)
+        if t.marker.exists():
+            out["marker"] += len(t.marker.read_text().split())
+    finally:
+        t.doCleanups()
+files = sorted(H.HOOKS.glob("*.sh")) + [Path(HERE).parent / "scripts" / "install.sh"]
+out["bare"] = sum(1 for f in files for ln in f.read_text().splitlines()
+                  for m in H.INLINE.finditer(ln) if "-I" not in m.group("flags").split())
+print(json.dumps(out))
+"""
+
+
+def check_run5_hygiene(old, new):
+    a, b = _r5_pair("context-hygiene-kit/assets",
+                    {"iso": "context-hygiene-kit/assets/test_hooks_isolation.py"},
+                    _R5_HYGIENE)(old, new)
+    if _errored(a, b):
+        return
+    s = "context-hygiene-kit (isolation)"
+    row(s, "planted json.py imports by session_start.sh + stop.sh (lower=better)",
+        a["marker"], b["marker"], a["marker"] > 0 and b["marker"] == 0 and b["ok"] == 2,
+        "the hooks start from a project that holds a planted json.py marker module; each "
+        "inline `\"$PY\" -` / `-c` call now runs with -I, so the working directory is not "
+        "on sys.path", since=SINCE_RUN5)
+    row(s, "inline \"$PY\" calls without -I in hooks + installer (lower=better)",
+        a["bare"], b["bare"], a["bare"] > 0 and b["bare"] == 0,
+        "the head test's own pattern, counted over each tree's files", since=SINCE_RUN5)
+
+
+_R5_WM = r"""
+from pathlib import Path
+W = _load(TESTS["iso"], "r5_wm_iso")
+W.HOOKS = Path(HERE) / "hooks"
+W.GRADER = Path(HERE).parent / "eval" / "grade.py"
+out = {"marker": 0, "ok": 0}
+for name, kind in (("session_start.sh", "session"), ("stop.sh", "session"),
+                   ("pretooluse.sh", "tool"), ("posttooluse-observe.sh", "tool")):
+    t = W.HooksIgnorePlantedModules("test_stop")
+    t.setUp()
+    try:
+        r = t.run_hook(name, t.session() if kind == "session" else t.tool())
+        out["ok"] += int(r.returncode == 0)
+        if t.marker.exists():
+            out["marker"] += len(t.marker.read_text().split())
+    finally:
+        t.doCleanups()
+t = W.GraderRunsCandidateIsolated("test_probe_runs_isolated_in_fresh_directory")
+t.setUp()
+try:
+    got = t.grade(W.PROBE)
+    m = re.search(r"ISOLATED (\d)", got.get("reason", ""))
+    out["isolated"] = int(m.group(1)) if m else 0
+    out["cand_in_cwd"] = int((t.run_dir / "gt-cand-wrote").exists())
+finally:
+    t.doCleanups()
+out["grades"] = _passes(W.GraderRunsCandidateIsolated("test_grades_do_not_change"))
+print(json.dumps(out))
+"""
+
+
+def check_run5_world_model(old, new):
+    a, b = _r5_pair("world-model-ledger/assets",
+                    {"iso": "world-model-ledger/assets/test_isolation.py"},
+                    _R5_WM)(old, new)
+    if _errored(a, b):
+        return
+    s = "world-model-ledger (isolation)"
+    row(s, "planted json/hashlib/shlex imports by the four hooks (lower=better)",
+        a["marker"], b["marker"], a["marker"] > 0 and b["marker"] == 0 and b["ok"] == 4,
+        "session_start, stop, pretooluse and posttooluse-observe from a git project that "
+        "holds planted marker modules: every inline call now runs with -I",
+        since=SINCE_RUN5)
+    row(s, "grade.py task3 runs the candidate with -I (1=right)",
+        a["isolated"], b["isolated"], a["isolated"] == 0 and b["isolated"] == 1,
+        "the candidate prints sys.flags.isolated; it now runs in a fresh temporary "
+        "working directory too (old wrote into the caller's directory: %s, new: %s)"
+        % (a["cand_in_cwd"], b["cand_in_cwd"]), since=SINCE_RUN5)
+    row(s, "grade.py task3 grades a good and a bad slugify as before (1=right)",
+        a["grades"], b["grades"], a["grades"] == b["grades"] == 1,
+        "the head's test_grades_do_not_change case, run against each grader",
+        kind="guard")
+
+
+_R5_TMUX = r"""
+I = _load(TESTS["iso"], "r5_tmux_iso")
+A = _load(TESTS["argv"], "r5_tmux_argv")
+I.SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
+A.AGENT_PANE = os.path.join(I.SCRIPTS, "agent-pane")
+out = {}
+t = I.PlantedModules("test_cockpit_scripts_import_no_planted_module")
+t.setUp()
+try:
+    for name in I.DRIVEN:
+        t.run_script(name)
+    out["marker"] = 0
+    if os.path.exists(t.marker):
+        with open(t.marker, encoding="utf-8") as fh:
+            out["marker"] = len(fh.read().split())
+finally:
+    t.tearDown()
+t = A.AgentPaneArgv("test_each_word_is_its_own_argument")
+t.setUp()
+try:
+    # printf, its format, then the two words with shell code and no quote, so the
+    # baseline's joined wrapper parses and runs them.
+    words = A.dangerous_words(t.work)[:4]
+    t.run_pane("semi", *words)
+    calls = [c for c in t.calls() if c and c[0] == "new-window"]
+    call = calls[0] if len(calls) == 1 else []
+    cmd = call[call.index("--") + 1:] if "--" in call else []
+    out["literal"] = sum(1 for w in words[2:] if w in cmd)
+    argv = ["sh", "-c", cmd[0]] if len(cmd) == 1 else cmd  # as tmux runs it
+    if argv:
+        subprocess.run(argv, env=dict(t.env, SHELL="/usr/bin/true"), cwd=t.work,
+                       capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+    out["ran"] = len(os.listdir(t.work))
+finally:
+    t.tearDown()
+out["simple"] = _passes(A.AgentPaneArgv("test_simple_command_record_is_unchanged"))
+print(json.dumps(out))
+"""
+
+
+def check_run5_tmux(old, new):
+    a, b = _r5_pair("tmux-agent-herdr-lite/assets",
+                    {"iso": "tmux-agent-herdr-lite/assets/test_python_isolation.py",
+                     "argv": "tmux-agent-herdr-lite/assets/test_agent_pane_argv.py"},
+                    _R5_TMUX)(old, new)
+    if _errored(a, b):
+        return
+    row("tmux-agent-herdr-lite (isolation)",
+        "planted json/hashlib/shlex imports by the cockpit scripts (lower=better)",
+        a["marker"], b["marker"], a["marker"] > 0 and b["marker"] == 0,
+        "agent-list, agent-status-scan, agent-dashboard and agent-status-summary from a "
+        "directory with planted modules, a failing stub tmux first on PATH: every "
+        "`python3 -` heredoc now runs with -I", since=SINCE_RUN5)
+    row("tmux-agent-herdr-lite (argv)",
+        "command words with `;` or `$(...)` that reach tmux as one argument (higher=better)",
+        a["literal"], b["literal"], a["literal"] == 0 and b["literal"] == 2,
+        "a stub tmux records argv: agent-pane now passes `sh -c <fixed wrapper> agent-pane "
+        "<name> <words>`, never the words joined into the script", since=SINCE_RUN5)
+    row("tmux-agent-herdr-lite (argv)",
+        "files the words' shell code creates when the pane command runs (lower=better)",
+        a["ran"], b["ran"], a["ran"] > 0 and b["ran"] == 0,
+        "the recorded new-window command, run the way tmux runs it: the baseline's "
+        "`; touch` and `$(touch ...)` execute; the head prints each word literally",
+        since=SINCE_RUN5)
+    row("tmux-agent-herdr-lite (argv)", "a simple command's pane record is unchanged (1=right)",
+        a["simple"], b["simple"], a["simple"] == b["simple"] == 1,
+        "the head's test_simple_command_record_is_unchanged case", kind="guard")
+
+
+_R5_OKF_SITE = r"""
+import okf_site
+O = _load(TESTS["hostile"], "r5_okf_site_hostile")
+O.SKILL_DIR = os.path.dirname(HERE)
+out = {"hosts": sorted(h for h in O.named_hosts() if h not in O.APPROVED_HOSTS)}
+t = O.LinkCardAttributeTest("test_every_card_has_only_three_literal_attributes")
+t.setUp()
+try:
+    bad = 0
+    for ln in t.cards:
+        attrs, problem = O.linkcard_attrs(ln)
+        bad += int(problem is not None or sorted(attrs) != ["description", "href", "title"])
+    out["cards"], out["bad_cards"] = len(t.cards), bad
+finally:
+    t.doCleanups()
+t = O.BodyMarkupTest("test_scan_finds_no_live_markup_in_any_page")
+t.setUp()
+try:
+    fence = "```html\n<b>fenced code stays</b>\n```"
+    out["live"] = sum(len(O.live_lines(b.replace(fence, ""))) for b in t.pages().values())
+finally:
+    t.doCleanups()
+tmp = tempfile.mkdtemp()
+try:
+    # The AssetSymlinkTest fixture minus its dangling link (the baseline's copy
+    # crashes on that one, which would measure nothing).
+    bundle = os.path.join(tmp, "bundle")
+    O.write_file(os.path.join(tmp, "outside", "secret.txt"), O.DUMMY_SECRET)
+    O.write_file(os.path.join(bundle, "index.md"),
+                 '---\nokf_version: "0.1"\n---\n# Probe bundle\n\nA plain tagline.\n')
+    O.write_file(os.path.join(bundle, "assets", "ok.txt"), "plain asset\n")
+    os.symlink(os.path.join("..", "..", "outside", "secret.txt"),
+               os.path.join(bundle, "assets", "leak.txt"))
+    os.symlink(os.path.join(tmp, "outside", "secret.txt"),
+               os.path.join(bundle, "assets", "abs-leak.txt"))
+    site = os.path.join(tmp, "site")
+    out["asset_rc"] = okf_site.main(["generate", bundle, "--out", site], out=io.StringIO())
+    leaked = 0
+    for base, _, files in os.walk(site):
+        for name in files:
+            with open(os.path.join(base, name), encoding="utf-8", errors="replace") as fh:
+                leaked += int(O.DUMMY_SECRET.strip() in fh.read())
+    out["leaked"] = leaked
+    out["ok_copied"] = int(os.path.isfile(os.path.join(site, "public", "bundle-assets",
+                                                       "assets", "ok.txt")))
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+print(json.dumps(out))
+"""
+
+
+def check_run5_okf_site(old, new):
+    a, b = _r5_pair("okf-site-kit/assets",
+                    {"hostile": "okf-site-kit/assets/test_okf_site_hostile.py"},
+                    _R5_OKF_SITE)(old, new)
+    if _errored(a, b):
+        return
+    s = "okf-site-kit"
+    row(s + " (links)", "web hosts in okf-site-kit outside the approved list (lower=better)",
+        len(a["hosts"]), len(b["hosts"]), len(a["hosts"]) >= 1 and not b["hosts"],
+        "D24: the blocklisted community link is removed from references/bundle-variations.md "
+        "and its sentence kept (old: %s)" % ", ".join(a["hosts"]), since=SINCE_RUN5)
+    row(s + " (escaping)", "homepage LinkCard lines a hostile title can break (lower=better)",
+        a["bad_cards"], b["bad_cards"],
+        a["bad_cards"] > 0 and b["bad_cards"] == 0 and a["cards"] == b["cards"],
+        "titles and descriptions with quotes, braces and angle brackets: each attribute is "
+        "now one literal string, read the way a JSX parser reads it", since=SINCE_RUN5)
+    row(s + " (escaping)", "live-markup lines in the generated pages of a hostile bundle "
+        "(lower=better)", a["live"], b["live"], a["live"] > 0 and b["live"] == 0,
+        "javascript:/vbscript:/data: links, <script> tags and on*= handlers in bundle bodies "
+        "and the log: the feature entry's four patterns now find nothing", since=SINCE_RUN5)
+    row(s + " (assets)", "site files holding an outside-symlinked secret (lower=better)",
+        a["leaked"], b["leaked"],
+        a["leaked"] > 0 and b["leaked"] == 0 and b["asset_rc"] == 0 and b["ok_copied"] == 1,
+        "two asset symlinks (relative and absolute) to a dummy file outside the bundle: "
+        "neither is copied, and the normal asset still is", since=SINCE_RUN5)
+
+
+_R5_LOOPS = r"""
+C = _load(TESTS["gate"], "r5_checkpoint")
+with open(os.path.join(HERE, "templates", "human-checkpointed.template.md"),
+          encoding="utf-8") as f:
+    text = f.read()
+block = C.gate_block(text) or []
+print(json.dumps({"fail_open": int(C.gate_status(text) != C.CLOSED),
+                  "timeout_stops": int(any(re.search(
+                      r"decision\s*==\s*TIMEOUT.*stop\(SAFE_STATE\)", ln) for ln in block))}))
+"""
+
+
+def check_run5_loops(old, new):
+    a, b = _r5_pair("crafting-self-prompting-loops/assets",
+                    {"gate": "crafting-self-prompting-loops/assets/test_checkpoint_template.py"},
+                    _R5_LOOPS)(old, new)
+    if _errored(a, b):
+        return
+    s = "crafting-self-prompting-loops (checkpoint gate)"
+    row(s, "the human-checkpointed template's gate is fail-open (lower=better)",
+        a["fail_open"], b["fail_open"], a["fail_open"] == 1 and b["fail_open"] == 0,
+        "the head test's gate_status(): only an explicit APPROVED now reaches act(); "
+        "PENDING, an error or an unknown value stops or revises", since=SINCE_RUN5)
+    row(s, "a TIMEOUT still stops in SAFE_STATE (1=right)", a["timeout_stops"],
+        b["timeout_stops"], a["timeout_stops"] == b["timeout_stops"] == 1,
+        "LSC-3: the timeout branch is kept", kind="guard")
+
+
+_R5_TSN = r"""
+import contextlib, inspect, stack_node
+out = {"default_precise": int(inspect.signature(stack_node.discover_units)
+                              .parameters["precise"].default is True),
+       "node": int(shutil.which("node") is not None)}
+root = tempfile.mkdtemp()
+try:
+    def w(rel, text):
+        p = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    w("src/util.ts", "export function parse(s: string) { return 1; }\n")
+    marker = os.path.join(root, "PWNED")
+    # The analysed repo's own typescript.js: it only writes a marker, then fails.
+    w("node_modules/typescript/lib/typescript.js",
+      "require('fs').writeFileSync(" + json.dumps(marker) + ", 'ran');\n"
+      "throw new Error('not a compiler');\n")
+    with contextlib.redirect_stderr(io.StringIO()):
+        units, mode = stack_node.discover_units(root)
+    out["marker"] = int(os.path.exists(marker))
+    out["units"] = "%s:%s" % (mode, ",".join(u["id"] for u in units))
+finally:
+    shutil.rmtree(root, ignore_errors=True)
+print(json.dumps(out))
+"""
+
+
+def check_run5_test_safety_net(old, new):
+    a, b = probe(old, "test-safety-net/assets", _R5_PRELUDE + _R5_TSN), \
+        probe(new, "test-safety-net/assets", _R5_PRELUDE + _R5_TSN)
+    if _errored(a, b):
+        return
+    s = "test-safety-net (precise opt-in)"
+    row(s, "node discovery's default runs the analysed repo's toolchain (lower=better)",
+        a["default_precise"], b["default_precise"],
+        a["default_precise"] == 1 and b["default_precise"] == 0,
+        "D25: discover_units(precise=False) by default; --precise opts in", since=SINCE_RUN5)
+    if not b["node"]:
+        print("note: no node on PATH, so the typescript.js marker row is not measured")
+    else:
+        row(s, "repo typescript.js marker after a DEFAULT node discovery (lower=better)",
+            a["marker"], b["marker"], a["marker"] == 1 and b["marker"] == 0,
+            "the repo's node_modules/typescript/lib/typescript.js writes a marker when it "
+            "runs: the default now starts no node process", since=SINCE_RUN5)
+    row(s, "units and label of that default run", a["units"], b["units"],
+        a["units"] == b["units"] == "heuristic:src/util.ts::parse",
+        "the fake compiler gives no answer, so both arms fall back to the heuristic",
+        kind="guard")
+
+
+_R5_OI = r"""
+X = _load(TESTS["hygiene"], "r5_oi_hygiene")
+X.HERE, X.SKILL = HERE, os.path.dirname(HERE)
+n = 0
+for path in X.sources():
+    with open(path, encoding="utf-8") as f:
+        n += len(X.findings(f.read()))
+print(json.dumps({"flagged": n}))
+"""
+
+_R5_SPA = r"""
+import audit_posture
+S = _load(TESTS["files"], "r5_spa_files")
+S.HERE, S.SKILL = HERE, os.path.dirname(HERE)
+n = 0
+for path in S.sources():
+    with open(path, encoding="utf-8") as f:
+        n += len(S.download_to_shell_lines(f.read()))
+res = {}
+for name in sorted(S.EXPECTED):
+    with open(os.path.join(TESTS["fixtures"], name), encoding="utf-8") as f:
+        text = f.read()
+    repo = tempfile.mkdtemp()
+    try:
+        wf = os.path.join(repo, ".github", "workflows")
+        os.makedirs(wf)
+        with open(os.path.join(wf, "build.yml"), "w", encoding="utf-8") as f:
+            f.write(text)
+        hits = [h for h in audit_posture.audit(repo) if h["check"] == "workflow-curl-pipe-sh"]
+        res[name] = "%d%s" % (len(hits), "".join(sorted({" " + h["severity"] for h in hits})))
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+print(json.dumps({"flagged": n, "fixtures": res}))
+"""
+
+
+def check_run5_fixture_moves(old, new):
+    import ab_report
+    a, b = _r5_pair("ops-intake/assets",
+                    {"hygiene": "ops-intake/assets/test_fixture_hygiene.py"}, _R5_OI)(old, new)
+    if not _errored(a, b):
+        row("ops-intake (fixture hygiene)",
+            "download-to-shell or invisible-character lines in test + eval sources "
+            "(lower=better)", a["flagged"], b["flagged"], a["flagged"] > 0 and b["flagged"] == 0,
+            "the head's scan over each tree's test_*.py and eval/*.py: hostile fixtures stay "
+            "local, and hidden characters are \\u escapes", since=SINCE_RUN5)
+    ea, eb = ab_report.eval_score(old, "ops-intake"), ab_report.eval_score(new, "ops-intake")
+    row("ops-intake (fixture hygiene)", "the outcome eval's verdict and checks",
+        "%s %s/%s" % ea, "%s %s/%s" % eb, ea == eb and eb[0] == "PASS",
+        "every check the eval made before the fixture change still runs and passes",
+        kind="guard")
+    a, b = _r5_pair("security-posture-audit/assets",
+                    {"files": "security-posture-audit/assets/test_fixture_files.py",
+                     "fixtures": "security-posture-audit/assets/fixtures"}, _R5_SPA)(old, new)
+    if _errored(a, b):
+        return
+    s = "security-posture-audit (fixtures)"
+    row(s, "the detector on the moved fixtures (hits per fixture)",
+        json.dumps(a["fixtures"], sort_keys=True), json.dumps(b["fixtures"], sort_keys=True),
+        a["fixtures"] == b["fixtures"] and b["fixtures"].get(
+            "workflow_curl_pipe_sh_step.yml") == "1 HIGH"
+        and b["fixtures"].get("workflow_curl_to_file_step.yml") == "0",
+        "each labelled file under assets/fixtures/ through each tree's audit_posture: the "
+        "download piped to a shell is still one HIGH finding, the download to a file none",
+        kind="guard")
+    row(s, "download-to-shell lines in test + eval sources (lower=better)",
+        a["flagged"], b["flagged"], a["flagged"] > 0 and b["flagged"] == 0,
+        "the risky workflow text moved out of the Python sources into labelled fixture "
+        "files that the tests and the eval read", since=SINCE_RUN5)
+    ea = ab_report.eval_score(old, "security-posture-audit")
+    eb = ab_report.eval_score(new, "security-posture-audit")
+    row(s, "the outcome eval's verdict and checks", "%s %s/%s" % ea, "%s %s/%s" % eb,
+        ea == eb and eb[0] == "PASS",
+        "the eval reads leaky_workflow.yml now; its checks are the same", kind="guard")
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -11454,6 +12050,16 @@ def main():
         check_run4_factory_pipeline(old, REPO)
         check_run4_factory_conductor(old, REPO)
         check_run4_ops_intake(old, REPO)
+        check_run5_feynman(old, REPO)
+        check_run5_gardener(old, REPO)
+        check_run5_jev(old, REPO)
+        check_run5_hygiene(old, REPO)
+        check_run5_world_model(old, REPO)
+        check_run5_tmux(old, REPO)
+        check_run5_okf_site(old, REPO)
+        check_run5_loops(old, REPO)
+        check_run5_test_safety_net(old, REPO)
+        check_run5_fixture_moves(old, REPO)
         if report_dir:
             # The evals need the baseline tree, so they run before it is removed.
             import ab_report
