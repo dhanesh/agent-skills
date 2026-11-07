@@ -16,10 +16,12 @@ Each report records how one branch changed the behaviour of the skills it touche
 
 ### factory-conductor
 
+- 2026-11-07 [factory/run4-base](2026-11-07-factory-run4-base.md): improved, 3 improved of 63 rows, eval PASS 49/49 → PASS 49/49
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 3 improved of 58 rows, eval PASS 49/49 → PASS 49/49
 
 ### factory-pipeline
 
+- 2026-11-07 [factory/run4-base](2026-11-07-factory-run4-base.md): improved, 2 improved of 11 rows, eval PASS 54/54 → PASS 55/55
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 7 improved of 7 rows, eval PASS 7/7 → PASS 54/54
 
 ### growth-review
@@ -32,10 +34,12 @@ Each report records how one branch changed the behaviour of the skills it touche
 
 ### incident-watch
 
+- 2026-11-07 [factory/run4-base](2026-11-07-factory-run4-base.md): held, 0 improved of 3 rows, eval PASS 30/30 → PASS 30/30
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 3 improved of 3 rows, eval PASS 7/7 → PASS 30/30
 
 ### ops-intake
 
+- 2026-11-07 [factory/run4-base](2026-11-07-factory-run4-base.md): improved, 1 improved of 25 rows, eval PASS 22/22 → PASS 22/22
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): improved, 3 improved of 23 rows, eval PASS 22/22 → PASS 22/22
 
 ### release-conductor
@@ -61,5 +65,6 @@ Each report records how one branch changed the behaviour of the skills it touche
 
 ## All reports
 
+- 2026-11-07 [factory/run4-base](2026-11-07-factory-run4-base.md): `AB_RESULT: PASS`, 4 skill(s)
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): `AB_RESULT: PASS`, 12 skill(s)
 - 2026-11-01 [docs/forge-proof-docs-and-ab-report](2026-11-01-docs-forge-proof-docs-and-ab-report.md): `AB_RESULT: PASS`, 2 skill(s)
