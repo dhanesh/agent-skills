@@ -6,7 +6,7 @@ Prints one `CHECK: <name> — PASS|FAIL` line per check and a final
 `EVAL_RESULT: PASS (n/n checks)` line; exits 0 iff every check passed.
 
 The promise of `pipeline tick` (R12): in a repo with the sibling skills installed, one
-tick prints a `STAGE:` line for each of the nine stages, in order, and exits 0. Every
+tick prints a `STAGE:` line for each of the ten stages, in order, and exits 0. Every
 stage is built (a stage that is not would say `pending-R<n>`, never `ok`), and a missing skill says
 `unavailable` instead of crashing the tick. The promise of R13: with no live pipeline
 grant (none, or revoked), the tick runs no stage, prints `STOP: no-grant`, and exits 2.
@@ -53,12 +53,13 @@ import pipeline_testkit as K  # noqa: E402
 
 TOOL = os.path.join(SKILL, "assets", "pipeline.py")
 STALE = "no command ships yet"
-ORDER = ["sweep", "growth-review", "idea-follow-up", "autopick", "plan", "derive-grant",
-         "build", "release-stage", "digest"]
+ORDER = ["sweep", "incident-probe", "growth-review", "idea-follow-up", "autopick", "plan",
+         "derive-grant", "build", "release-stage", "digest"]
 PENDING = {}  # every stage ships; a stage that is not built says pending-R<n>
 DIGEST = ".skill-contract/pipeline/digest.md"
 DIGEST_LINE = re.compile(r"^DIGEST: %s waiting=([0-9]+)$" % re.escape(DIGEST), re.M)
-WORDS = {"ok", "idle", "attention", "refused", "failed", "timeout", "unavailable", "waiting"}
+WORDS = {"ok", "idle", "attention", "refused", "failed", "timeout", "unavailable", "waiting",
+         "skip"}
 PATH_RE = re.compile(r"(?<![\w.-])((?:references|assets|scripts|eval)/[\w./-]*\w)")
 GRAPH_BLOCK = re.compile(r"<!-- skill-graph:start -->.*?<!-- skill-graph:end -->", re.S)
 
@@ -417,8 +418,12 @@ def main():
     try:
         cp, sk = run_tick(tmp, "all")
         errs = tick_errors(cp.stdout, cp.returncode)
-        check("tick on stub skills: nine STAGE lines in order, exit 0", not errs,
+        check("tick on stub skills: ten STAGE lines in order, exit 0", not errs,
               "; ".join(errs)[:120])
+        stage_lines = [ln for ln in cp.stdout.splitlines() if ln.startswith("STAGE: ")]
+        check("no recipe: the second stage line is `STAGE: incident-probe skip no-recipe`",
+              stage_lines[1:2] == ["STAGE: incident-probe skip no-recipe"],
+              (stage_lines[1:2] or ["none"])[0][:120])
         errs = plan_errors(cp.stdout)
         check("no planner in the grant: plan unavailable no-planner, no plan handed on",
               not errs, "; ".join(errs)[:120])
@@ -454,7 +459,7 @@ def main():
         cp, _ = run_tick(tmp, "no-growth", skills=("ops-intake", "spec-first-planning"))
         errs = tick_errors(cp.stdout, cp.returncode,
                            missing=[("growth-review", ["growth-review"])])
-        check("missing growth-review: still nine lines, growth-review unavailable", not errs,
+        check("missing growth-review: still ten lines, growth-review unavailable", not errs,
               "; ".join(errs)[:120])
 
         cp, _ = run_tick(tmp, "sweep-fails", behave=[
@@ -522,8 +527,8 @@ def main():
               and not K.calls(sk), "; ".join(errs)[:120])
 
         good = "\n".join("STAGE: %s %s" % (s, PENDING.get(s, "ok")) for s in ORDER)
-        swapped = good.replace("STAGE: sweep ok\nSTAGE: growth-review ok",
-                               "STAGE: growth-review ok\nSTAGE: sweep ok")
+        swapped = good.replace("STAGE: incident-probe ok\nSTAGE: growth-review ok",
+                               "STAGE: growth-review ok\nSTAGE: incident-probe ok")
         for label, out, code, want in (
             ("order-swapped", swapped, 0, "stages"),
             ("digest-missing", good.rsplit("\n", 1)[0], 0, "stages"),
@@ -546,7 +551,8 @@ def main():
                   any(want in e for e in bad), "; ".join(bad)[:100])
         check("grader accepts the known-good no-grant transcript", not stop_errors(stop, 2))
         capped = "\n".join(
-            ["STAGE: sweep ok", "STAGE: growth-review ok", "STAGE: idea-follow-up idle",
+            ["STAGE: sweep ok", "STAGE: incident-probe skip no-recipe",
+             "STAGE: growth-review ok", "STAGE: idea-follow-up idle",
              "STOP: cap max_open_runs count=1 limit=1 stage=autopick"]
             + ["STAGE: %s skipped cap=max_open_runs" % s for s in GATED]
             + ["STAGE: build idle grants=0", "STAGE: release-stage idle",

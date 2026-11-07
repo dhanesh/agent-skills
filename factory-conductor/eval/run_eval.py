@@ -539,8 +539,10 @@ def _pair_run_pushed(cmd):
         for t in ("T1", "T2"):
             run(["merge", t, "--root", root])
         run(["next", "--root", root])
-        rc, out, err = run(["finish", "--root", root, "--pr-cmd",
-                            json.dumps([sys.executable, "-c", "pass"])])
+        # The default PR command reaches a stub `gh` first on PATH (D22).
+        with mock.patch.dict(os.environ,
+                             {"PATH": TK.stub_gh() + os.pathsep + os.environ["PATH"]}):
+            rc, out, err = run(["finish", "--root", root])
         pay = None
         for line in out.splitlines():
             if line.startswith("FINISH: "):

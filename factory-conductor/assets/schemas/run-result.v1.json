@@ -191,6 +191,24 @@
         }
       }
     },
+    "pr": {
+      "type": "object",
+      "required": ["number"],
+      "description": "Optional. Present only in the second run-result a run writes: after the PR command printed a URL of the form https://<host>/<owner>/<repo>/pull/<n>, finish writes a revision of the first envelope (wasRevisionOf names it) whose payload adds pr and replaces. The rest of the payload, the subjects and the assertions are the first envelope's.",
+      "properties": {
+        "number": {"type": "integer", "minimum": 1, "description": "The pull request number from the URL."}
+      }
+    },
+    "replaces": {
+      "type": "object",
+      "required": ["id", "path", "sha256"],
+      "description": "Optional. Present together with pr: the run-result envelope this one replaces.",
+      "properties": {
+        "id": {"type": "string", "description": "The replaced envelope's predicate.id (also its wasRevisionOf)."},
+        "path": {"type": "string", "description": "Repo-relative path of the replaced envelope."},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
     "evidence_gate": {"type": "boolean", "description": "True when the plan declared a verification block, so every merge needed a passing evidence verdict (spec 5.1). Absent from results written before factory-conductor 1.1.0."},
     "trail": {
       "type": "array",
