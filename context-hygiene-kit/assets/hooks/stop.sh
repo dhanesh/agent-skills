@@ -22,7 +22,7 @@ command -v find_python >/dev/null 2>&1 && find_python
 
 # Hook input arrives as JSON on stdin: { cwd, transcript_path, session_id, ... }.
 input="$(cat)"
-get() { printf '%s' "$input" | "$PY" -c "import json,sys; print(json.load(sys.stdin).get('$1',''))" 2>/dev/null; }
+get() { printf '%s' "$input" | "$PY" -I -c "import json,sys; print(json.load(sys.stdin).get('$1',''))" 2>/dev/null; }
 cwd="$(get cwd)"
 transcript="$(get transcript_path)"
 
