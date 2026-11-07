@@ -524,6 +524,16 @@ def _sidebar_js(bundle, routes, has_overview, has_changelog):
     return "[\n        " + ",\n        ".join(groups) + "\n      ]"
 
 
+def jsx_str(value):
+    """Return a JSX attribute value that is one literal string.
+
+    A JSX quoted attribute has no backslash escapes, so json.dumps text in
+    quotes lets a `"` end the value. An expression container that holds one
+    JSON string literal is a valid JS string, so the text stays literal.
+    """
+    return "{%s}" % json.dumps(str(value))
+
+
 def homepage(opts, bundle, routes, has_overview, has_changelog):
     # Component-rendered links (LinkCard, hero actions) bypass the rehype
     # base rewrite that covers markdown links, so bake the base in here.
@@ -538,8 +548,8 @@ def homepage(opts, bundle, routes, has_overview, has_changelog):
         desc = link_descs.get(d, "Browse the %s concepts."
                               % humanize(d).lower())
         cards.append('<LinkCard title=%s href="%s/%s/" description=%s />'
-                     % (json.dumps(humanize(d)), base, routes["dir:" + d],
-                        json.dumps(desc)))
+                     % (jsx_str(humanize(d)), base, routes["dir:" + d],
+                        jsx_str(desc)))
     for rel in sorted(bundle.concepts):
         if "/" not in rel:
             meta, body = bundle.concepts[rel]
@@ -548,8 +558,8 @@ def homepage(opts, bundle, routes, has_overview, has_changelog):
             desc = " ".join(str(meta.get("description") or
                                 meta.get("type") or "Concept").split())
             cards.append('<LinkCard title=%s href="%s/%s/" description=%s />'
-                         % (json.dumps(label), base, routes["md:" + rel],
-                            json.dumps(desc)))
+                         % (jsx_str(label), base, routes["md:" + rel],
+                            jsx_str(desc)))
     actions = []
     if has_overview:
         actions.append("{ text: 'Bundle overview', link: '%s/overview/', "
