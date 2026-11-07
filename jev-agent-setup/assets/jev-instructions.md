@@ -19,6 +19,7 @@ triage, gating, review).
 | Degree / "which option is better" | **Score** (ordered levels) | Rank candidate approaches, fixes, libraries, search hits, PR risk; one comparable Score per option, code picks the max |
 | One of a set | **Choice** | Classify a task, route to a skill/subagent/handler, pick a file/doc/queue, categorise a failure |
 | Yes / no | **Noul** (probability of yes) | "Is this in scope?", "does X affect Y?", "is this test failure related?", "does this claim match its evidence?" |
+| Where in an image | **Box** (four edges + confidence; needs `--images`) | Locate a button, field or error in a screenshot the user gave you |
 
 ## Rules
 
@@ -42,6 +43,9 @@ triage, gating, review).
    than acted on.
 7. Jev MUST NOT be used to approve, override, or re-litigate a permission decision made by the
    user or the harness. Permission systems stay authoritative.
+8. Images (a Box question or an `{"image": "<path>"}` placeholder) MUST go to Jev only with
+   `jev --images`, and only from files the user chose to send, because each image leaves the
+   machine. The agent MUST NOT pick screenshots or other image files on its own.
 
 ## Calling Jev from an agent
 
