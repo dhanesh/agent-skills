@@ -10,7 +10,7 @@ if [[ -x "$SCAN" ]]; then
   "$SCAN" >/dev/null 2>&1 || true
 fi
 
-python3 - "$STATE" <<'PY'
+python3 -I - "$STATE" <<'PY'
 import json,sys,os,datetime
 state_path=sys.argv[1]
 icons={"blocked":"⚠","working":"●","done":"✓","idle":"○","unknown":"?","error":"✖"}
