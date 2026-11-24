@@ -2,11 +2,11 @@
 name: mockstar-mock
 description: "Generate a runnable mockstar mock server for a service from its specs and docs. Use when asked to mock a service, stand up a fake/stub API, create mockstar mocks/fixtures, or scaffold a mock backend from an API spec or documentation. Accepts OpenAPI (json/yaml), Postman collections, HAR captures, curl examples, GraphQL SDL/introspection, and prose docs (Markdown/PDF/DOCX or a documentation URL); normalizes every input into one Endpoint Inventory, uses native `mockstar import` for OpenAPI and hand-authors the rest, infers scenarios/dynamic handlers/webhooks (incl. provider-fidelity signing) at full fidelity, runs `mockstar enhance` for Tier 2 placeholders, then boots the server and smoke-tests every route. Tags each mock with provenance and confidence and emits a coverage report flagging speculative inferences and documented-but-unmocked gaps. Not for the mockstar HTTPS proxy or native GraphQL semantics. Targets the mockstar CLI (`bunx @dhaneshpurohit/mockstar`)."
 license: MIT
-compatibility: Requires Bun (`bunx @dhaneshpurohit/mockstar` >= 0.2.2; >= 0.3.0 for configurable webhook signing schemes) or Docker (ghcr.io/dhanesh/mockstar), plus `uv` and `curl` for the bundled helpers. Verified against mockstar 0.4.0 — nothing this skill emits requires it, but on >= 0.4.0 the per-tenant `requestsPerSecond` cap is enforced (429 + Retry-After, default 10,000/s) where earlier versions declared the field and ignored it.
+compatibility: Requires Bun (`bunx @dhaneshpurohit/mockstar` >= 0.2.2; >= 0.3.0 for configurable webhook signing schemes) or Docker (ghcr.io/dhanesh/mockstar), plus `uv` and `curl` for the bundled helpers. Verified against mockstar 0.6.0. The skill still works from 0.2.2, except that object webhook bodies carrying tokens with quoted arguments (`id("…")`, `id.named("…")`, `faker.pick([…])`) need >= 0.6.1 (on 0.6.0 and below, config load fails; use a string body there). From 0.4.0 the per-tenant `requestsPerSecond` cap is enforced (429 + Retry-After, default 10,000/s) where earlier versions declared the field and ignored it.
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.2.0"
+  version: "1.2.1"
   tags: "mockstar,mock-server,openapi,postman,har,graphql,api-testing"
 ---
 
@@ -81,7 +81,7 @@ generating.
 - `--tenant <name>` — mockstar tenant name used as the mocks subdirectory (default: `default`). **Important:** when passed to `mockstar import`, the equals form `--tenant=<name>` is required — the space form is silently ignored by the importer.
 - `--fidelity full|static` — `full` generates scenarios, dynamic handlers, and webhooks from IR hints; `static` emits one default response per endpoint only (default: `full`).
 - `--no-verify` — skip Stage 5 boot-and-smoke verification (the generated project is not started).
-- `--deterministic` — passed through to `bunx @dhaneshpurohit/mockstar` during smoke testing; disables random Faker values for reproducible responses.
+- `--deterministic` — documents a reproducible run. `assets/smoke.sh` always boots mockstar with `--deterministic`, so the smoke run does not depend on this flag. Deterministic mode seeds faker and `id()` per (tenant, mock entry, hit number): the same request order per route gives the same bytes on every run, but values still differ between hits of one route. `now.*` is fixed at `2026-01-01T00:00:00Z`, and `requestId` is `req-NNNNNNNN` (a UUID otherwise).
 - `--max-endpoints N` — cap the merged Endpoint Inventory at N records; excess are dropped in reverse-priority order and reported.
 - `--runtime auto|local|docker` — selects how mockstar is invoked (default: `auto`). `auto` prefers Docker (the `ghcr.io/dhanesh/mockstar` image) when the Docker daemon is reachable and the image is available, else falls back to local `bunx @dhaneshpurohit/mockstar`. `local` always uses `bunx @dhaneshpurohit/mockstar`. `docker` always uses Docker and fails fast if the daemon is down.
 - `--image <ref>` — the Docker image reference used when `--runtime` is `docker` or `auto` resolves to Docker (default: `ghcr.io/dhanesh/mockstar:latest`). For reproducibility, pin by digest: `ghcr.io/dhanesh/mockstar@sha256:<digest>`.
@@ -143,6 +143,14 @@ Record the resolved runtime (local or docker) and the image ref when docker is c
 
 Record the version. Note the known caveat: the CLI's printed version may lag the package
 version (treat it as advisory, not definitive).
+
+**Feature gate: webhook object bodies.** On mockstar >= 0.6.1, an object webhook `body` may
+carry tokens with quoted arguments (`id("…")`, `id.named("…")`, `faker.pick([…])`). On <= 0.6.0
+(or when the version is unknown) config load fails with `SyntaxError: JSON Parse error`. On those
+versions write the webhook `body` as a string, and record the downgrade in the coverage report's
+"Runtime & compatibility" section. Tokens without quoted arguments (`{{request.body.x}}`,
+`{{now.iso}}`) are safe in object bodies on every version. This gate does not raise the skill's
+minimum version.
 
 **Feature gate.** Webhook signing wire-format fields (`signedPayload`, `signatureTemplate`,
 `digestEncoding`, `mode`) exist only on mockstar **≥ 0.3.0**. If the detected version is below
@@ -260,6 +268,11 @@ The importer writes mock JSON files to `<out>/mocks/<tenant>/`. Use this path fo
 - Raw OpenAPI 3.x inputs (most complete).
 - Postman or HAR inputs that have been converted to OpenAPI 3.x without data loss.
 
+**File shape.** Each `mocks/<tenant>/*.json` file is `{ "$schema": "…", "mocks": [ {entry}, … ] }`
+or a bare array of entries. A bare entry object at the top level fails to boot with
+`expected array or { mocks: [...] } shape`. The examples in `references/mockstar-mapping.md` show
+single entries; wrap them in this shape.
+
 **Hand-authored path (for everything else):**
 
 For curl, GraphQL, prose, and any Postman/HAR that could not be losslessly lifted, generate
@@ -276,6 +289,16 @@ mock JSON entries by hand per `references/mockstar-mapping.md` and write them to
     `references/mockstar-mapping.md` rather than hand-rolling the wire format, and you MUST NOT
     emit an inline secret (`secretRef` MUST be `{{ env.NAME }}` or `file:/path`), because it would
     be written into the generated project's files, and mockstar rejects it at config load.
+  - A webhook to a local or plain-http receiver needs `"allowHttp": true` and
+    `"allowPrivateNetworks": true` on the webhook. Without them the SSRF guard drops the delivery
+    and the response is still served, so the failure shows only in the webhook journal.
+    Webhook retries are on by default (6 attempts); set `retry` only to change them.
+  - `id.named` keys are not shared between the response and a webhook, so an id minted in each
+    differs. Correlate them with `{{request.body.*}}` or `{{request.params.*}}`, or use one
+    literal in both. `mockstar enhance` does not rewrite webhook bodies.
+  - `X-Mockstar-Delivery-Id` currently equals the triggering request id, so several webhooks
+    from one request share it (upstream issue https://github.com/dhanesh/mockstar/issues/59).
+    Tell receiver authors not to dedupe on it alone.
   - For GraphQL: route operations via `scenarios[].when.body` matching on `operationName`
     (NOT via a `match.body.jsonpath` router on the parent entry).
 
@@ -309,8 +332,9 @@ bunx @dhaneshpurohit/mockstar enhance <out>/mocks/<tenant>
 When an OpenAPI input exists, add `--spec <openapi-file>` so the enhancer can cross-reference
 the schema for more accurate placeholder selection.
 
-The enhancer rewrites hardcoded IDs and timestamps to Tier 2 tokens (`{{faker.uuid}}`,
-`{{now.iso}}`, `{{id("prefix_", 14)}}`, etc.) and writes a `_mockstarGenerated` manifest
+The enhancer rewrites hardcoded IDs and timestamps in response bodies to Tier 2 tokens
+(`{{id("prefix_", 14)}}`, `{{now.iso}}`, `{{now.unix}}`; it emits no `faker.*` token and leaves a
+UUID literal as it is). It does not touch webhook bodies. It writes a `_mockstarGenerated` manifest
 (idempotent — safe to re-run). It does **not** validate schema conformance; that is proven
 by the Stage-5 boot, where mockstar validates every config file with Zod and fails fast on
 any invalid entry. Review the enhancer's diff — the coverage report flags any Tier 2
@@ -322,7 +346,7 @@ rewriting that changes `confidence` from `"grounded"` to `"inferred"`.
 
 Unless `--no-verify` is set:
 
-1. Write a routes TSV file at `<out>/mocks/routes.tsv` with one line per endpoint:
+1. Write a routes TSV file at `<out>/mocks/routes.tsv` (the same path the layout below shows) with one line per endpoint:
    ```
    METHOD<TAB>/path<TAB>EXPECTED_STATUS
    ```
@@ -395,8 +419,8 @@ not set, `<service>` is derived from the primary spec's title or the target URL 
 mock-<service>/
   mocks/
     <tenant>/         # mockstar mock JSON files (e.g. users.json, orders.json)
+    routes.tsv        # routes used for smoke testing
   handlers/           # TypeScript dynamic handler files (--fidelity full only)
-  routes.tsv          # routes used for smoke testing
   MOCKSTAR-COVERAGE.md
 ```
 
@@ -406,8 +430,8 @@ With `--into <dir>`:
 <dir>/
   mocks/
     <tenant>/
+    routes.tsv
   handlers/
-  routes.tsv
   MOCKSTAR-COVERAGE.md
 ```
 
@@ -454,8 +478,9 @@ Pick per persona; each honours the same tenant selectors above.
   });
   await instance.stop();
   ```
-- **Offline CI / Windows — compiled binary:** `bun build src/cli.ts --compile --outfile mockstar`
-  then `./mockstar mocks/` (no Bun install needed at run time).
+- **Offline CI / Windows — compiled binary:** needs a mockstar source checkout, because the
+  binary is built from its `dist/`: run `bun run build && bun run build:binary` there, then
+  `./mockstar mocks/` (no Bun install needed at run time).
 
 Boot the server locally from the output root (default command; `serve` is an equivalent alias):
 
@@ -480,6 +505,11 @@ docker run --rm -p 3000:3000 \
 ```
 
 Drop the `-v handlers` bind-mount when no dynamic handlers exist. `<abs>` is the absolute path to the output directory; `<image>` is the resolved ref from Stage 0 (tag or digest).
+
+Colima mounts only `$HOME` into its VM. An output directory outside `$HOME` (for example a
+`mktemp -d` path under `/var/folders`) arrives empty in the container, and mockstar stops with
+`No tenant directories found under /config/mocks`. Keep `--into` under `$HOME`, copy the files in
+with `docker cp`, or use the baked image below.
 
 **(b) Baked image (share / CI):**
 

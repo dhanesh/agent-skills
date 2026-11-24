@@ -68,7 +68,7 @@ Endpoints/behaviors documented but NOT mocked:
 
 - <method path> — <reason> — <source locator>.
 - Always list these when they apply (they are limits of mockstar, not of the sources):
-  - Static or scenario `Content-Encoding` — mockstar 0.4.0 has no compressed or byte body
+  - Static or scenario `Content-Encoding` — mockstar (checked on 0.6.0) has no compressed or byte body
     for static responses, so an encoded response is a dynamic handler. Proposal: native
     `response.encoding` (mapping reference, "Encoded responses").
   - `br` responses — no stdlib encoder; the handler needs Bun or Node at load time, and the

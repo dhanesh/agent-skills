@@ -207,7 +207,7 @@ the SDL or operation files becomes one entry in `responses[]`:
 - `status: 200` for all operations (GraphQL always returns 200; errors are in the body).
 
 **Variables → `request.match`.** When operation files include example variable sets,
-capture them as `request.match` predicates (e.g. `{ "jsonpath": "$.variables.id", "equals": "42" }`).
+capture them as `request.match` predicates (e.g. `{ "partial": { "variables": { "id": "42" } } }`; `jsonpath` only tests that a path exists, and `equals` compares the whole body).
 
 **Auth.** If the SDL or repo README specifies a header (e.g. `Authorization: Bearer <token>`),
 populate `auth` accordingly.

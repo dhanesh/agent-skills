@@ -12,15 +12,18 @@ command -v bunx >/dev/null 2>&1 || { echo "SKIP: bunx not available"; exit 0; }
 
 OUT="$(mktemp -d)"
 OUT2="$(mktemp -d)"
-trap 'rm -rf "$OUT" "$OUT2"' EXIT
+LOGS="$(mktemp -d)"
+trap 'rm -rf "$OUT" "$OUT2" "$LOGS"' EXIT
 
 # Build documented layout: <out>/mocks/<tenant>/
-if ! bunx @dhaneshpurohit/mockstar import "$FIX" "$OUT/mocks" --tenant=default >/tmp/e2e-import.log 2>&1; then
-  echo "FAIL: mockstar import"; cat /tmp/e2e-import.log; exit 1
+if ! bunx @dhaneshpurohit/mockstar import "$FIX" "$OUT/mocks" --tenant=default >"$LOGS/import.log" 2>&1; then
+  echo "FAIL: mockstar import"; cat "$LOGS/import.log"; exit 1
 fi
 echo "PASS: import produced mocks at $OUT/mocks/default/"
 
-bunx @dhaneshpurohit/mockstar enhance "$OUT/mocks/default" >/tmp/e2e-enhance.log 2>&1 || true
+if ! bunx @dhaneshpurohit/mockstar enhance "$OUT/mocks/default" >"$LOGS/enhance.log" 2>&1; then
+  echo "FAIL: mockstar enhance"; cat "$LOGS/enhance.log"; exit 1
+fi
 echo "PASS: enhance ran"
 
 # Write routes TSV at <out>/mocks/routes.tsv (documented location)
@@ -32,8 +35,8 @@ sh "$DIR/smoke.sh" "$OUT/mocks" "$ROUTES"
 
 # F1 regression: non-default tenant import using equals form (--tenant=acme).
 # Proves the equals form is honored; space form is silently ignored by mockstar import.
-if ! bunx @dhaneshpurohit/mockstar import "$FIX" "$OUT2/mocks" --tenant=acme >/tmp/e2e-import-acme.log 2>&1; then
-  echo "FAIL: mockstar import --tenant=acme"; cat /tmp/e2e-import-acme.log; exit 1
+if ! bunx @dhaneshpurohit/mockstar import "$FIX" "$OUT2/mocks" --tenant=acme >"$LOGS/import-acme.log" 2>&1; then
+  echo "FAIL: mockstar import --tenant=acme"; cat "$LOGS/import-acme.log"; exit 1
 fi
 
 if [ -d "$OUT2/mocks/acme" ] && ls "$OUT2/mocks/acme"/*.json >/dev/null 2>&1; then
