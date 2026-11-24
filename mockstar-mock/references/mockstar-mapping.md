@@ -394,7 +394,7 @@ Notes:
 - Webhook body tokens render in a separate pass: every templated value becomes a string (`{{request.body.amount}}` is `"12"`, not `12`), unlike a response body.
 - A webhook `id.named` key is not shared with the response, and `mockstar enhance` does not rewrite webhook bodies. A response `id` minted with `id(...)` and a webhook `orderId` therefore differ. Correlate them through `{{request.body.*}}` or `{{request.params.*}}`, or write the same literal in both.
 - **Object body with quoted-arg tokens** (`id("…")`, `id.named("…")`, `faker.pick([…])`) needs mockstar >= 0.6.1. On <= 0.6.0 config load fails with `SyntaxError: JSON Parse error`; write the `body` as a string there.
-- `X-Mockstar-Delivery-Id` currently equals the id of the triggering request, so several webhooks fired by one request share it (upstream issue https://github.com/dhanesh/mockstar/issues/59). A receiver must not dedupe on it alone.
+- Delivery headers (mockstar >= 0.6.2): `X-Mockstar-Delivery-Id` is one id per delivery (the same on its retries; a replay gets a new one; `dlv-NNNNNNNN` in deterministic mode, otherwise a UUID) and `X-Mockstar-Request-Id` is the triggering request id. On <= 0.6.1 `X-Mockstar-Delivery-Id` equals the triggering request id, so several webhooks fired by one request share it and a receiver there should not dedupe on it alone.
 - The generator defaults `method: "POST"` for all inferred webhooks.
 - Signing is emitted only when the IR hint carries a `signing` object — see below.
 

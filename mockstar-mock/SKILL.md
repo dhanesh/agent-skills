@@ -6,7 +6,7 @@ compatibility: Requires Bun (`bunx @dhaneshpurohit/mockstar` >= 0.2.2; >= 0.3.0 
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.2.1"
+  version: "1.2.2"
   tags: "mockstar,mock-server,openapi,postman,har,graphql,api-testing"
 ---
 
@@ -296,9 +296,12 @@ mock JSON entries by hand per `references/mockstar-mapping.md` and write them to
   - `id.named` keys are not shared between the response and a webhook, so an id minted in each
     differs. Correlate them with `{{request.body.*}}` or `{{request.params.*}}`, or use one
     literal in both. `mockstar enhance` does not rewrite webhook bodies.
-  - `X-Mockstar-Delivery-Id` currently equals the triggering request id, so several webhooks
-    from one request share it (upstream issue https://github.com/dhanesh/mockstar/issues/59).
-    Tell receiver authors not to dedupe on it alone.
+  - From mockstar 0.6.2, `X-Mockstar-Delivery-Id` is one id per delivery: the same on its
+    retries, different for every other delivery, and the `deliveryId` the admin `await` and
+    `replay` endpoints take. A replay gets a new id. The triggering request id is in
+    `X-Mockstar-Request-Id`. On 0.6.1 and below the delivery id equals the triggering request
+    id, so several webhooks from one request share it; tell receiver authors on those versions
+    not to dedupe on it alone.
   - For GraphQL: route operations via `scenarios[].when.body` matching on `operationName`
     (NOT via a `match.body.jsonpath` router on the parent entry).
 
