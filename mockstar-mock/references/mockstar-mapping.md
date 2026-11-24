@@ -2,6 +2,11 @@
 
 This document describes how each field of an **Endpoint Inventory** record (defined in `inventory.schema.json`) maps to a mockstar JSON mock entry (defined in the mockstar `docs/CONFIG.md`). The `mockstar-mock` skill generator follows these rules to produce a complete mock config from the IR.
 
+**File shape.** Every example below is a single mock entry. On disk, each `mocks/<tenant>/*.json`
+file is `{ "$schema": "…", "mocks": [ {entry}, … ] }` or a bare array of entries. A bare entry
+object at the top level fails to boot (`expected array or { mocks: [...] } shape`), so wrap the
+entries you write.
+
 Quick outline of the translation:
 
 | IR field | mockstar output |
@@ -194,6 +199,10 @@ Scenario `when` predicate vocabulary (same `StringMatch` as route predicates):
 
 Rules are evaluated in declaration order; the first match wins. Maximum 50 scenario rules per entry.
 
+On a `dynamic` or `passthrough` entry, every scenario `response` must declare `status`, `headers`
+and `body`, because there is no computed default to inherit from. On a `static` entry, omitted
+fields fall back to the entry's `response`.
+
 ---
 
 ## Dynamic handlers
@@ -215,7 +224,15 @@ When an IR endpoint record has a `statefulHints` field, the generator produces a
 ```ts
 // handlers/postOrders.ts
 import type { Context } from 'hono';
-import type { HandlerHelpers } from '@dhaneshpurohit/mockstar';
+
+// The package does not export HandlerHelpers yet (upstream issue
+// https://github.com/dhanesh/mockstar/issues/61), so declare the part you use.
+// At runtime `helpers` is { tenant, requestId, faker }.
+type HandlerHelpers = {
+  tenant: string;
+  requestId: string;
+  faker: { uuid(): string; email(): string; name(): string; integer(min: number, max: number): number };
+};
 
 // In-memory store — resets on server restart. Replace with a persistent
 // store if cross-request durability is required.
@@ -245,12 +262,12 @@ Rules:
 A response can opt in to `Content-Encoding: gzip | deflate | br`. This lets a client test
 its decoding paths against real compressed bytes.
 
-### What mockstar supports (checked against 0.4.0)
+### What mockstar supports (re-verified on 0.6.0)
 
 | Path | Compressed body? | Evidence |
 |---|---|---|
 | `static` response, scenario response | **No.** The body is a string or JSON value, rendered through the template engine. A `content-encoding` header on it only labels plain text, so a client fails to decode it. | `renderStatic` builds `new Response(bodyOut, …)` with a string; the config has no byte or base64 body field. |
-| `dynamic` handler | **Yes.** The handler returns a `Response`, and mockstar forwards its body and headers unchanged. It does not compress or strip them. | `renderDynamic` returns the handler's `Response`; a handler that returned gzip, deflate and br bodies was served by a real `mockstar 0.4.0` and decoded back to the expected body. |
+| `dynamic` handler | **Yes.** The handler returns a `Response`, and mockstar forwards its body and headers unchanged. It does not compress or strip them. | `renderDynamic` returns the handler's `Response`; a handler that returned gzip, deflate and br bodies was served by a real mockstar (0.4.0, re-checked on 0.6.0: gzip and br pass) and decoded back to the expected body. |
 | Server-side compression of any response | **No.** There is no compression middleware and no `Accept-Encoding` negotiation. | No gzip, brotli or zlib use in the served code path. |
 
 So the skill uses a dynamic handler. It is the only supported way today. A native option is
@@ -341,7 +358,7 @@ When an IR endpoint record has a `webhookHints[]` array, map each element to a `
     "url": "https://example.com/hooks/order-created",
     "method": "POST",
     "headers": { "content-type": "application/json" },
-    "body": { "event": "order.created", "orderId": "{{request.params.id}}" }
+    "body": { "event": "order.created", "orderId": "{{request.body.id}}" }
   }
 ]
 ```
@@ -371,8 +388,13 @@ Complete entry example:
 ```
 
 Notes:
-- Retry logic is **opt-in** — not inferred from `webhookHints`. Add a `retry` block manually when needed.
+- Retries are **on by default** (6 attempts, backoff 1, 2, 4, 8, 16 s, jitter 0.2). Set a `retry` block only to change them; the generator does not infer one from `webhookHints`.
 - The `url` from the IR hint is used as-is; validate it points to a reachable endpoint before enabling in production.
+- `allowHttp` and `allowPrivateNetworks` default to `false`. For a local or plain-http receiver set both to `true` on the webhook. Otherwise the SSRF guard drops the delivery, the response is still served, and the failure shows only in the webhook journal (`GET /__admin/tenants/<t>/webhooks/journal`).
+- Webhook body tokens render in a separate pass: every templated value becomes a string (`{{request.body.amount}}` is `"12"`, not `12`), unlike a response body.
+- A webhook `id.named` key is not shared with the response, and `mockstar enhance` does not rewrite webhook bodies. A response `id` minted with `id(...)` and a webhook `orderId` therefore differ. Correlate them through `{{request.body.*}}` or `{{request.params.*}}`, or write the same literal in both.
+- **Object body with quoted-arg tokens** (`id("…")`, `id.named("…")`, `faker.pick([…])`) needs mockstar >= 0.6.1. On <= 0.6.0 config load fails with `SyntaxError: JSON Parse error`; write the `body` as a string there.
+- `X-Mockstar-Delivery-Id` currently equals the id of the triggering request, so several webhooks fired by one request share it (upstream issue https://github.com/dhanesh/mockstar/issues/59). A receiver must not dedupe on it alone.
 - The generator defaults `method: "POST"` for all inferred webhooks.
 - Signing is emitted only when the IR hint carries a `signing` object — see below.
 
@@ -402,10 +424,10 @@ format reduces to `{ "enabled": true, "secretRef": "..." }`.
 mockstar **0.3.0**. If Stage 0 detected a runtime below 0.3.0, emit only `enabled`/`secretRef`/
 `signatureHeader`/`timestampHeader`/`replayWindowMs`, and record the downgrade in the coverage
 report's "Runtime & compatibility" section. If the generated config carries a `$schema`, the new
-fields also require repinning it from `v0.2` to `v0.3` — published minor schemas are immutable:
+fields also require repinning it to `v0.<detected minor>` (at least `v0.3`) — published minor schemas are immutable:
 
 ```jsonc
-"$schema": "https://schemas.mockstar.dev/v0.3/mock.json"
+"$schema": "https://schemas.mockstar.dev/v0.6/mock.json"
 ```
 
 #### Placeholders are single-brace
@@ -495,41 +517,46 @@ Tier 2 tokens are `{{ … }}` expressions in `response.body` and `response.heade
 |---|---|
 | `{{request.params.<name>}}` | Path parameter captured by `:name` in `match.path` |
 | `{{request.query.<name>}}` | URL query-string value |
-| `{{request.headers.<name>}}` | Request header (case-insensitive) |
+| `{{request.headers.<name>}}` | Request header. Use the **lowercase** name: `{{request.headers.x-foo}}` works, `{{request.headers.X-Foo}}` drops the field. (`match`/`when` header names are case-insensitive; the template lookup is not.) |
 | `{{request.body.<dot.path>}}` | Dot-path into the parsed JSON request body |
-| `{{faker.uuid}}` | Random UUID v4 |
+| `{{faker.uuid}}` | Random UUID v4 (the faker allowlist is exactly 7 methods: `uuid`, `email`, `name`, `integer`, `pick`, `boolean`, `dateIso`; any other `faker.x`, such as `{{faker.company}}`, renders literally) |
 | `{{faker.email}}` | Random email address |
 | `{{faker.name}}` | Random full name |
 | `{{faker.integer(min, max)}}` | Random integer in `[min, max]` |
 | `{{faker.pick(["a","b"])}}` | Random element from the array |
 | `{{faker.boolean}}` | `true` or `false` |
-| `{{faker.dateIso}}` | Random recent date as ISO 8601 |
-| `{{id("prefix_", 14)}}` | Opaque ID: prefix + 14 base62 chars |
+| `{{faker.dateIso}}` | Random recent date as ISO 8601. In deterministic mode the day stays fixed but the time changes per hit |
+| `{{id("prefix_", 14)}}` | Opaque ID: prefix + 14 base62 chars. An optional third argument sets the alphabet: `{{id("SM", 32, "0123456789abcdef")}}` (2 to 256 characters) |
 | `{{id.named("key", "prefix_", 14)}}` | Mint once per request per key; repeated calls return the same value |
-| `{{now.iso}}` | Current time as ISO 8601 string |
+| `{{now.iso}}` | Current time as ISO 8601 string (fixed at `2026-01-01T00:00:00Z` in deterministic mode; same for `now.unix` and `now.millis`) |
 | `{{now.unix}}` | Current time as Unix seconds (number) |
 | `{{now.millis}}` | Current time as Unix milliseconds (number) |
 | `{{tenant}}` | Tenant identifier for the request |
-| `{{requestId}}` | Per-request UUID assigned by mockstar |
+| `{{requestId}}` | Request id assigned by mockstar: a UUID, or `req-00000001`, `req-00000002`, … (one counter per server) in deterministic mode |
+| `{{env.NAME}}` | Environment variable of the mockstar process (use it for secrets; never write a secret value into a mock file) |
 
 ### `$schema` stamp
 
-Generated mock files SHOULD carry a top-level `$schema` field pinned to:
+Generated mock files SHOULD carry a top-level `$schema` field, next to `mocks`, pinned to:
 
 ```
 https://schemas.mockstar.dev/v0.<N>/mock.json
 ```
 
-where `N` is the detected mockstar minor version from Stage 0 (e.g. `v0.1` for mockstar `0.1.x`). This enables editor autocomplete (JSON Schema validation in VS Code / JetBrains) and ensures boot-time Zod validation and editor tooling agree on the same schema version.
+where `N` is the detected mockstar minor version from Stage 0 (e.g. `v0.1` for mockstar `0.1.x`). The stamp records which mock-file shape the file was written for, because the shape can change between 0.x minors. Editor autocomplete from the URL does not work yet: the `schemas.mockstar.dev` host does not resolve, and the schema is not live at its GitHub Pages path either. Boot-time Zod validation does not read the URL, so a missing host does not break the boot.
 
 Example:
 
 ```jsonc
 {
-  "$schema": "https://schemas.mockstar.dev/v0.1/mock.json",
-  "id": "get-user-by-id",
-  "match": { "method": "GET", "path": "/users/:id" },
-  "response": { "kind": "static", "status": 200, "body": { "id": "{{request.params.id}}" } }
+  "$schema": "https://schemas.mockstar.dev/v0.6/mock.json",
+  "mocks": [
+    {
+      "id": "get-user-by-id",
+      "match": { "method": "GET", "path": "/users/:id" },
+      "response": { "kind": "static", "status": 200, "body": { "id": "{{request.params.id}}" } }
+    }
+  ]
 }
 ```
 
@@ -561,7 +588,7 @@ GraphQL APIs are modeled as a **single** `POST /graphql` mock entry. Individual 
 
 ### Match strategy
 
-Route on transport only — `method` and `path`. The parent entry's `match` does NOT route by operation name; operation dispatch happens exclusively via `scenarios[].when.body`. Optionally add `match.body.partial` to narrow the entry to requests that carry an `operationName` key (a truthy presence check, not a per-operation router):
+Route on transport only — `method` and `path`. The parent entry's `match` does NOT route by operation name; operation dispatch happens exclusively via `scenarios[].when.body`. Optionally add `match.body.partial` to narrow the entry to requests that carry an `operationName` key (not a per-operation router). `partial` is a deep-equality check on each key it names, so `{ "partial": { "operationName": "GetUser" } }` pins one operation. To test only that the key is present, use `{ "jsonpath": "$.operationName" }` (`jsonpath` alone is a presence test):
 
 ```jsonc
 {
@@ -584,7 +611,7 @@ Route on transport only — `method` and `path`. The parent entry's `match` does
         "status": 200,
         "body": {
           "data": {
-            "user": { "id": "{{request.params.id}}", "email": "alice@example.com" }
+            "user": { "id": "{{request.body.variables.id}}", "email": "alice@example.com" }
           }
         }
       }
@@ -613,10 +640,11 @@ Route on transport only — `method` and `path`. The parent entry's `match` does
 }
 ```
 
-Alternative: use `match.body.partial` to match on the `query` field when `operationName` is not always present:
+Alternative: when `operationName` is not always present, match on the query text with a scenario `when` that uses `contains`. `match.body.partial` is exact equality on the whole `query` string, so it never matches a real query:
 
 ```jsonc
-{ "match": { "body": { "partial": { "query": "mutation CreateOrder" } } } }
+{ "id": "CreateOrder", "when": { "body": { "query": { "contains": "mutation CreateOrder" } } },
+  "response": { "status": 200, "body": { "data": { "createOrder": { "id": "ord_001" } } } } }
 ```
 
 ### IR mapping rule

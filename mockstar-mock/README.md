@@ -3,7 +3,7 @@
 A skill that generates a runnable [mockstar](https://github.com/dhanesh/mockstar) mock server
 from any combination of API specs and documentation — OpenAPI (JSON/YAML), Postman collections,
 HAR captures, curl command files, GraphQL SDL/introspection, and prose docs (Markdown, PDF,
-DOCX, or a documentation URL).
+DOCX, or a documentation URL that the agent fetches first).
 
 It normalizes every input into a single Endpoint Inventory, uses `mockstar import` for OpenAPI
 and hand-authors the rest, infers scenarios/dynamic handlers/webhooks — including
@@ -46,12 +46,14 @@ npx skills add dhanesh/agent-skills --skill mockstar-mock
   (`bun add -g @dhaneshpurohit/mockstar`) or rely on `bunx` to fetch it on first run.
   **Package name matters:** the unscoped `mockstar` on npm is an unrelated project.
   Requires **>= 0.2.2**; configurable webhook signing schemes require **>= 0.3.0**.
-  Verified against **0.4.0**. Nothing this skill emits requires 0.4.0, but from 0.4.0 the
-  per-tenant `requestsPerSecond` cap is actually enforced (429 + `Retry-After`, default
-  10,000/s) — earlier versions declared the field and ignored it, so a generated mock driven
-  above that rate now gets throttled where it previously would not.
-- **uv** — used to run the Python helper that converts PDF/DOCX inputs and documentation URLs
-  to plain text.
+  Verified against **0.6.0**. One feature needs more: an object webhook body that carries
+  tokens with quoted arguments (`id("…")`, `id.named("…")`, `faker.pick([…])`) needs
+  **>= 0.6.1**. On 0.6.0 and below, config load fails, so the skill writes a string body there.
+  From 0.4.0 the per-tenant `requestsPerSecond` cap is actually enforced (429 +
+  `Retry-After`, default 10,000/s) — earlier versions declared the field and ignored it, so a
+  generated mock driven above that rate now gets throttled where it previously would not.
+- **uv** — used to run the Python helper that converts local PDF/DOCX inputs to plain text.
+  A documentation URL is fetched with `curl` first; the helper does not take URLs.
 - **curl** — used by the smoke test suite to verify every generated route.
 
 ## Usage
@@ -69,8 +71,8 @@ After installing the skill, invoke it from Claude Code by describing what you wa
 The skill produces a ready-to-run mockstar project. Boot it with:
 
 ```bash
-bunx mockstar ./my-mock
-bunx mockstar ./my-mock --deterministic --no-watch --port 3000
+bunx @dhaneshpurohit/mockstar ./my-mock/mocks --handlers ./my-mock/handlers
+bunx @dhaneshpurohit/mockstar ./my-mock/mocks --handlers ./my-mock/handlers --deterministic --no-watch --port 3000
 ```
 
 ## Flags
@@ -81,16 +83,19 @@ bunx mockstar ./my-mock --deterministic --no-watch --port 3000
 | `--tenant=<name>` | `default` | Tenant name for `mockstar import` (equals form required; space form is silently ignored by the importer) |
 | `--fidelity full\|static` | `full` | Full generates scenarios/handlers/webhooks; static is one response per route |
 | `--no-verify` | off | Skip boot-and-smoke verification |
-| `--deterministic` | off | Disable Faker randomness for reproducible responses |
+| `--deterministic` | off | Documents a reproducible run. `smoke.sh` always passes `--deterministic` to mockstar. Faker and `id()` are seeded per (tenant, mock entry, hit number), so the same request order gives the same bytes; values still differ between hits |
 | `--max-endpoints N` | unlimited | Cap the Endpoint Inventory; excess are reported |
+| `--runtime auto\|local\|docker` | `auto` | How mockstar runs: `auto` prefers Docker when the daemon and image are reachable, else `bunx` |
+| `--image <ref>` | `ghcr.io/dhanesh/mockstar:latest` | Docker image for the docker runtime; pin by digest for reproducibility |
 
 ## Output
 
 ```
 mock-<service>/
-  <tenant>/           # mockstar mock JSON files
-    handlers/         # TypeScript dynamic handlers (--fidelity full)
-  routes.tsv
+  mocks/
+    <tenant>/         # mockstar mock JSON files: { "$schema", "mocks": [entries] }
+    routes.tsv        # routes used for smoke testing
+  handlers/           # TypeScript dynamic handlers (--fidelity full)
   MOCKSTAR-COVERAGE.md
 ```
 
@@ -103,6 +108,8 @@ speculative inferences that should be reviewed before using in production.
 - [mockstar repository](https://github.com/dhanesh/mockstar) — CLI reference, config schema, and Tier 2 token docs.
 
 ## Changes
+
+- **1.2.1.** Docs match mockstar 0.6.0. The mock file shape (`{ "$schema", "mocks": [...] }`) is stated and the `$schema` example is fixed. The README run command and output layout are corrected. A Stage 0 feature gate covers object webhook bodies with quoted-arg tokens (mockstar >= 0.6.1). Added: deterministic-mode wording, `enhance` output, webhook id correlation, `allowHttp`/`allowPrivateNetworks`, default retries, the shared `X-Mockstar-Delivery-Id`, template header and faker rules, GraphQL `partial`/`contains` fixes, the Colima `$HOME` mount limit, and the missing `HandlerHelpers` export. Test fixes: `test_smoke.sh` no longer leaks its stub server, and `test_e2e.sh` fails when `enhance` fails and uses `mktemp` logs.
 
 - **1.2.0.** Opt-in per-scenario `contentEncoding` (gzip, deflate, br) with correctly compressed bodies. gzip and deflate are built at generation time by `assets/encode_body.py`. br and negotiation run through a dynamic handler, because mockstar static responses cannot carry compressed bytes; the coverage report lists that gap and `references/mockstar-mapping.md` proposes the mockstar feature. `assets/smoke.sh` decodes encoded routes. `assets/header_coverage.py` adds a per-mock list of matched request headers, spelled as written, so a consumer can see whether header casing is exercised.
 - **1.1.5.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

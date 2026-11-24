@@ -15,7 +15,14 @@ if sh "$SMOKE" 2>/dev/null; then echo "FAIL: expected usage error"; exit 1; else
 # 2) route-check against a stub server (python http.server returns 200 for GET /, 404 otherwise)
 python3 -m http.server 8731 >/dev/null 2>&1 &
 STUB=$!
-trap 'kill "$STUB" 2>/dev/null || true' EXIT
+DOCKER_MOCKS=""
+DOCKER_ROUTES=""
+cleanup() {
+  kill "$STUB" 2>/dev/null || true
+  [ -z "$DOCKER_MOCKS" ] || rm -rf "$DOCKER_MOCKS"
+  [ -z "$DOCKER_ROUTES" ] || rm -f "$DOCKER_ROUTES"
+}
+trap cleanup EXIT
 sleep 1
 
 ROUTES="$(mktemp)"
@@ -40,13 +47,6 @@ if docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
 fi
 
 FIXTURE="$DIR/fixtures/petstore-mini.yaml"
-DOCKER_MOCKS=""
-DOCKER_ROUTES=""
-cleanup_docker_tmp() {
-  [ -z "$DOCKER_MOCKS" ] || rm -rf "$DOCKER_MOCKS"
-  [ -z "$DOCKER_ROUTES" ] || rm -f "$DOCKER_ROUTES"
-}
-
 if [ "$DOCKER_AVAILABLE" -eq 1 ]; then
   # Verify image is reachable (may already be pulled)
   IMAGE="${MOCKSTAR_SMOKE_IMAGE:-ghcr.io/dhanesh/mockstar:latest}"
@@ -54,8 +54,8 @@ if [ "$DOCKER_AVAILABLE" -eq 1 ]; then
     echo "SKIP: docker smoke (image unreachable)"
   else
     # Build a mocks dir from the petstore fixture using documented layout (<out>/mocks/<tenant>/)
-    DOCKER_MOCKS="$(mktemp -d)"
-    trap 'cleanup_docker_tmp' EXIT
+    # Colima mounts only $HOME, so keep the bind-mounted dir under it.
+    DOCKER_MOCKS="$(mktemp -d "${HOME}/.mockstar-smoke.XXXXXX")"
     if ! bunx @dhaneshpurohit/mockstar import "$FIXTURE" "$DOCKER_MOCKS/mocks" --tenant=default >/dev/null 2>&1; then
       echo "SKIP: docker smoke (mockstar import failed)"
     else
