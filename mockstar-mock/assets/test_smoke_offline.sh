@@ -37,7 +37,7 @@ fi
 PORT="$(python3 -c "
 import socket
 s = socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1]); s.close()")"
-(cd "$WORK" && python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
+(cd "$WORK" && exec python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
 STUB=$!
 BASE="http://127.0.0.1:$PORT"
 
