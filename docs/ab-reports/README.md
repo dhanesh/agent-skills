@@ -49,6 +49,7 @@ Each report records how one branch changed the behaviour of the skills it touche
 
 ### jev-agent-setup
 
+- 2026-11-25 [docs/jev-block-trim](2026-11-25-docs-jev-block-trim.md): held, 0 improved of 4 rows, eval PASS 6/6 → PASS 6/6
 - 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): improved, 3 improved of 4 rows, eval PASS 6/6 → PASS 6/6
 
 ### knowledge-gardener
@@ -101,6 +102,7 @@ Each report records how one branch changed the behaviour of the skills it touche
 
 ## All reports
 
+- 2026-11-25 [docs/jev-block-trim](2026-11-25-docs-jev-block-trim.md): `AB_RESULT: PASS`, 1 skill(s)
 - 2026-11-07 [factory/run5-base](2026-11-07-factory-run5-base.md): `AB_RESULT: PASS`, 12 skill(s)
 - 2026-11-07 [factory/run4-base](2026-11-07-factory-run4-base.md): `AB_RESULT: PASS`, 4 skill(s)
 - 2026-11-06 [factory/run2-base](2026-11-06-factory-run2-base.md): `AB_RESULT: PASS`, 12 skill(s)
