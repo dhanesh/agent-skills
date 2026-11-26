@@ -109,6 +109,7 @@ speculative inferences that should be reviewed before using in production.
 
 ## Changes
 
+- **1.2.3.** Follows mockstar 0.7.0: the handler template imports `HandlerHelpers` from the package (a local type remains for <= 0.6.x), handler tests can use the exported `createFaker`, and tenancy modes can be set with `--tenancy-modes` / `MOCKSTAR_TENANCY_MODES`. `mockstar init` no longer writes `mockstar.config.json`.
 - **1.2.2.** Delivery headers follow mockstar 0.6.2 (#59): `X-Mockstar-Delivery-Id` is one id per delivery, and the triggering request id is in the new `X-Mockstar-Request-Id`. The shared-id warning now applies only to mockstar 0.6.1 and below.
 - **1.2.1.** Docs match mockstar 0.6.0. The mock file shape (`{ "$schema", "mocks": [...] }`) is stated and the `$schema` example is fixed. The README run command and output layout are corrected. A Stage 0 feature gate covers object webhook bodies with quoted-arg tokens (mockstar >= 0.6.1). Added: deterministic-mode wording, `enhance` output, webhook id correlation, `allowHttp`/`allowPrivateNetworks`, default retries, the shared `X-Mockstar-Delivery-Id`, template header and faker rules, GraphQL `partial`/`contains` fixes, the Colima `$HOME` mount limit, and the missing `HandlerHelpers` export. Test fixes: `test_smoke.sh` no longer leaks its stub server, and `test_e2e.sh` fails when `enhance` fails and uses `mktemp` logs.
 

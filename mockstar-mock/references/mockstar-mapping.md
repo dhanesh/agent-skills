@@ -224,15 +224,12 @@ When an IR endpoint record has a `statefulHints` field, the generator produces a
 ```ts
 // handlers/postOrders.ts
 import type { Context } from 'hono';
-
-// The package does not export HandlerHelpers yet (upstream issue
-// https://github.com/dhanesh/mockstar/issues/61), so declare the part you use.
-// At runtime `helpers` is { tenant, requestId, faker }.
-type HandlerHelpers = {
-  tenant: string;
-  requestId: string;
-  faker: { uuid(): string; email(): string; name(): string; integer(min: number, max: number): number };
-};
+// mockstar >= 0.7.0 exports the helper type. `helpers` is { tenant, requestId, faker };
+// faker has uuid, email, name, integer, pick, boolean, dateIso.
+import type { HandlerHelpers } from '@dhaneshpurohit/mockstar';
+// On mockstar <= 0.6.x, drop the import above and declare the part you use instead:
+// type HandlerHelpers = { tenant: string; requestId: string;
+//   faker: { uuid(): string; email(): string; name(): string; integer(min: number, max: number): number } };
 
 // In-memory store — resets on server restart. Replace with a persistent
 // store if cross-request durability is required.
@@ -254,6 +251,9 @@ Rules:
 - Use **named exports only** — `export default` is ignored by mockstar.
 - Generated handlers are marked `"confidence": "inferred"` in the IR coverage report because the stateful behaviour is reasoned from `statefulHints`, not an explicit source spec.
 - Await all promises; fire-and-forget rejections terminate the server.
+- To unit-test a handler on mockstar >= 0.7.0, pass `createFaker({ deterministic: true, seed: 1 })`
+  (also exported) as `helpers.faker`, so values are stable. With pnpm, add `hono` to the
+  project's own dependencies to import its `Context` type.
 
 ---
 
@@ -683,13 +683,15 @@ The generator assigns `priority: 0` by default. Increase it manually (or via a p
 
 mockstar resolves the tenant as the **first** routing step, before any path matching. The CLI
 `serve` path enables two modes by default (`path` + `header`); no `mockstar.config.json` is
-required. A request with no selector falls back to the `default` tenant.
+required (from 0.7.0 `mockstar init` no longer writes one). On mockstar >= 0.7.0 choose the modes
+with `--tenancy-modes path,header,subdomain` or `MOCKSTAR_TENANCY_MODES`, tried in order. A
+request with no selector falls back to the `default` tenant.
 
 | Mode | How the consumer selects tenant `<t>` | Example |
 |---|---|---|
 | Header (default) | `x-mockstar-tenant: <t>` request header | `curl -H 'x-mockstar-tenant: petstore' /pet/1` |
 | Path (default) | `/t/<t>` path prefix (stripped before matching) | `curl /t/petstore/pet/1` |
-| Subdomain (off by default) | `<t>.host` | `curl -H 'Host: petstore.local' /pet/1` |
+| Subdomain (off by default; `--tenancy-modes subdomain,...` on >= 0.7.0) | first label of the host; IP hosts are skipped | `curl -H 'Host: petstore.localhost' /pet/1` |
 | _none_ | falls back to the `default` tenant, served at the bare path | `curl /pet/1` (tenant `default`) |
 
 **Rule:** the mock files live at `mocks/<tenant>/*.json`, but the *directory* name is not part of
