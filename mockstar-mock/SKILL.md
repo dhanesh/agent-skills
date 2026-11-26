@@ -6,7 +6,7 @@ compatibility: Requires Bun (`bunx @dhaneshpurohit/mockstar` >= 0.2.2; >= 0.3.0 
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.2.2"
+  version: "1.2.3"
   tags: "mockstar,mock-server,openapi,postman,har,graphql,api-testing"
 ---
 
@@ -448,13 +448,14 @@ mockstar runs tenant resolution as the **first** routing step, with default mode
   - **Path mode:** prefix the path with `/t/<tenant>` — `GET /t/petstore/pet/findByStatus`
     (the `/t/<tenant>` prefix is stripped before route matching).
   - **Header mode:** send `x-mockstar-tenant: <tenant>` — `GET /pet/findByStatus` with the header.
-  - (Subdomain mode `<tenant>.host` exists but is off by default.)
+  - (Subdomain mode `<tenant>.host` is off by default. On mockstar >= 0.7.0, enable it with
+    `--tenancy-modes subdomain,path,header` or `MOCKSTAR_TENANCY_MODES`.)
 
 **Consequence for this skill:** if `--tenant` is not `default`, every consumer — the smoke test,
 the coverage-report examples, and whoever calls the mock — MUST use a selector. The coverage
 report's Summary states the tenant and the exact selector to use. When in doubt, use `default`
 as the tenant so bare-path access works with zero configuration. No `mockstar.config.json` is
-required for tenant routing: the CLI `serve` path always enables `path` + `header` modes.
+required for tenant routing: the CLI `serve` path enables `path` + `header` modes by default.
 
 ### Ways to run mockstar
 
